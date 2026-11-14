@@ -4917,7 +4917,11 @@ async fn drive_run(
             } else {
                 "turn interrupted"
             },
-            analytics_turn.finish(),
+            analytics_turn.finish_with_status(if final_status == SessionStatus::Errored {
+                DoneStatus::Errored
+            } else {
+                DoneStatus::Interrupted
+            }),
         );
     }
 

@@ -60,6 +60,8 @@ jobs:
       run:
         shell: bash
     env:
+      ZUSE_POSTHOG_KEY: ${{ vars.ZUSE_POSTHOG_KEY }}
+      ZUSE_POSTHOG_HOST: ${{ vars.ZUSE_POSTHOG_HOST }}
       RELEASE_TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
     steps:

@@ -358,6 +358,12 @@ impl EngineBackend for RemoteEngine {
     }
 }
 
+enum DesktopAnalyticsMessage {
+    Interval,
+    Events(String, Vec<zuse_analytics::desktop::Event>),
+    Drain(tokio::sync::oneshot::Sender<()>),
+}
+
 /// Cheaply clonable handle to whichever backend won the probe.
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -1045,6 +1051,10 @@ pub struct AppState {
     /// Notifies at clock-driven transitions (see [`Self::watch_clock_transitions`]).
     clock: ClockTransitions,
     engine: Option<EngineHandle>,
+    pub(crate) desktop_analytics: zuse_analytics::desktop::Lifecycle,
+    desktop_events: Option<tokio::sync::mpsc::Sender<DesktopAnalyticsMessage>>,
+    pub(crate) desktop_epoch: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    desktop_delivery: Option<Task<()>>,
     watch_tasks: Vec<Task<()>>,
     transcript_task: Option<Task<()>>,
     change_requests: ChangeRequestClientState,
@@ -1185,6 +1195,10 @@ impl AppState {
             data_dir: None,
             clock: ClockTransitions::default(),
             engine: None,
+            desktop_analytics: Default::default(),
+            desktop_events: None,
+            desktop_epoch: Default::default(),
+            desktop_delivery: None,
             watch_tasks: Vec::new(),
             transcript_task: None,
             change_requests: ChangeRequestClientState::default(),
@@ -3052,6 +3066,218 @@ impl AppState {
         gate_phase(&self.connection, self.workspace_scope, self.auth.as_ref())
     }
 
+    /// No local collector: the active engine owns identity, consent and delivery.
+    pub(crate) fn record_desktop_events(
+        &mut self,
+        events: Vec<zuse_analytics::desktop::Event>,
+        _cx: &mut Context<Self>,
+    ) {
+        if events.is_empty() {
+            return;
+        }
+        let Some(epoch) = self.desktop_epoch.lock().unwrap().clone() else {
+            return;
+        };
+        if let Some(sender) = &self.desktop_events {
+            let _ = sender.try_send(DesktopAnalyticsMessage::Events(epoch, events));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_test_desktop_delivery(&mut self, cx: &mut Context<Self>) {
+        if let Some(engine) = self.engine.clone() {
+            self.start_desktop_delivery(engine, cx);
+        }
+    }
+
+    pub(crate) fn start_desktop_delivery(&mut self, engine: EngineHandle, cx: &mut Context<Self>) {
+        *self.desktop_epoch.lock().unwrap() = None;
+        self.desktop_delivery = None;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<DesktopAnalyticsMessage>(64);
+        self.desktop_events = Some(sender);
+        self.desktop_delivery = Some(cx.spawn(async move |this, cx| {
+            // No interaction observed before this response may acquire its epoch.
+            let read = engine.client().call_scoped(
+                zuse_rpc::methods::GET_ANALYTICS_SETTINGS,
+                serde_json::json!({}),
+            );
+            let timer = cx
+                .background_executor()
+                .timer(std::time::Duration::from_millis(750));
+            let status = match futures::future::select(Box::pin(read), Box::pin(timer)).await {
+                futures::future::Either::Left((Ok(value), _)) => {
+                    serde_json::from_value::<zuse_analytics::Status>(value).ok()
+                }
+                _ => None,
+            };
+            if let Some(status) = status.filter(|status| !status.collection_epoch.is_empty()) {
+                let _ = this.update(cx, |state, cx| {
+                    *state.desktop_epoch.lock().unwrap() = Some(status.collection_epoch);
+                    state.desktop_analytics.rebind(std::time::Instant::now());
+                    let events = state.desktop_analytics.ready();
+                    state.record_desktop_events(events, cx);
+                });
+            }
+            let mut interval_deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(60);
+            loop {
+                // Prioritize an elapsed deadline even while the event queue stays full.
+                let message = if std::time::Instant::now() >= interval_deadline {
+                    Some(DesktopAnalyticsMessage::Interval)
+                } else {
+                    let timer = cx.background_executor().timer(
+                        interval_deadline.saturating_duration_since(std::time::Instant::now()),
+                    );
+                    match futures::future::select(Box::pin(receiver.recv()), Box::pin(timer)).await
+                    {
+                        futures::future::Either::Left((message, _)) => message,
+                        futures::future::Either::Right(_) => {
+                            Some(DesktopAnalyticsMessage::Interval)
+                        }
+                    }
+                };
+                match message {
+                    Some(DesktopAnalyticsMessage::Interval) => {
+                        interval_deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        let read = engine.client().call_scoped(
+                            zuse_rpc::methods::GET_ANALYTICS_SETTINGS,
+                            serde_json::json!({}),
+                        );
+                        let timeout = cx
+                            .background_executor()
+                            .timer(std::time::Duration::from_millis(250));
+                        if let futures::future::Either::Left((Ok(value), _)) =
+                            futures::future::select(Box::pin(read), Box::pin(timeout)).await
+                        {
+                            if let Ok(status) = serde_json::from_value::<zuse_analytics::Status>(
+                                value,
+                            )
+                            .and_then(|status| {
+                                if status.collection_epoch.is_empty() {
+                                    Err(serde::de::Error::custom("missing epoch"))
+                                } else {
+                                    Ok(status)
+                                }
+                            }) {
+                                let _ = this.update(cx, |state, cx| {
+                                    if state.desktop_epoch.lock().unwrap().as_ref()
+                                        != Some(&status.collection_epoch)
+                                    {
+                                        state.desktop_analytics.rebind(std::time::Instant::now());
+                                    }
+                                    let first = state.desktop_epoch.lock().unwrap().is_none();
+                                    *state.desktop_epoch.lock().unwrap() =
+                                        Some(status.collection_epoch);
+                                    if first {
+                                        let events = state.desktop_analytics.ready();
+                                        state.record_desktop_events(events, cx);
+                                    }
+                                });
+                            }
+                        }
+                        if this
+                            .update(cx, |state, cx| {
+                                let events =
+                                    state.desktop_analytics.interval(std::time::Instant::now());
+                                state.record_desktop_events(events, cx);
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Some(DesktopAnalyticsMessage::Events(epoch, events)) => {
+                        for event in events {
+                            let request = engine.client().call_scoped(
+                                zuse_rpc::methods::RECORD_DESKTOP_EVENT,
+                                serde_json::to_value(zuse_analytics::desktop::Observation {
+                                    collection_epoch: epoch.clone(),
+                                    event,
+                                    client: Some(zuse_analytics::desktop::Client::current()),
+                                })
+                                .unwrap(),
+                            );
+                            let timer = cx
+                                .background_executor()
+                                .timer(std::time::Duration::from_millis(250));
+                            if let futures::future::Either::Left((Ok(value), _)) =
+                                futures::future::select(Box::pin(request), Box::pin(timer)).await
+                            {
+                                if let Ok(status) =
+                                    serde_json::from_value::<zuse_analytics::Status>(value)
+                                        .and_then(|status| {
+                                            if status.collection_epoch.is_empty() {
+                                                Err(serde::de::Error::custom("missing epoch"))
+                                            } else {
+                                                Ok(status)
+                                            }
+                                        })
+                                {
+                                    let _ = this.update(cx, |state, _| {
+                                        if state.desktop_epoch.lock().unwrap().as_ref()
+                                            != Some(&status.collection_epoch)
+                                        {
+                                            state
+                                                .desktop_analytics
+                                                .rebind(std::time::Instant::now());
+                                        }
+                                        *state.desktop_epoch.lock().unwrap() =
+                                            Some(status.collection_epoch)
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    Some(DesktopAnalyticsMessage::Drain(done)) => {
+                        let _ = done.send(());
+                    }
+                    None => break,
+                }
+            }
+        }));
+    }
+
+    pub(crate) fn finish_desktop_analytics(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Option<tokio::sync::oneshot::Receiver<()>> {
+        let events = self.desktop_analytics.close(std::time::Instant::now());
+        self.record_desktop_events(events, cx);
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        self.desktop_events
+            .as_ref()?
+            .try_send(DesktopAnalyticsMessage::Drain(sender))
+            .ok()?;
+        Some(receiver)
+    }
+
+    pub(crate) fn desktop_foreground(&mut self, active: bool, cx: &mut Context<Self>) {
+        let events = self
+            .desktop_analytics
+            .foreground(active, std::time::Instant::now());
+        self.record_desktop_events(events, cx);
+    }
+
+    pub(crate) fn desktop_onboarding(
+        &mut self,
+        step: Option<zuse_analytics::desktop::OnboardingStep>,
+        cx: &mut Context<Self>,
+    ) {
+        let events = self.desktop_analytics.onboarding(step);
+        self.record_desktop_events(events, cx);
+    }
+
+    pub(crate) fn desktop_screen(
+        &mut self,
+        screen: zuse_analytics::desktop::Screen,
+        section: Option<zuse_analytics::desktop::SettingsPage>,
+        cx: &mut Context<Self>,
+    ) {
+        let events = self.desktop_analytics.screen(screen, section);
+        self.record_desktop_events(events, cx);
+    }
+
     pub fn engine(&self) -> Option<&EngineHandle> {
         self.engine.as_ref()
     }
@@ -3068,6 +3294,9 @@ impl AppState {
         self.zots.clear();
         self.zot_watches.clear();
         self.engine = None;
+        *self.desktop_epoch.lock().unwrap() = None;
+        self.desktop_events = None;
+        self.desktop_delivery = None;
         self.chat_configuration = Default::default();
         self.watch_tasks.clear();
         self.project_creation_watches.clear();
@@ -3349,6 +3578,7 @@ impl AppState {
         }
         self.initial_cloud_chat = handle.inner.initial_chat();
         self.engine = Some(handle.clone());
+        self.start_desktop_delivery(handle.clone(), cx);
         self.watch_project_creations(engine_info.device_id.clone(), cx);
         let mut watch_tasks = Vec::with_capacity(10);
         if let Some(task) = spawn_deferred_engine_watch(cx, handle.clone()) {

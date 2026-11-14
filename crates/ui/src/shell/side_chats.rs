@@ -436,8 +436,12 @@ impl Shell {
             .entry(key.clone())
             .or_default()
             .push(RightSurface::SideChat(id));
-        self.panels
-            .update(&key, |p| p.right_active = RightSurface::SideChat(id));
+        if key == self.panel_key(cx) {
+            self.set_right_active(RightSurface::SideChat(id), cx);
+        } else {
+            self.panels
+                .update(&key, |p| p.right_active = RightSurface::SideChat(id));
+        }
         cx.notify();
     }
 
