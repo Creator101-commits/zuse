@@ -14388,6 +14388,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "zuse-browser-page"
+version = "0.26.0"
+dependencies = [
+ "base64 0.22.1",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "zuse-cli"
 version = "0.26.0"
 dependencies = [
@@ -14473,6 +14481,7 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+ "zuse-browser-page",
  "zuse-cloud-projection",
  "zuse-cloud-runtime",
  "zuse-doc",
@@ -14680,6 +14689,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeroize",
  "zip",
+ "zuse-browser-page",
  "zuse-cloud-projection",
  "zuse-doc",
  "zuse-harness",

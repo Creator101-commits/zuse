@@ -1,0 +1,88 @@
+:root{
+	color-scheme:light dark;
+	--bg:#f4f4f2;
+	--fg:#181713;
+	--muted:#6c6c64;
+	--grid:rgb(24 23 19 / 12%);
+	--accent:#caff00;
+	--danger:#ff7a6b;
+	--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+	--font-mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){
+	:root{--bg:#0d0d0d;--fg:#f2f2f2;--muted:#9a9a93;--grid:rgb(242 242 242 / 9%)}
+}
+*{box-sizing:border-box}
+body{
+	margin:0;min-height:100vh;min-height:100svh;display:grid;place-items:center;
+	padding:2.5rem 1.25rem;background:var(--bg);color:var(--fg);
+	font-family:var(--font-sans);-webkit-font-smoothing:antialiased;
+}
+.stage{position:relative;display:grid;justify-items:center;gap:1.75rem;width:100%}
+.stage::before{
+	content:"";position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.55;
+	background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+	background-size:24px 24px;
+	-webkit-mask-image:radial-gradient(circle at center,#000,transparent 74%);
+	mask-image:radial-gradient(circle at center,#000,transparent 74%);
+}
+.stage>*{position:relative;z-index:1}
+/* The artwork and its footer share one column, so their edges line up. */
+.piece{display:grid;gap:1.125rem;width:min(100%,var(--w))}
+.piece>:first-child{width:100%}
+.footer{
+	display:flex;align-items:center;justify-content:space-between;gap:1rem;
+	padding-top:.75rem;border-top:1px dashed color-mix(in srgb,var(--fg) 24%,transparent);
+	font-family:var(--font-mono);font-size:.625rem;font-weight:700;line-height:1;
+	letter-spacing:.08em;text-transform:uppercase;
+	animation:footer-in 420ms 160ms cubic-bezier(0.23,1,0.32,1) both;
+}
+@keyframes footer-in{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.footer span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.footer strong{flex:none;color:var(--fg)}
+/* Ordered-dither shading on the printed paper: two offset dot grids that
+   thicken toward the lower corner, like a halftone pass. */
+.halftone{position:relative;isolation:isolate}
+.halftone::before{
+	content:"";position:absolute;inset:0;z-index:0;pointer-events:none;
+	background:
+		radial-gradient(circle,rgb(24 23 19 / 30%) .65px,transparent 1px) 0 0/3px 3px,
+		radial-gradient(circle,rgb(24 23 19 / 22%) .65px,transparent 1px) 1.5px 1.5px/3px 3px;
+	-webkit-mask-image:linear-gradient(155deg,transparent 28%,rgb(0 0 0 / 55%) 62%,#000 100%);
+	mask-image:linear-gradient(155deg,transparent 28%,rgb(0 0 0 / 55%) 62%,#000 100%);
+}
+.halftone>*{position:relative;z-index:1}
+/* A dithered sphere lit from the upper left: four offset dot lattices share
+   the disc, each starting further from the highlight, so density steps up
+   into the shadow like an ordered-dither pass. */
+.dither-art{position:relative;overflow:hidden;color:var(--ink)}
+.dither-art i{
+	--disc:radial-gradient(circle at 50% 54%,#000 30%,transparent calc(30% + .5px));
+	--lit:radial-gradient(circle at 40% 42%,transparent var(--r),#000 calc(var(--r) + .5px));
+	position:absolute;inset:0;opacity:.6;
+	background:radial-gradient(circle,currentColor 0 .85px,transparent 1.2px) var(--o)/4px 4px;
+	-webkit-mask-image:var(--disc),var(--lit);-webkit-mask-composite:source-in;
+	mask-image:var(--disc),var(--lit);mask-composite:intersect;
+}
+.dither-art i:nth-child(1){--o:0 0;--r:0%}
+.dither-art i:nth-child(2){--o:2px 2px;--r:13%}
+.dither-art i:nth-child(3){--o:2px 0;--r:22%}
+.dither-art i:nth-child(4){--o:0 2px;--r:29%}
+.micro{
+	font-family:var(--font-mono);font-size:.4375rem;font-weight:700;line-height:1;
+	letter-spacing:.09em;text-transform:uppercase;opacity:.62;
+}
+.barcode{
+	height:22px;width:100%;
+	background:repeating-linear-gradient(90deg,currentColor 0 2px,transparent 2px 4px,currentColor 4px 5px,transparent 5px 8px,currentColor 8px 12px,transparent 12px 14px);
+}
+.dither{
+	position:fixed;inset:0;z-index:0;width:100vw;height:100vh;pointer-events:none;
+	image-rendering:pixelated;animation:dither-in .9s ease-out both;
+}
+.dithered .stage::before{display:none}
+@keyframes dither-in{from{opacity:0}to{opacity:1}}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media (prefers-reduced-motion:reduce){
+	*{animation:none!important;transition:none!important}
+}

@@ -21,6 +21,7 @@ zuse-engine = { workspace = true, optional = true }
 zuse-serve = { workspace = true, optional = true }
 zuse-cloud-runtime = { path = "../cloud-runtime", features = ["engine"] }
 zuse-providers.workspace = true
+zuse-browser-page.workspace = true
 zuse-rpc = { workspace = true, optional = true }
 tempfile.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }

@@ -2347,30 +2347,85 @@ async fn checkout_complete(
             chrono::Utc::now().timestamp_millis(),
         )
         .await;
-    let (title, detail) = match summary {
-        Some(summary) if summary.status=="active" => (
+    use zuse_browser_page::{Amount, Payment, Receipt};
+    let amount = summary.as_ref().map(|summary| Amount {
+        cents: summary.amount_cents,
+        currency: &summary.currency,
+    });
+    let reference = summary
+        .as_ref()
+        .map(|summary| order_reference(&summary.checkout_id));
+    let (payment, status, message, hint) = match summary.as_ref().map(|s| s.status.as_str()) {
+        Some("active") => (
+            Payment::Confirmed,
             "Subscription active",
-            "Return to Zuse and refresh Cloud. Open the billing portal for your payment receipt and taxes.".into(),
+            "Your subscription is active. Zuse picks it up automatically — return to Zuse and refresh Cloud.",
+            "Open the billing portal from Zuse for your payment receipt and taxes.",
         ),
-        Some(summary) if summary.status == "paid" => (
+        Some("paid") => (
+            Payment::Confirmed,
             "Payment confirmed",
-            format!(
-                "{} {}.{:02}. Return to Zuse and refresh Cloud to see your subscription.",
-                summary.currency.to_uppercase(),
-                summary.amount_cents / 100,
-                summary.amount_cents % 100
-            ),
+            "Return to Zuse and refresh Cloud to see your subscription. You can close this tab.",
+            "Provisioning starts automatically once payment is confirmed.",
         ),
-        Some(summary) if summary.status == "failed" => (
+        Some("failed") => (
+            Payment::Failed,
             "Checkout was not completed",
-            "Return to Zuse to start checkout again.".into(),
+            "This checkout did not complete. Return to Zuse to start checkout again.",
+            "Nothing was charged.",
         ),
         _ => (
+            Payment::Pending,
             "Payment confirmation pending",
-            "Return to Zuse and refresh Cloud once your payment is confirmed.".into(),
+            "We're waiting for the payment to confirm. Return to Zuse and refresh Cloud once it does.",
+            "You can close this tab. Zuse picks up the payment automatically.",
         ),
     };
-    ([ (header::CONTENT_TYPE,"text/html; charset=utf-8"),(header::CACHE_CONTROL,"no-store"),(header::CONTENT_SECURITY_POLICY,"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"),(header::REFERRER_POLICY,"no-referrer") ],format!("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1'><title>Zuse checkout</title><body style='font-family:system-ui;max-width:480px;margin:80px auto;padding:24px'><h1>{title}</h1><p>{detail}</p></body></html>")).into_response()
+    let html = zuse_browser_page::receipt(&Receipt {
+        payment,
+        status,
+        product: "Zuse Cloud subscription",
+        amount: if payment == Payment::Failed {
+            None
+        } else {
+            amount
+        },
+        reference: reference.as_deref(),
+        message,
+        hint,
+    });
+    browser_page_response(html)
+}
+
+/// A short, quotable order reference: the checkout id's last eight
+/// alphanumerics, uppercased.
+fn order_reference(checkout_id: &str) -> String {
+    let tail: Vec<char> = checkout_id
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect();
+    tail[tail.len().saturating_sub(8)..]
+        .iter()
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// Headers for the standalone browser pages that billing returns land on.
+fn browser_page_response(html: String) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                zuse_browser_page::content_security_policy(),
+            ),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        html,
+    )
+        .into_response()
 }
 
 async fn prepaid_balance(
@@ -2423,7 +2478,15 @@ async fn prepaid_complete(Query(query): Query<PrepaidReturn>) -> Response {
     } else {
         "Credits apply automatically to future Zuse invoices, including subscriptions."
     };
-    ([(header::CONTENT_TYPE,"text/html; charset=utf-8"),(header::CACHE_CONTROL,"no-store"),(header::CONTENT_SECURITY_POLICY,"default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"),(header::REFERRER_POLICY,"no-referrer")],format!("<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1'><title>Zuse credits</title><body style='font-family:system-ui;max-width:480px;margin:80px auto;padding:24px'><h1>Thanks for your purchase</h1><p>Your balance will update once payment is confirmed. Return to Zuse and refresh Cloud to see your credits.</p><p>{funding}</p></body></html>")).into_response()
+    browser_page_response(zuse_browser_page::receipt(&zuse_browser_page::Receipt {
+        payment: zuse_browser_page::Payment::Pending,
+        status: "Thanks for your purchase",
+        product: "Zuse credits",
+        amount: None,
+        reference: None,
+        message: "Your balance updates once payment is confirmed. Return to Zuse and refresh Cloud to see your credits.",
+        hint: funding,
+    }))
 }
 
 async fn project_list(
@@ -2781,7 +2844,13 @@ async fn github_callback(
 }
 fn github_browser_response(html: String) -> Response {
     let mut response = axum::response::Html(html).into_response();
-    response.headers_mut().insert(header::CONTENT_SECURITY_POLICY,HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"));
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(zuse_browser_page::content_security_policy()),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     // no-referrer serializes Origin as null on native form POSTs. Keep the
     // exact origin check while excluding OAuth codes/state paths from referrers.
     response.headers_mut().insert(

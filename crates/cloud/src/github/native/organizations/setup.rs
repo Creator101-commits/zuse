@@ -127,5 +127,16 @@ mod tests {
 }
 
 pub fn setup_notice() -> String {
-    "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>GitHub installation updated · Zuse</title><body style='background:#121318;color:#f2f3f7;font:16px system-ui;padding:48px'><main style='max-width:440px;margin:10vh auto'><h1>GitHub installation updated</h1><p>Return to Zuse and refresh GitHub. If organization approval is still pending, check again after an administrator approves it.</p><p>You can close this tab.</p></main></body></html>".into()
+    zuse_browser_page::card(&zuse_browser_page::Card {
+        hint: Some(
+            "If organization approval is still pending, check again after an administrator approves it. You can close this tab.",
+        ),
+        ..zuse_browser_page::Card::notice(
+            "GitHub",
+            "Updated",
+            zuse_browser_page::Tone::Success,
+            "GitHub installation updated",
+            "Return to Zuse and refresh GitHub to finish connecting.",
+        )
+    })
 }

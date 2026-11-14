@@ -12,14 +12,7 @@ pub struct BrowserTransaction {
     pub owner: String,
     pub operation_id: String,
 }
-fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
+use zuse_browser_page::{Action, Card, Row as PageRow, Tone};
 impl NativeGithub {
     pub fn browser_origin_matches(&self, origin: &str) -> bool {
         origin == self.config.origin.origin().ascii_serialization()
@@ -52,11 +45,18 @@ impl NativeGithub {
         let id: String = row.try_get("operation_id")?;
         let phase: String = row.try_get("phase")?;
         if phase == "complete" {
-            return Ok(page(
-                "GitHub connected",
-                "Return to Zuse to choose repositories and continue.",
-                "",
-            ));
+            return Ok(zuse_browser_page::card(&Card {
+                hint: Some(
+                    "Switch back to your open Zuse window to choose repositories. You can change repository access later in GitHub settings.",
+                ),
+                ..Card::notice(
+                    "GitHub",
+                    "Connected",
+                    Tone::Success,
+                    "GitHub connected",
+                    "Return to Zuse to choose repositories and continue. You can close this tab.",
+                )
+            }));
         }
         if phase != "choosing" {
             return Err(ApiError::conflict("github_operation_unavailable"));
@@ -66,7 +66,7 @@ impl NativeGithub {
             &row.try_get::<String, _>("sealed_pending")?,
         )?;
         let user = public_user(&pending.profile)?;
-        let mut choices = String::new();
+        let mut installations: Vec<(i64, String, bool)> = Vec::new();
         for page_number in 1..=100 {
             let response = self
                 .get(
@@ -96,7 +96,8 @@ impl NativeGithub {
                 else {
                     continue;
                 };
-                choices.push_str(&format!("<form method=post action='/v1/cloud/github/browser/select'><input type=hidden name=state value='{}'><input type=hidden name=installationId value='{installation_id}'><button type=submit>Use {}</button></form>",escape(state),escape(login)));
+                let organization = installation["account"]["type"].as_str() == Some("Organization");
+                installations.push((installation_id, login.to_owned(), organization));
             }
             if entries.len() < 100 {
                 break;
@@ -106,26 +107,70 @@ impl NativeGithub {
             }
         }
         let owner: String = row.try_get("owner_id")?;
-        let workspace = if owner.starts_with("organization:") {
-            format!(
-                "organization workspace {}",
-                escape(owner.trim_start_matches("organization:"))
-            )
-        } else {
-            "Personal workspace".into()
+        let workspace = match owner.strip_prefix("organization:") {
+            Some(organization) => format!("Organization {organization}"),
+            None => "Personal".into(),
         };
-        let description = format!(
-            "Connect GitHub account <strong>{}</strong> to your {workspace} in Zuse. Continue only if you started this connection from your own Zuse app.",
-            escape(&user.login)
-        );
-        if choices.is_empty() {
-            choices.push_str("<p>No installations are available. An organization administrator may need to install the App or approve its access.</p>");
-        }
+        let ids: Vec<String> = installations
+            .iter()
+            .map(|(id, ..)| id.to_string())
+            .collect();
+        let rows = installations
+            .iter()
+            .zip(&ids)
+            .map(|((_, login, organization), id)| PageRow {
+                name: login,
+                meta: Some(if *organization {
+                    "Organization"
+                } else {
+                    "Personal account"
+                }),
+                action: Action::Form {
+                    label: "Use",
+                    action: "/v1/cloud/github/browser/select",
+                    fields: vec![("state", state.to_owned()), ("installationId", id.clone())],
+                    pending: "Connecting this installation… This may take a few seconds.",
+                },
+            })
+            .collect();
+        let mut actions = Vec::new();
         if pending.browser_installation.is_none() || pending.browser_installation == Some(0) {
-            choices.push_str(&format!("<form method=post action='/v1/cloud/github/browser/identity'><input type=hidden name=state value='{}'><button type=submit>Connect account while waiting for App approval</button></form>",escape(state)));
+            actions.push(Action::Form {
+                label: "Connect while waiting for approval",
+                action: "/v1/cloud/github/browser/identity",
+                fields: vec![("state", state.to_owned())],
+                pending: "Connecting your GitHub account…",
+            });
         }
-        choices.push_str(&format!("<p><a href='{}' target=_blank rel='noreferrer noopener'>Install GitHub App or request approval</a></p><p><a href='/v1/cloud/github/browser?state={}'>Check approval and refresh</a></p>",escape(&self.install_url(state)),escape(state)));
-        Ok(page("Choose a GitHub installation", &description, &choices))
+        let install_url = self.install_url(state);
+        let refresh = format!("/v1/cloud/github/browser?state={state}");
+        actions.push(Action::Link {
+            label: "Install or request approval",
+            href: &install_url,
+            external: true,
+        });
+        actions.push(Action::Link {
+            label: "Check approval",
+            href: &refresh,
+            external: false,
+        });
+        Ok(zuse_browser_page::card(&Card {
+            integration: "GitHub",
+            status: "Choose",
+            tone: Tone::Waiting,
+            title: "Choose a GitHub installation",
+            description: "Pick the installation whose repositories Zuse should use.",
+            facts: vec![
+                ("GitHub account", user.login.clone()),
+                ("Zuse workspace", workspace),
+            ],
+            rows,
+            empty: Some(
+                "No installations are available. An organization administrator may need to install the App or approve its access.",
+            ),
+            actions,
+            hint: Some("Continue only if you started this connection from your own Zuse app."),
+        }))
     }
     pub fn browser_failure_page(&self, state: &str, code: &str) -> String {
         let (title, hint) = match code {
@@ -146,14 +191,15 @@ impl NativeGithub {
                 "Your connection has been preserved for this session. Check the installation and try again, or cancel and start a new connection in Zuse.",
             ),
         };
-        page(
-            title,
-            hint,
-            &format!(
-                "<p><a href='/v1/cloud/github/browser?state={}'>Check approval and retry</a></p>",
-                escape(state)
-            ),
-        )
+        let retry = format!("/v1/cloud/github/browser?state={state}");
+        zuse_browser_page::card(&Card {
+            actions: vec![Action::Link {
+                label: "Check approval and retry",
+                href: &retry,
+                external: false,
+            }],
+            ..Card::notice("GitHub", "Not finished", Tone::Failure, title, hint)
+        })
     }
     /// The browser's cookie is mandatory even when the app knows its own state
     /// and bearer. Once chosen, another installation cannot replace this consent.
@@ -192,9 +238,4 @@ impl NativeGithub {
             operation_id: id,
         })
     }
-}
-fn page(title: &str, description: &str, choices: &str) -> String {
-    format!(
-        "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>{title} · Zuse</title><style>body{{margin:0;background:#121318;color:#f2f3f7;font:15px system-ui,sans-serif;display:grid;min-height:100vh;place-items:center}}main{{width:min(440px,calc(100% - 64px));padding:32px;background:#1c1e25;border:1px solid #343742;border-radius:16px}}h1{{font-size:22px;margin:0 0 12px}}p{{line-height:1.6;color:#b7bbc8}}form{{margin:12px 0}}button{{width:100%;text-align:left;padding:14px 16px;border:1px solid #4d5263;border-radius:9px;background:#2b2f3a;color:#fff;font:inherit;cursor:pointer}}button:hover,button:focus{{background:#383e4c;border-color:#9ca8ff}}a{{color:#b6bfff}}</style></head><body><main><h1>{title}</h1><p>{description}</p>{choices}</main></body></html>"
-    )
 }

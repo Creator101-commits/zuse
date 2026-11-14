@@ -1,0 +1,12 @@
+[package]
+name = "zuse-browser-page"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Self-contained HTML pages shown in the browser after sign-in, integration,
+# and checkout callbacks. One look for every callback the engine and cloud serve.
+[dependencies]
+base64 = "0.22"
+sha2.workspace = true

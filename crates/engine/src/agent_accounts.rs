@@ -1588,13 +1588,15 @@ impl AgentAccounts {
                 &[("Location", CLAUDE_LOOPBACK_SUCCESS_URL)],
                 "",
             ),
-            Err(error) => http_response(
+            Err(error) => zuse_browser_page::http_response(
                 "400 Bad Request",
-                &[("Content-Type", "text/html; charset=utf-8")],
-                &format!(
-                    "<!doctype html><title>Sign-in failed</title><p>{}</p>\
-                     <p>Return to Zuse to try again.</p>",
-                    html_escape(&zuse_providers::redact::redact_output(&error.to_string()))
+                &zuse_browser_page::integration(
+                    "Claude",
+                    zuse_browser_page::Outcome::Failure,
+                    Some(&format!(
+                        "{} Return to Zuse to try again.",
+                        zuse_providers::redact::redact_output(&error.to_string())
+                    )),
                 ),
             ),
         };
@@ -4152,13 +4154,6 @@ fn http_response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
         body.len()
     ));
     response
-}
-
-fn html_escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 /// Minimal percent-encoding for OAuth query params (matches `encodeURIComponent`

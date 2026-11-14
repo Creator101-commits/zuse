@@ -30,6 +30,7 @@ zuse-doc.workspace = true
 zuse-model.workspace = true
 zuse-sync.workspace = true
 zuse-providers.workspace = true
+zuse-browser-page.workspace = true
 zuse-rpc.workspace = true
 zuse-update.workspace = true
 zuse-visual.workspace = true

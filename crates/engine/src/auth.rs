@@ -1246,7 +1246,13 @@ async fn handle_loopback_conn(
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
 
     let (status, body) = if path != "/callback" {
-        ("404 Not Found", page("Not found."))
+        (
+            "404 Not Found",
+            zuse_browser_page::message(
+                "Nothing here",
+                "This address isn't part of a Zuse sign-in.",
+            ),
+        )
     } else {
         let params: HashMap<String, String> = query
             .split('&')
@@ -1258,7 +1264,7 @@ async fn handle_loopback_conn(
         let invalid_callback = || {
             (
                 "400 Bad Request",
-                page("Invalid or expired sign-in link. Start again from Zuse."),
+                failed("Invalid or expired sign-in link. Start again from Zuse."),
             )
         };
         match (code, state) {
@@ -1267,13 +1273,13 @@ async fn handle_loopback_conn(
                     Ok(result) => match auth.finish_sign_in(result, generation) {
                         Ok(()) => (
                             "200 OK",
-                            page("Signed in. You can close this tab and return to Zuse."),
+                            zuse_browser_page::sign_in(zuse_browser_page::Outcome::Success, None),
                         ),
                         Err(err) => {
                             tracing::info!(error = %err, "auth: discarded canceled callback exchange");
                             (
                                 "409 Conflict",
-                                page(
+                                failed(
                                     "This sign-in was canceled. Start again from Zuse if you still want to enable sync.",
                                 ),
                             )
@@ -1283,7 +1289,7 @@ async fn handle_loopback_conn(
                         tracing::warn!(error = %err, "auth: loopback code exchange failed");
                         (
                             "502 Bad Gateway",
-                            page("Sign-in failed during token exchange — check the Zuse logs."),
+                            failed("Sign-in failed during token exchange — check the Zuse logs."),
                         )
                     }
                 },
@@ -1292,16 +1298,13 @@ async fn handle_loopback_conn(
             _ => invalid_callback(),
         }
     };
-    let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
+    let response = zuse_browser_page::http_response(status, &body);
     stream.write_all(response.as_bytes()).await?;
     stream.shutdown().await
 }
 
-fn page(message: &str) -> String {
-    format!("<html><body style='font-family:sans-serif;padding:2rem'>{message}</body></html>")
+fn failed(message: &str) -> String {
+    zuse_browser_page::sign_in(zuse_browser_page::Outcome::Failure, Some(message))
 }
 
 // ---------------------------------------------------------------------------
