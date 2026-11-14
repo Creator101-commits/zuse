@@ -2662,11 +2662,6 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
-        let shell = cx.entity();
-        let branch_controls = cx.new(|cx| top_bar::ComposerBranch::new(shell, cx));
-        composer.update(cx, |composer, _| {
-            composer.checkout_controls = Some(branch_controls.into());
-        });
         let voice = cx.new(|_| crate::voice::VoiceController::default());
         let voice_stage_orb = cx.new(|_| {
             crate::orb::Orb::new()
@@ -11044,10 +11039,10 @@ impl Shell {
                 row(
                     "sidebar-new-chat-row",
                     icons::DITHER_CHAT,
-                    "New chat",
+                    "New thread",
                     false,
                 )
-                .aria_label(tr(cx, msg::chat::chat_view_new_chat))
+                .aria_label("New thread")
                 .on_click(cx.listener(|this, _, _, cx| this.open_new_session(None, cx)))
                 .when(!new_chat_hint.is_empty(), |el| {
                     el.child(
@@ -15555,6 +15550,7 @@ impl Render for Shell {
 
         let root = div()
             .id("shell-root")
+            .group("window-attachment-drop")
             .track_focus(&self.shortcut_focus)
             .child(div().track_focus(&self.unfocused))
             .relative()
@@ -15579,6 +15575,20 @@ impl Render for Shell {
                 ..Default::default()
             })
             .text_size(crate::typography::text_base())
+            .when(
+                matches!(self.route, Route::Chat)
+                    && matches!(gate, GatePhase::Ready)
+                    && !restart_required
+                    && !self.onboarding.read(cx).visible(),
+                |root| {
+                    root.on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+                        this.conversation_composer(cx).update(cx, |composer, cx| {
+                            composer.add_paths(paths.paths().to_vec(), cx)
+                        });
+                        cx.notify();
+                    }))
+                },
+            )
             .on_drag_move::<SidebarSessionDrag>(cx.listener(Self::contain_pinned_session_drag))
             .on_drop::<SidebarSessionDrag>(cx.listener(|this, _, _, cx| {
                 this.cancel_sidebar_session_transfer(cx);
@@ -16114,6 +16124,15 @@ impl Render for Shell {
                     })
                     .child(main)
                     .children(tab_row)
+                    .when(
+                        on_chat && !restart_required && !self.onboarding.read(cx).visible(),
+                        |column| {
+                            column.child(Self::chat_attachment_overlay(
+                                Theme::of(cx),
+                                self.workspace_gutter() > 0.,
+                            ))
+                        },
+                    )
                     .into_any_element();
                 // The whole app page is one keyed `animate-in` entrance (zuse
                 // App.tsx `<div key={phase} className="animate-in h-full">`):
