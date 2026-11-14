@@ -248,6 +248,7 @@ async fn publish_steer(
 }
 
 struct Inner {
+    analytics: OnceLock<zuse_analytics::Analytics>,
     secret_namespace: String,
     preparation: Mutex<(u64, bool)>,
     managed_recovery: std::sync::atomic::AtomicBool,
@@ -372,6 +373,10 @@ pub struct SessionsEngine {
 }
 
 impl SessionsEngine {
+    pub fn set_analytics(&self, analytics: zuse_analytics::Analytics) {
+        let _ = self.inner.analytics.set(analytics);
+    }
+
     pub(crate) fn permission_failure(&self, chat: &str, run: &str, message: &str) {
         if let Some(handle) = lock(&self.inner.runs)
             .get(chat)
@@ -446,6 +451,7 @@ impl SessionsEngine {
         let (sessions_tx, _) = watch::channel(Vec::new());
         Self {
             inner: Arc::new(Inner {
+                analytics: OnceLock::new(),
                 secret_namespace: new_id(),
                 preparation: Mutex::new((0, true)),
                 managed_recovery: std::sync::atomic::AtomicBool::new(false),
@@ -3428,6 +3434,17 @@ async fn drive_run(
     let device_id = inner.device_id.clone();
     // Captured for post-run auto-titling (the request moves into the harness).
     let harness_id = harness.id();
+    let analytics_subagent = inner
+        .doc_host()
+        .and_then(|host| host.workspace_host())
+        .and_then(|workspace| workspace.chat(&chat_id).ok().flatten())
+        .is_some_and(|chat| chat.parent_chat_id.is_some());
+    let mut analytics_turn =
+        zuse_analytics::turn::Turn::new(harness_id, &request, analytics_subagent, false);
+    let mut analytics_turn_open = !resume_state.idle;
+    if analytics_turn_open && let Some(analytics) = inner.analytics.get() {
+        analytics.capture("turn started", analytics_turn.dimensions());
+    }
     let user_prompt = request.prompt.clone();
     let mut source_message_id = resume_state.user_message_id.clone();
     let run_cwd = request.cwd.clone();
@@ -4099,6 +4116,9 @@ async fn drive_run(
             event: sub_event,
         } = &event
         {
+            if analytics_turn_open {
+                analytics_turn.observe(&event);
+            }
             inner.publish(&chat_id, &event);
             last_subagent_activity = Some(tokio::time::Instant::now());
             // Background subagents can outlive the turn and be the only
@@ -4697,7 +4717,39 @@ async fn drive_run(
             persist_tool_result(inner.doc_host(), &chat_id, &entry_id, &mut folded, &event);
         }
 
+        if !analytics_turn_open
+            && idle_since.is_none()
+            && !matches!(&event, AgentEvent::Done { .. })
+        {
+            analytics_turn_open = true;
+            analytics_turn = lock(&inner.last_requests)
+                .get(&chat_id)
+                .map(|request| {
+                    zuse_analytics::turn::Turn::new(
+                        harness_id,
+                        request,
+                        analytics_subagent,
+                        self_continued_turn,
+                    )
+                })
+                .unwrap_or_else(|| analytics_turn.restart(self_continued_turn));
+            if let Some(analytics) = inner.analytics.get() {
+                analytics.capture("turn started", analytics_turn.dimensions());
+            }
+        }
+        analytics_turn.observe(&event);
         if let AgentEvent::Done { status, .. } = &event {
+            if analytics_turn_open {
+                if let Some(analytics) = inner.analytics.get() {
+                    let event = match status {
+                        DoneStatus::Completed => "turn completed",
+                        DoneStatus::Errored => "turn failed",
+                        DoneStatus::Interrupted => "turn interrupted",
+                    };
+                    analytics.capture(event, analytics_turn.finish());
+                }
+                analytics_turn_open = false;
+            }
             if let Some(message) = execution_message.take() {
                 if let Some(handle) = lock(&inner.runs)
                     .get_mut(&chat_id)
@@ -4857,6 +4909,17 @@ async fn drive_run(
                 tokio::time::Instant::now() + std::time::Duration::from_millis(STREAM_COMMIT_MS);
         }
     };
+
+    if analytics_turn_open && let Some(analytics) = inner.analytics.get() {
+        analytics.capture(
+            if final_status == SessionStatus::Errored {
+                "turn failed"
+            } else {
+                "turn interrupted"
+            },
+            analytics_turn.finish(),
+        );
+    }
 
     if let Some(message) = execution_message.take() {
         if let Some(handle) = lock(&inner.runs)

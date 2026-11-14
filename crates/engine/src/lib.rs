@@ -192,6 +192,7 @@ pub struct EngineConfig {
 /// The assembled engine core — also constructible without the IPC server for tests
 /// and the in-process (headed) mode.
 pub struct EngineCore {
+    pub analytics: zuse_analytics::Analytics,
     pub pairings: zuse_remote::authority::Authority,
     pub browser_access: browser_access::Owner,
     pub relay_access: relay_access::Owner,
@@ -527,6 +528,23 @@ impl EngineCore {
             pr_watch::PrWatches::open(profile.store_root(), workspace.clone(), doc_host.clone())?;
         pr_watches.start();
         pr_watches.follow_sessions(sessions.watch_sessions());
+        let analytics = zuse_analytics::Analytics::open(data_dir);
+        for (provider, models) in zuse_providers::analytics_model_catalogs() {
+            analytics.register_vendor_models(provider, models);
+        }
+        workspace.set_analytics(analytics.clone());
+        doc_host.set_analytics(analytics.clone());
+        if !matches!(
+            profile.scope(),
+            WorkspaceScope::Local | WorkspaceScope::Development
+        ) {
+            analytics.set_account(Some(profile.user_id()));
+        }
+        if let Some(user) = account.status().user {
+            analytics.set_account(Some(&user.id));
+        }
+        sessions.set_analytics(analytics.clone());
+        analytics.capture("app opened", serde_json::json!({}));
         let zot_supervisor = zots::ZotSupervisor::start(
             zots.clone(),
             sessions.clone(),
@@ -534,6 +552,7 @@ impl EngineCore {
             doc_host.clone(),
         );
         Ok(Self {
+            analytics,
             pr_watches,
             usage,
             relay_access,
@@ -727,6 +746,7 @@ impl EngineCore {
             self.agent_accounts.clone(),
             self.workspace_scope,
         )
+        .with_analytics(self.analytics.clone())
         .with_pr_watches(self.pr_watches.clone())
         .with_project_creation(self.project_creation.clone())
         .with_github_launcher(self.github_launcher.clone())
@@ -839,6 +859,8 @@ impl EngineCore {
         // Break the sessions ⇄ doc-host retain cycle so the replaced graph can
         // actually be freed once the last handle drops.
         self.sessions.clear_doc_host();
+        self.analytics.capture("app closed", serde_json::json!({}));
+        self.analytics.shutdown().await;
     }
 }
 

@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><title>Analytics fixture</title></head><body>
+<script type="module">
+  import * as analytics from "/src/core/analytics.ts";
+  import { setState } from "/src/core/store.ts";
+  import { setView } from "/src/core/view.ts";
+  import { rpc } from "/src/core/connection.ts";
+  window.opened = [];
+  const call = rpc.call.bind(rpc);
+  rpc.call = (method, params) => {
+    if (method !== "RecordChatOpened") return call(method, params);
+    window.opened.push(params);
+    return Promise.resolve({ok: true});
+  };
+  window.analyticsTest = {
+    ...analytics,
+    account: (id) => setState("account", id ? { user: { id } } : null),
+    chat: (id) => {
+      setState("connection", {kind: "connected"});
+      setState("workspaceSynced", true);
+      setView("selectedChatId", id);
+    },
+    reconnect: () => setState("epoch", value => value + 1),
+  };
+  analytics.startAnalytics();
+</script>
+</body></html>

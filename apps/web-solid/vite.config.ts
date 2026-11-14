@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import solid from "vite-plugin-solid";
@@ -5,6 +6,7 @@ import solid from "vite-plugin-solid";
 const repo = fileURLToPath(new URL("../..", import.meta.url));
 
 export default defineConfig({
+  define: { __APP_VERSION__: JSON.stringify(readFileSync(new URL("../../Cargo.toml", import.meta.url), "utf8").match(/^version = "([^"]+)"/m)?.[1] ?? "unknown") },
   plugins: [solid()],
   resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)), "@repo": repo } },
   // Desktop fonts and icons are read straight from crates/ui/assets.

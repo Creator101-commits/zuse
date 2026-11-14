@@ -63,6 +63,7 @@ pub enum ShortcutsEvent {
 }
 
 pub struct ShortcutsPage {
+    analytics: Entity<super::analytics::AnalyticsCard>,
     appshots_page: bool,
     general_page: bool,
     general_account: Entity<crate::settings::plugins::PluginsCard>,
@@ -113,6 +114,7 @@ impl ShortcutsPage {
         cx.on_release(|_, _| crate::appshots::set_recording(false))
             .detach();
         Self {
+            analytics: cx.new(|cx| super::analytics::AnalyticsCard::new(state.clone(), cx)),
             appshots_page: false,
             general_page: false,
             general_updates_focus: cx.focus_handle().tab_stop(true),

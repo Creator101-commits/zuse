@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "gen:methods": "python3 scripts/gen-methods.py",
-    "e2e": "node e2e/smoke.mjs"
+    "e2e": "node e2e/smoke.mjs",
+    "e2e:analytics": "bun e2e/analytics.mjs"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
@@ -23,9 +24,11 @@
     "@tanstack/solid-virtual": "^3.13.53",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "@zuse/analytics": "file:../../packages/analytics",
     "codemirror": "^6.0.2",
     "dompurify": "^3.4.17",
     "marked": "^18.2.0",
+    "posthog-js": "^1.449.2",
     "shiki": "^4.6.0",
     "solid-js": "^1.9.18"
   },

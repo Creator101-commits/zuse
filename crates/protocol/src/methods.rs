@@ -25,6 +25,9 @@ pub const GET_CUSTOM_ACP_AGENTS: &str = "GetCustomAcpAgents";
 pub const SET_CUSTOM_ACP_AGENT: &str = "SetCustomAcpAgent";
 pub const DELETE_CUSTOM_ACP_AGENT: &str = "DeleteCustomAcpAgent";
 pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
+pub const RECORD_CHAT_OPENED: &str = "RecordChatOpened";
+pub const GET_ANALYTICS_SETTINGS: &str = "GetAnalyticsSettings";
+pub const SET_ANALYTICS_SETTINGS: &str = "SetAnalyticsSettings";
 pub const SET_TITLE_SETTINGS: &str = "SetTitleSettings";
 /// Flip a harness's enablement on the target device (Settings → Providers);
 /// replies with the device's fresh `ListHarnesses` catalog.
@@ -338,7 +341,8 @@ pub const RESOLVE_RECOVERY: &str = "ResolveRecovery";
 /// Unknown methods and all actions keep their original delivery uncertainty.
 pub fn retryable_read(method: &str, params: &serde_json::Value) -> bool {
     match method {
-        GET_GIT_WORKSPACE
+        GET_ANALYTICS_SETTINGS
+        | GET_GIT_WORKSPACE
         | WATCH_GIT_WORKSPACE
         | WATCH_CHANGE_REQUEST
         | GET_BRANCH_GRAPH

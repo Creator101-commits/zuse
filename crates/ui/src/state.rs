@@ -3670,6 +3670,18 @@ impl AppState {
                 }
             }
         }
+        if let (Some(chat), Some(engine)) = (chat_id.clone(), self.engine.clone()) {
+            cx.spawn(async move |_, _| {
+                let _ = engine
+                    .client()
+                    .call(
+                        zuse_rpc::methods::RECORD_CHAT_OPENED,
+                        serde_json::json!({"chatId": chat, "surface": "desktop"}),
+                    )
+                    .await;
+            })
+            .detach();
+        }
         self.selected_chat = chat_id.clone();
         self.auto_selected = true;
         self.transcript.clear();

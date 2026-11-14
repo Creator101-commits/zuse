@@ -194,6 +194,7 @@ impl ShortcutsPage {
             .child(self.language_preferences(theme, cx))
             .child(appearance)
             .child(notifications)
+            .child(self.analytics.clone())
     }
 
     fn language_preferences(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
