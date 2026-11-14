@@ -155,7 +155,8 @@ def create_macos_dmg(app, image):
         'default_view': 'icon-view',
         'icon_size': 80,
         'text_size': 13,
-        'icon_locations': {'Zuse.app': (180, 316), 'Applications': (460, 316)},
+        # The app rests on the offered palm; Applications sits inside the cloak.
+        'icon_locations': {'Zuse.app': (242, 181), 'Applications': (394, 181)},
         'show_status_bar': False,
         'show_tab_view': False,
         'show_toolbar': False,
