@@ -5,8 +5,8 @@
 //!
 //! Release layout (see `.github/workflows/release.yml`): stable releases are
 //! GitHub releases, and each one's `SHA256SUMS` names its version and carries a
-//! sha256 per artifact. Preview builds report their plain workspace version, so
-//! previews cannot be ordered against each other and are not offered.
+//! sha256 per artifact. Packages carry their full version, including preview
+//! suffixes. The selected release channel is a local profile preference.
 //!
 //! A deployment that hosts its own feed sets `ZUSE_RELEASES_URL` or
 //! `ZUSE_EDGE_URL`; that feed serves `manifest.json` (or the older, version-only
@@ -42,13 +42,22 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
+mod release;
+pub use release::{ReleaseChannel, initialize_channel, load_channel, save_channel};
+
 pub mod control;
 #[cfg(windows)]
 pub mod windows;
 
-/// The version compiled into this binary (the workspace version).
-pub const fn current_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+/// Full packaged version, or the workspace version for source builds.
+pub fn current_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| release::packaged_version(&exe, env!("CARGO_PKG_VERSION")))
+            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+    })
 }
 
 /// Successful checks repeat this often. The feed is a sub-kilobyte,
@@ -198,22 +207,16 @@ pub fn mac_app_artifact(version: &str) -> String {
     format!("zuse-{version}-macos-{arch}.tar.gz")
 }
 
-fn parse_version(v: &str) -> Option<Vec<u64>> {
-    let nums: Vec<u64> = v
-        .trim()
-        .trim_start_matches('v')
-        .split('.')
-        .map(|p| p.parse().ok())
-        .collect::<Option<_>>()?;
-    (!nums.is_empty()).then_some(nums)
+fn parse_version(value: &str) -> Option<semver::Version> {
+    let value = value.trim();
+    semver::Version::parse(value.strip_prefix('v').unwrap_or(value)).ok()
 }
 
-/// Strictly-newer dotted-numeric compare (`0.1.10` > `0.1.9` > `0.1`).
-/// Unparseable versions never count as newer — a garbage `latest.txt` must not
-/// trigger an update loop.
+/// SemVer ordering, including numeric preview suffixes and promotion to stable.
+/// Invalid versions never trigger an update.
 pub fn version_newer(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
-        (Some(l), Some(c)) => l > c,
+        (Some(latest), Some(current)) => latest.cmp_precedence(&current).is_gt(),
         _ => false,
     }
 }
@@ -222,13 +225,39 @@ pub fn version_newer(latest: &str, current: &str) -> bool {
 /// default, or a configured feed's `manifest.json`, falling back to
 /// `latest.txt` (version only, no checksums) for pre-manifest releases.
 pub async fn fetch_latest(edge_url: &str) -> anyhow::Result<Manifest> {
+    fetch_latest_for_channel(edge_url, ReleaseChannel::for_version(current_version())).await
+}
+
+pub async fn fetch_latest_for_channel(
+    edge_url: &str,
+    channel: ReleaseChannel,
+) -> anyhow::Result<Manifest> {
+    let manifest = fetch_channel_manifest(edge_url, channel).await?;
+    // A missing GitHub release returns the running version as a no-op.
+    anyhow::ensure!(
+        manifest.version == current_version() || channel.accepts(&manifest.version),
+        "release feed returned a version outside the selected channel"
+    );
+    Ok(manifest)
+}
+
+async fn fetch_channel_manifest(
+    edge_url: &str,
+    channel: ReleaseChannel,
+) -> anyhow::Result<Manifest> {
     let client = http_client()?;
     let base = match release_source(edge_url)? {
+        ReleaseSource::GitHub if channel == ReleaseChannel::Preview => {
+            return release::fetch_github_preview(&client).await;
+        }
         ReleaseSource::GitHub => {
             let url = format!("{RELEASES_PAGE}/latest/download/SHA256SUMS");
             return fetch_github_latest(&client, &url).await;
         }
-        ReleaseSource::Feed(base) => base,
+        ReleaseSource::Feed(base) => match channel {
+            ReleaseChannel::Stable => base,
+            ReleaseChannel::Preview => format!("{base}/preview"),
+        },
     };
     let manifest_url = format!("{base}/manifest.json");
     match fetch_release_metadata(&client, &manifest_url).await {
@@ -293,6 +322,9 @@ async fn fetch_github_latest(client: &reqwest::Client, url: &str) -> anyhow::Res
 /// (`zuse-<version>-<os>-<arch>…`), or `None` for other release files.
 fn artifact_version(name: &str) -> Option<&str> {
     let rest = name.strip_prefix("zuse-")?;
+    if rest.starts_with("cli-") {
+        return None;
+    }
     ["-linux-", "-macos-", "-windows-"]
         .iter()
         .find_map(|os| rest.find(os).map(|end| &rest[..end]))
@@ -713,9 +745,13 @@ pub fn installed_version(kind: &InstallKind) -> Option<String> {
             .file_name()?
             .to_str()?
             .to_owned(),
-        InstallKind::MacApp { bundle } => bundle_short_version(
-            &std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?,
-        )?,
+        InstallKind::MacApp { bundle } => {
+            let binary = bundle.join("Contents/MacOS/zuse");
+            let base = bundle_short_version(
+                &std::fs::read_to_string(bundle.join("Contents/Info.plist")).ok()?,
+            )?;
+            release::packaged_version(&binary, &base).unwrap_or(base)
+        }
         _ => return None,
     };
     parse_version(&version).map(|_| version)
@@ -1177,6 +1213,7 @@ enum Role {
 #[derive(Clone)]
 pub struct Updater {
     edge_url: String,
+    channel_profile: Option<PathBuf>,
     role: Arc<Role>,
     status_tx: Arc<watch::Sender<UpdateStatus>>,
     /// Wakes the loop; `forced` says whether the wake demands a check or only
@@ -1195,16 +1232,39 @@ pub struct Updater {
 impl Updater {
     /// Spawn the engine's check loop (must run on a tokio runtime).
     pub fn spawn(edge_url: String, quiescent: Option<QuiescentCheck>) -> Self {
-        Self::spawn_role(edge_url, Role::Engine { quiescent })
+        Self::spawn_role(edge_url, Role::Engine { quiescent }, None)
     }
 
     /// Spawn the desktop app's report-only check loop (must run on a tokio
     /// runtime).
     pub fn spawn_desktop(edge_url: String) -> Self {
-        Self::spawn_role(edge_url, Role::Desktop)
+        Self::spawn_role(edge_url, Role::Desktop, None)
     }
 
-    fn spawn_role(edge_url: String, role: Role) -> Self {
+    pub fn spawn_for_profile(
+        edge_url: String,
+        data_dir: PathBuf,
+        quiescent: Option<QuiescentCheck>,
+    ) -> Self {
+        Self::spawn_role(edge_url, Role::Engine { quiescent }, Some(data_dir))
+    }
+
+    pub fn spawn_desktop_for_profile(edge_url: String, data_dir: PathBuf) -> Self {
+        Self::spawn_role(edge_url, Role::Desktop, Some(data_dir))
+    }
+
+    fn channel(&self) -> anyhow::Result<ReleaseChannel> {
+        self.channel_profile
+            .as_deref()
+            .map(load_channel)
+            .unwrap_or_else(|| Ok(ReleaseChannel::for_version(current_version())))
+    }
+
+    async fn fetch_latest(&self) -> anyhow::Result<Manifest> {
+        fetch_latest_for_channel(&self.edge_url, self.channel()?).await
+    }
+
+    fn spawn_role(edge_url: String, role: Role, channel_profile: Option<PathBuf>) -> Self {
         let initial_delay = match role {
             Role::Engine { .. } => ENGINE_INITIAL_DELAY,
             Role::Desktop => DESKTOP_INITIAL_DELAY,
@@ -1214,6 +1274,7 @@ impl Updater {
         let (shutdown_tx, _) = watch::channel(false);
         let updater = Self {
             edge_url,
+            channel_profile,
             role: Arc::new(role),
             status_tx: Arc::new(status_tx),
             wake_tx: Arc::new(wake_tx),
@@ -1236,7 +1297,7 @@ impl Updater {
     /// not keep polling `{edge}/releases` (or auto-applying) in the background.
     /// Idempotent, and callable from any clone.
     pub async fn shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
         let task = self
             .check_task
             .lock()
@@ -1281,7 +1342,7 @@ impl Updater {
     /// One user-requested check, awaited: publishes the result like a
     /// scheduled check and returns it.
     pub async fn check(&self) -> anyhow::Result<UpdateStatus> {
-        match fetch_latest(&self.edge_url).await {
+        match self.fetch_latest().await {
             Ok(manifest) => {
                 self.publish(manifest);
                 Ok(self.status_tx.borrow().clone())
@@ -1349,7 +1410,7 @@ impl Updater {
     /// idle→restart gap to well under a second.
     async fn auto_apply_when_idle(&self) {
         if let InstallKind::Managed { app_root } = detect_install() {
-            match fetch_latest(&self.edge_url).await {
+            match self.fetch_latest().await {
                 Ok(manifest) if version_newer(&manifest.version, current_version()) => {
                     if let Err(err) = stage_headless(&self.edge_url, &manifest, &app_root).await {
                         tracing::warn!(error = %err, "auto-update staging failed");
@@ -1416,7 +1477,7 @@ impl Updater {
 
     /// One check; returns false on fetch failure (retry sooner).
     async fn check_once(&self) -> bool {
-        match fetch_latest(&self.edge_url).await {
+        match self.fetch_latest().await {
             Ok(manifest) => {
                 self.publish(manifest);
                 true
@@ -1449,7 +1510,8 @@ impl Updater {
                  source builds update via git"
             );
         };
-        let manifest = fetch_latest(&self.edge_url).await?;
+        let channel = self.channel()?;
+        let manifest = fetch_latest_for_channel(&self.edge_url, channel).await?;
         if !version_newer(&manifest.version, current_version()) {
             bail!("already up to date ({})", current_version());
         }
@@ -1457,6 +1519,10 @@ impl Updater {
         if require_quiescent && !self.quiescent_now() {
             return Ok(None);
         }
+        anyhow::ensure!(
+            self.channel()? == channel,
+            "release channel changed while staging"
+        );
         apply_headless(&app_root, &manifest.version)?;
         tokio::spawn(async {
             tokio::time::sleep(Duration::from_millis(800)).await;
@@ -1842,6 +1908,7 @@ mod tests {
         let manifest = manifest_from_checksums(&format!(
             "{linux}  zuse-1.2.3-linux-x86_64.tar.gz\n\
              {mac} *zuse-1.2.3-macos-aarch64.tar.gz\n\
+             {installer}  zuse-cli-1.2.3-linux-x86_64.tar.gz\n\
              {installer}  install.sh\n"
         ))
         .unwrap();
@@ -1900,7 +1967,7 @@ mod tests {
         assert!(version_newer("0.2.0", "0.1.9"));
         assert!(version_newer("0.1.10", "0.1.9"));
         assert!(version_newer("v0.1.1", "0.1.0"));
-        assert!(version_newer("0.1.0.1", "0.1.0"));
+        assert!(!version_newer("0.1.0.1", "0.1.0"));
         assert!(!version_newer("0.1.0", "0.1.0"));
         assert!(!version_newer("0.1.0", "0.1.1"));
         // Garbage never counts as newer.
@@ -2167,6 +2234,17 @@ mod tests {
             installed_version(&InstallKind::MacApp { bundle }).as_deref(),
             Some("0.4.1")
         );
+        let mac = tmp.path().join("Zuse.app");
+        std::fs::create_dir_all(mac.join("Contents/MacOS")).unwrap();
+        std::fs::write(
+            mac.join("Contents/MacOS/release.json"),
+            r#"{"version":"0.4.1-preview.12"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            installed_version(&InstallKind::MacApp { bundle: mac }).as_deref(),
+            Some("0.4.1-preview.12")
+        );
         assert_eq!(installed_version(&InstallKind::Unmanaged), None);
     }
 
@@ -2246,6 +2324,63 @@ mod tests {
         assert_eq!(*updater.watch().borrow(), status);
         updater.shutdown().await;
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_replaced_checker_shuts_down_before_its_loop_first_runs() {
+        // A current-thread runtime cannot poll the spawned loop until shutdown
+        // yields. Cancellation must be retained before its receiver subscribes.
+        let checker = Updater::spawn_desktop("http://127.0.0.1:1".into());
+        tokio::time::timeout(Duration::from_millis(500), checker.shutdown())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn profile_checks_follow_track_changes_and_reject_preview_on_stable() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (path, version) in [
+                ("/releases/manifest.json", "999.0.0"),
+                ("/releases/preview/manifest.json", "999.1.0-preview.10"),
+                ("/releases/manifest.json", "999.0.0-preview.1"),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let length = socket.read(&mut request).await.unwrap();
+                assert!(
+                    String::from_utf8_lossy(&request[..length])
+                        .starts_with(&format!("GET {path} "))
+                );
+                let body = serde_json::json!({"version": version}).to_string();
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        save_channel(dir.path(), ReleaseChannel::Stable).unwrap();
+        let checker = Updater::spawn_desktop_for_profile(base, dir.path().to_owned());
+        assert_eq!(
+            checker.check().await.unwrap().latest_version.as_deref(),
+            Some("999.0.0")
+        );
+        save_channel(dir.path(), ReleaseChannel::Preview).unwrap();
+        assert_eq!(
+            checker.check().await.unwrap().latest_version.as_deref(),
+            Some("999.1.0-preview.10")
+        );
+        save_channel(dir.path(), ReleaseChannel::Stable).unwrap();
+        assert!(
+            checker
+                .check()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("outside the selected channel")
+        );
+        checker.shutdown().await;
+        server.await.unwrap();
     }
 
     /// A headless tarball whose `zuse` reports `reported` from `--version`.

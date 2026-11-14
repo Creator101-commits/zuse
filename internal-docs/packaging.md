@@ -230,3 +230,46 @@ Each platform's fresh packaging/signing runner starts when its own executables
 and the shared browser assets are ready. Build jobs receive no signing secrets,
 and signing runners never restore compilation caches. Publication still waits
 for every archive, installer, signature and distribution check.
+
+## Release tracks
+
+Desktop users choose **Stable** or **Preview** in **Settings → General → Update
+channel**. The choice is local to the profile, in `release-channel.json`, and
+survives restarts and application updates. A new profile follows its installed
+package: a prerelease defaults to Preview and a stable build defaults to Stable.
+A preview profile stays on Preview when it installs a stable promotion.
+
+Stable checks GitHub's latest stable release. Preview checks published releases
+and offers the newest version, including stable promotions. Drafts, unrelated
+tags, and releases without `SHA256SUMS` are excluded. Both tracks only move
+forward by semantic version: `0.26.0-preview.10` follows `preview.9`, and
+`0.26.0` follows every `0.26.0-preview.N`. Choosing Stable while running a newer
+preview waits for a newer stable release, preserving the local data format.
+Changing tracks cancels the old check/download and discards its staged update.
+
+Keep publishing stable tags as `vX.Y.Z` with `--latest` and preview tags as
+`vX.Y.Z-preview.N` with `--prerelease`, as `release.yml` already does. Both tracks
+use the same application identity and profile. After publishing `v0.26.0`, bump
+the workspace to `0.27.0` before publishing `v0.27.0-preview.1`; further
+`0.26.0-preview.N` builds are older than the stable `0.26.0` release.
+Package assembly writes the full version to `release.json` beside each executable before signing and checksumming;
+`zuse --version` and the updater read it, allowing exact-commit prebuilt binaries
+to be reused for preview tags. Source builds use their workspace version.
+
+Custom feeds keep stable metadata at `manifest.json` (or legacy `latest.txt`)
+and preview metadata at `preview/manifest.json` (or `preview/latest.txt`). Both
+manifests reference files at the feed root. A stable manifest must name a stable
+version. `ZUSE_RELEASES_URL` and `ZUSE_EDGE_URL` continue to select the feed.
+
+### First stable upgrade from existing previews
+
+Published `0.26.0-preview.N` binaries report `0.26.0` and check only stable
+releases. Publish the first stable as a higher numeric version, such as
+`0.26.1`, for those clients to detect it as newer; a `0.26.0` stable release
+requires a manual install. Bump the workspace version and add its changelog
+section when preparing that release.
+
+`SHA256SUMS` contains app archives, installers, and `install.sh`.
+`SHA256SUMS.cli` contains standalone CLI archives. Keep these separate when
+publishing or adding formats: the older updater mistakes a `zuse-cli-*` entry
+in the app checksum list for a different application version and rejects it.

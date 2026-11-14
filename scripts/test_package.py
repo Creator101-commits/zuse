@@ -61,6 +61,8 @@ class PackagingTests(unittest.TestCase):
         self.assemble()
         manifest = installer.verify(self.destination)
         self.assertEqual(manifest["arch"], "x86_64")
+        self.assertEqual(json.loads((self.destination / "libexec/release.json").read_text())["version"], "0.25.0")
+        self.assertIn("libexec/release.json", manifest["files"])
         for relative in ("libexec/web/app.wasm", "share/zuse/legal/LICENSE",
                          "share/zuse/legal/crates/icons/LICENSE.Hugeicons",
                          "share/zuse/legal/vendor/zkit/NOTICE",
@@ -268,6 +270,8 @@ class PackagingTests(unittest.TestCase):
         for relative, digest in manifest["files"].items():
             self.assertEqual(hashlib.sha256((unpacked / relative).read_bytes()).hexdigest(), digest)
         self.assertEqual(manifest["version"], version)
+        self.assertEqual(json.loads((unpacked / "release.json").read_text())["version"], version)
+        self.assertEqual(json.loads((unpacked / "libexec/release.json").read_text())["version"], version)
         self.assertIn("zuse.exe", manifest["files"])
         self.assertIn("web/app.wasm", manifest["files"])
         cli = output / f"zuse-cli-{version}-windows-x86_64.zip"
@@ -294,6 +298,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual((manifest["kind"], manifest["platform"]), ("cli", "linux"))
         self.assertEqual(manifest["links"], {"bin/zuse-server": "zuse"})
         self.assertNotIn("bin/zuse-server", manifest["files"])
+        self.assertEqual(json.loads((stage / "bin/release.json").read_text())["version"], "0.26.0")
+        self.assertIn("bin/release.json", manifest["files"])
         for relative, digest in manifest["files"].items():
             self.assertEqual(hashlib.sha256((stage / relative).read_bytes()).hexdigest(), digest)
         self.assertFalse((stage / "libexec").exists())
@@ -351,6 +357,9 @@ class PackagingTests(unittest.TestCase):
         package.assemble(self.destination, self.binaries, self.assets, "macos", "x86_64",
                          "0.26.0-preview.1", {"inputs": "test fixture"})
         info = plistlib.loads((self.destination / "Zuse.app/Contents/Info.plist").read_bytes())
+        self.assertEqual(json.loads((self.destination / "Zuse.app/Contents/MacOS/release.json").read_text())["version"], "0.26.0-preview.1")
+        manifest = json.loads((self.destination / "manifest.json").read_text())
+        self.assertIn("Zuse.app/Contents/MacOS/release.json", manifest["files"])
         self.assertEqual(info["CFBundleVersion"], "0.26.0")
         self.assertEqual(info["CFBundleShortVersionString"], "0.26.0")
         self.assertEqual(json.loads((self.destination / "manifest.json").read_text())["version"],

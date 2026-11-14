@@ -293,7 +293,11 @@ pub fn localize(command: clap::Command, l10n: &Localizer) -> clap::Command {
 
 /// Parse with localized help and errors; exits on help, version or misuse.
 pub fn parse<T: CommandFactory + FromArgMatches>(arguments: Vec<OsString>, l10n: &Localizer) -> T {
-    parse_with(localize(T::command(), l10n), arguments, l10n)
+    parse_with(
+        localize(T::command().version(zuse_update::current_version()), l10n),
+        arguments,
+        l10n,
+    )
 }
 
 pub(crate) fn parse_with<T: FromArgMatches>(

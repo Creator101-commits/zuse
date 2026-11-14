@@ -246,16 +246,46 @@ class DistributionTests(unittest.TestCase):
             with self.subTest(version=version), self.assertRaises(ValueError):
                 bootstrap.install(version, lambda url: self.fail('must not download'))
 
+    def test_checksum_lists_work_with_older_updaters_and_keep_cli_downloads_verified(self):
+        output = self.fixture.root / 'checksums'
+        output.mkdir()
+        names = ['zuse-0.26.1-macos-aarch64.tar.gz', 'zuse-0.26.1-linux-x86_64.tar.gz',
+                 'zuse-cli-0.26.1-linux-x86_64.tar.gz', 'install.sh']
+        for name in names:
+            (output / name).write_bytes(name.encode())
+        paths = publish_distributions.write_release_checksums(output)
+        self.assertEqual(paths[-1].name, 'SHA256SUMS')
+        verified = set()
+        for path in paths:
+            for line in path.read_text().splitlines():
+                digest, name = line.split()
+                self.assertEqual(digest, hashlib.sha256((output / name).read_bytes()).hexdigest())
+                verified.add(name)
+        self.assertEqual(verified, set(names))
+        # This is how the already-released updater derives the app version.
+        versions = set()
+        for line in (output / 'SHA256SUMS').read_text().splitlines():
+            _, name = line.split()
+            if name.startswith('zuse-'):
+                rest = name.removeprefix('zuse-')
+                for target in ('-macos-', '-linux-', '-windows-'):
+                    if target in rest:
+                        versions.add(rest.split(target, 1)[0])
+        self.assertEqual(versions, {'0.26.1'})
+        self.assertIn('zuse-cli-', (output / 'SHA256SUMS.cli').read_text())
+
     def test_publishing_keeps_existing_bytes_and_commits_checksums_last(self):
         old_name = 'zuse-0.25.0-linux-x86_64.tar.gz'
         new_name = 'zuse-0.25.0-linux-x86_64.deb'
         for interrupted, fail_upload in ((False, False), (True, False), (False, True)):
             with self.subTest(interrupted=interrupted, fail_upload=fail_upload):
-                assets = {old_name: b'original archive', 'install.sh': b'old installer'}
+                assets = {old_name: b'original archive', 'install.sh': b'old installer', 'zuse-cli-0.25.0-linux-x86_64.tar.gz': b'cli archive'}
                 sums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted(assets.items())).encode()
                 assets['SHA256SUMS'] = sums
                 if interrupted:
                     assets[new_name] = b'previously uploaded package'
+                    cli_name = 'zuse-cli-0.25.0-linux-x86_64.tar.gz'
+                    assets['SHA256SUMS.cli'] = f'{hashlib.sha256(assets[cli_name]).hexdigest()}  {cli_name}\n'.encode()
                 output = self.fixture.root / f'publish-{interrupted}-{fail_upload}'
                 output.mkdir()
                 (output / old_name).write_bytes(b'resigned archive must not replace original')
@@ -275,7 +305,7 @@ class DistributionTests(unittest.TestCase):
                             raise OSError('Upload interrupted')
                         if path.name in assets:
                             self.assertIn('--clobber', args)
-                            self.assertIn(path.name, ('install.sh', 'SHA256SUMS'))
+                            self.assertIn(path.name, ('install.sh', 'SHA256SUMS', 'SHA256SUMS.cli'))
                         uploads.append(path.name)
                         assets[path.name] = path.read_bytes()
                     else:
@@ -290,9 +320,12 @@ class DistributionTests(unittest.TestCase):
                     publish_distributions.publish('v0.25.0', output, command)
                     self.assertEqual(uploads[-1], 'SHA256SUMS')
                     self.assertEqual(assets['install.sh'], b'new installer')
-                    for line in assets['SHA256SUMS'].decode().splitlines():
-                        digest, name = line.split()
-                        self.assertEqual(digest, hashlib.sha256(assets[name]).hexdigest())
+                    for checksum_file in ('SHA256SUMS', 'SHA256SUMS.cli'):
+                        for line in assets[checksum_file].decode().splitlines():
+                            digest, name = line.split()
+                            self.assertEqual(digest, hashlib.sha256(assets[name]).hexdigest())
+                    publish_distributions.publish('v0.25.0', output, command)
+                    self.assertEqual(uploads[-1], 'SHA256SUMS')
                 self.assertEqual(assets[old_name], b'original archive')
 
 

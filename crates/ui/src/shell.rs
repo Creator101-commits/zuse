@@ -3046,8 +3046,14 @@ impl Shell {
             sidebar_notice: None,
             update_restart: None,
             update_restart_task: None,
-            _app_update_observation: crate::app_update::AppUpdate::global(cx)
-                .map(|update| cx.observe(&update, |_, _, cx| cx.notify())),
+            _app_update_observation: crate::app_update::AppUpdate::global(cx).map(|update| {
+                cx.observe(&update, |this, update, cx| {
+                    if this.update_restart.is_some() && update.read(cx).staged().is_none() {
+                        this.cancel_update_restart_plan(cx);
+                    }
+                    cx.notify();
+                })
+            }),
             org: None,
             sync_flow: SyncFlow::Idle,
             mutate_task: None,
@@ -11375,7 +11381,7 @@ impl Shell {
             StripAction::Explain => update.update(cx, |update, cx| update.show_result(cx)),
             StripAction::Advise { open_releases } => {
                 if open_releases {
-                    cx.open_url(zuse_update::RELEASES_PAGE);
+                    cx.open_url(&update.read(cx).download_page());
                 }
                 update.update(cx, |update, cx| update.dismiss_advisory(cx));
             }
@@ -11615,8 +11621,8 @@ impl Shell {
                     popover::btn_primary(&theme, "Open download page")
                         .id("update-prompt-downloads")
                         .on_click(cx.listener(|_, _, _, cx| {
-                            cx.open_url(zuse_update::LATEST_RELEASE_PAGE);
                             if let Some(update) = crate::app_update::AppUpdate::global(cx) {
+                                cx.open_url(&update.read(cx).download_page());
                                 update.update(cx, |update, cx| update.dismiss_prompt(cx));
                             }
                         }))
