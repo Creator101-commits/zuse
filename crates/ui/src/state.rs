@@ -3817,14 +3817,25 @@ impl AppState {
         if !chat.unseen() {
             return;
         }
-        chat.last_seen_at = Some(Utc::now());
+        // Cover the latest message even when it is dated ahead of this clock
+        // (another device's skew, imported history). Stamping only `now` left
+        // such a chat unseen, and the shell re-marked the selected chat on
+        // every frame: a continuous full-window re-render while idle.
+        let at = chat
+            .last_message_at
+            .map_or_else(Utc::now, |last| last.max(Utc::now()));
+        chat.last_seen_at = Some(at);
         cx.notify();
         let Some(handle) = self.engine.clone() else {
             return;
         };
         let chat_id = chat_id.to_string();
         cx.spawn(async move |_, _| {
-            let params = serde_json::json!({ "op": "markChatSeen", "chatId": chat_id });
+            let params = serde_json::json!({
+                "op": "markChatSeen",
+                "chatId": chat_id,
+                "at": at.timestamp_millis(),
+            });
             if let Err(err) = handle.client().call(methods::MUTATE, params).await {
                 tracing::warn!(chat = %chat_id, error = %err, "markChatSeen failed");
             }
@@ -5170,6 +5181,32 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         }
+    }
+
+    #[gpui::test]
+    fn marking_a_future_dated_chat_seen_settles_after_one_notify(cx: &mut gpui::TestAppContext) {
+        // A last message dated ahead of this clock (another device's skew,
+        // imported history) once stayed unseen after every mark, and the
+        // shell re-marked the selected chat on every frame.
+        let state = cx.new(|_| AppState::new());
+        let ahead = (Utc::now() - chat("x", 0, Some(0)).created_at).num_minutes() + 525_600;
+        let notifies = std::rc::Rc::new(std::cell::Cell::new(0));
+        let counter = notifies.clone();
+        let _watch = cx.update(|cx| cx.observe(&state, move |_, _| counter.set(counter.get() + 1)));
+        state.update(cx, |state, cx| {
+            state.chats = vec![chat("future", 0, Some(ahead))];
+            state.mark_chat_seen("future", cx);
+        });
+        cx.run_until_parked();
+        state.update(cx, |state, cx| {
+            assert!(
+                !state.chats[0].unseen(),
+                "seen stamp covers the future-dated message"
+            );
+            state.mark_chat_seen("future", cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), 1, "a settled chat is not re-marked");
     }
 
     #[gpui::test]

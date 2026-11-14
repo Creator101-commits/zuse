@@ -1288,20 +1288,25 @@ impl RegistryDoc {
     }
 
     /// Synced seen marker (LWW) with a monotonic guard: no write when the
-    /// stored stamp is already >= `at`.
+    /// stored stamp is already >= `at`. Seeing a chat covers its latest
+    /// message, so the stamp never lands before `lastMessageAt`: a message
+    /// dated ahead of this clock (another device's skew, imported history)
+    /// would otherwise stay "unseen" however often it is marked.
     pub fn set_chat_seen(&mut self, chat_id: &str, at: DateTime<Utc>) -> Result<bool, DocError> {
         let Some(row) = self.overlay_row(KIND_CHATS, chat_id) else {
             return Ok(false);
         };
+        let last_message = row.fields.get("lastMessageAt").and_then(Value::as_i64);
+        let at = at.timestamp_millis().max(last_message.unwrap_or(i64::MIN));
         let current = row.fields.get("lastSeenAt").and_then(Value::as_i64);
-        if current.is_some_and(|ms| ms >= at.timestamp_millis()) {
+        if current.is_some_and(|ms| ms >= at) {
             return Ok(true);
         }
         self.write(
             KIND_CHATS,
             chat_id,
             OpKind::Update,
-            fields([("lastSeenAt", json!(at.timestamp_millis()))]),
+            fields([("lastSeenAt", json!(at))]),
         );
         Ok(true)
     }
