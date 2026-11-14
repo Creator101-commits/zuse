@@ -141,6 +141,49 @@ async fn forward(
     }
     Ok(response)
 }
+/// The CA file named by a database URL's `sslrootcert`, if it is a file path.
+fn sslrootcert(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let ca = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "sslrootcert")
+        .map(|(_, v)| v.into_owned())?;
+    (ca.starts_with('/') && ca != "system").then_some(ca)
+}
+#[cfg(test)]
+mod sslrootcert_tests {
+    #[test]
+    fn sqlx_file_prefix_is_stripped_from_the_worker_url() {
+        let options: sqlx::postgres::PgConnectOptions =
+            "postgresql://u:p@db.example:5432/postgres?sslmode=verify-full&sslrootcert=/etc/zuse/ca.crt"
+                .parse()
+                .unwrap();
+        let lossy = sqlx::ConnectOptions::to_url_lossy(&options);
+        assert!(lossy.as_str().contains("sslrootcert=file"), "{lossy}");
+        let url = super::Executor::worker_url(lossy, "zuse_staging");
+        assert_eq!(super::sslrootcert(&url), Some("/etc/zuse/ca.crt".into()));
+        assert!(
+            url.contains("search_path%3Dzuse_staging") || url.contains("search_path=zuse_staging")
+        );
+    }
+    #[test]
+    fn database_ca_is_passed_to_the_worker_only_for_file_paths() {
+        assert_eq!(
+            super::sslrootcert(
+                "postgresql://u:p@db.example:5432/postgres?sslmode=verify-full&sslrootcert=%2Fetc%2Fzuse%2Fca.crt"
+            ),
+            Some("/etc/zuse/ca.crt".into())
+        );
+        assert_eq!(
+            super::sslrootcert("postgresql://u@db.example/postgres?sslrootcert=system"),
+            None
+        );
+        assert_eq!(
+            super::sslrootcert("postgresql://u@127.0.0.1/postgres"),
+            None
+        );
+    }
+}
 impl Executor {
     async fn database_url(pool: &sqlx::PgPool) -> Result<String, ApiError> {
         let mut url = pool.connect_options().to_url_lossy();
@@ -153,17 +196,24 @@ impl Executor {
         {
             return Err(ApiError::unavailable("executor_schema_invalid"));
         }
+        Ok(Self::worker_url(url, &schema))
+    }
+    /// The worker's database URL: no sqlx-only parameters, the schema pinned
+    /// via `options`, and a CA file as a bare path (sqlx writes "file: <path>").
+    fn worker_url(mut url: reqwest::Url, schema: &str) -> String {
         let local = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"));
         let pairs: Vec<_> = url
             .query_pairs()
             .filter(|(k, _)| k != "statement-cache-capacity" && k != "options")
             .map(|(k, v)| {
                 let v = if local && k == "sslmode" && v == "prefer" {
-                    "disable".into()
+                    "disable".to_owned()
+                } else if k == "sslrootcert" {
+                    v.strip_prefix("file: ").unwrap_or(&v).to_owned()
                 } else {
-                    v
+                    v.into_owned()
                 };
-                (k.into_owned(), v.into_owned())
+                (k.into_owned(), v)
             })
             .collect();
         url.set_query(None);
@@ -171,7 +221,7 @@ impl Executor {
             "options",
             &format!("-c search_path={schema} -c statement_timeout=15000 -c lock_timeout=5000"),
         );
-        Ok(url.into())
+        url.into()
     }
     fn command(url: &str, key: &MasterKey, token: &str, proxy: &str) -> tokio::process::Command {
         let script = std::env::var("ZUSE_CLOUD_EXECUTOR_SCRIPT").unwrap_or_else(|_| {
@@ -187,7 +237,15 @@ impl Executor {
         command
             .arg(script)
             .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        // The SDK's own Postgres driver ignores `sslrootcert` in the URL and
+        // verifies against the system roots, so a private database CA (as on
+        // Supabase) fails with SELF_SIGNED_CERT_IN_CHAIN. Trust that CA file
+        // for the worker process instead.
+        if let Some(ca) = sslrootcert(url) {
+            command.env("NODE_EXTRA_CA_CERTS", ca);
+        }
+        command
             .env("ZUSE_EXECUTOR_DATABASE_URL", url)
             .env("ZUSE_EXECUTOR_ENCRYPTION_KEY", key.executor_key().as_str())
             .env("ZUSE_EXECUTOR_TOKEN", token)
