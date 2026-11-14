@@ -1,0 +1,19 @@
+{
+  "name": "@zuse/analytics",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./active-time": "./src/active-time.ts",
+    "./events": "./src/events.ts",
+    "./identity": "./src/identity.ts",
+    "./envelope": "./src/envelope.ts"
+  },
+  "scripts": {
+    "test": "bun test test"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0"
+  }
+}

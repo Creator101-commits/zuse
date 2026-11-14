@@ -1037,3 +1037,22 @@ mod background_task_tests {
         assert_eq!(turn.background_stop_requested().await, "b");
     }
 }
+
+/// Bundled vendor model IDs safe for anonymous product analytics. Configured/custom
+/// rows and arbitrary ACP/OpenCode/Pi model names are intentionally excluded.
+pub fn analytics_model_catalogs() -> Vec<(&'static str, Vec<String>)> {
+    let codex: Vec<_> = codex::catalog::static_models()
+        .into_iter()
+        .map(|model| model.id)
+        .collect();
+    let claude: Vec<_> = claude::catalog::static_models()
+        .into_iter()
+        .map(|model| model.id)
+        .collect();
+    let native = codex
+        .iter()
+        .cloned()
+        .chain(codex.iter().map(|id| format!("chatgpt/{id}")))
+        .collect();
+    vec![("codex", codex), ("claude", claude), ("native", native)]
+}

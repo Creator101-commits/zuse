@@ -1,0 +1,298 @@
+use super::*;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
+
+#[test]
+fn payload_boundary_rejects_content_and_unknown_events() {
+    assert!(sanitize("untrusted title", json!({})).is_none());
+    assert_eq!(
+        sanitize(
+            "turn completed",
+            json!({
+                "provider": "my private integration", "tool_count": 4,
+                "tool_failure_count": -1, "duration_ms": 12,
+                "prompt": "private", "path": "/home/private", "error": "secret",
+                "input_tokens": "credential", "model": "private-model"
+            })
+        ),
+        Some(json!({"tool_count": 4, "duration_ms": 12, "model": "custom"}))
+    );
+    assert!(feature("ReadWorkspaceFile", &json!({})).is_none());
+    assert_eq!(
+        feature("Mutate", &json!({"op": "createChat", "title": "secret"})),
+        Some("chat created")
+    );
+    assert!(feature("Mutate", &json!({"op": "private"})).is_none());
+}
+
+fn request() -> zuse_protocol::RunRequest {
+    serde_json::from_value(json!({"prompt": "private prompt", "model": "gpt-6-astra",
+        "reasoning": "high", "cwd": "/private/repository", "sandbox": "workspace-write", "resume": null})).unwrap()
+}
+
+#[test]
+fn vendor_models_are_scoped_and_custom_identifiers_are_redacted() {
+    let models = HashMap::from([("codex".into(), HashSet::from(["gpt-6-astra".into()]))]);
+    let valid = sanitize_with_models(
+        "message submitted",
+        json!({"provider": "codex", "model": "gpt-6-astra",
+        "reasoning_effort": "high", "permission_mode": "workspace-write", "plan_mode": true}),
+        &models,
+    )
+    .unwrap();
+    assert_eq!(valid["model"], "gpt-6-astra");
+    assert_eq!(valid["reasoning_effort"], "high");
+    assert_eq!(valid["plan_mode"], true);
+    for provider in ["acp", "opencode", "claude"] {
+        let redacted = sanitize_with_models(
+            "turn started",
+            json!({"provider": provider, "model": "gpt-6-astra"}),
+            &models,
+        )
+        .unwrap();
+        assert_eq!(redacted["model"], "custom");
+    }
+    let invalid = sanitize_with_models("turn completed", json!({"provider": "codex", "model": "company-private-model",
+        "actual_model": "https://private/model", "reasoning_effort": "secret setting", "prompt": "private prompt"}), &models).unwrap();
+    assert_eq!(invalid["model"], "custom");
+    assert_eq!(invalid["actual_model"], "custom");
+    assert!(!invalid.to_string().contains("private"));
+}
+
+#[test]
+fn turn_counts_deduplicate_tools_and_separate_nested_usage() {
+    use zuse_protocol::{AgentEvent, DoneStatus, HarnessId, ToolCall};
+    let mut turn = turn::Turn::new(HarnessId::Codex, &request(), false, false);
+    assert_eq!(turn.finish()["usage_status"], "unknown");
+    assert!(turn.finish().get("input_tokens").is_none());
+    let call = AgentEvent::ToolCall {
+        id: "private-call-id".into(),
+        call: ToolCall::Exec {
+            command: "private command".into(),
+        },
+    };
+    turn.observe(&call);
+    turn.observe(&call);
+    let result = AgentEvent::ToolResult {
+        id: "private-call-id".into(),
+        is_error: true,
+        output: Some("private output".into()),
+        diff: None,
+    };
+    turn.observe(&result);
+    turn.observe(&result);
+    turn.observe(&AgentEvent::Usage {
+        input_tokens: 100,
+        output_tokens: 20,
+    });
+    turn.observe(&AgentEvent::Usage {
+        input_tokens: 120,
+        output_tokens: 30,
+    });
+    turn.observe(&AgentEvent::Subagent {
+        parent_tool_use_id: "private-subagent".into(),
+        event: Box::new(AgentEvent::Usage {
+            input_tokens: 900,
+            output_tokens: 900,
+        }),
+    });
+    turn.observe(&AgentEvent::Subagent {
+        parent_tool_use_id: "private-subagent".into(),
+        event: Box::new(AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        }),
+    });
+    let result = turn.finish();
+    assert_eq!(result["tool_count"], 1);
+    assert_eq!(result["shell_tool_count"], 1);
+    assert_eq!(result["tool_failure_count"], 1);
+    assert_eq!(result["subagent_count"], 1);
+    assert_eq!(result["subagent_completed_count"], 1);
+    assert_eq!(result["input_tokens"], 120);
+    assert_eq!(result["output_tokens"], 30);
+    assert!(!result.to_string().contains("private"));
+    let next = turn.restart(true).finish();
+    assert_eq!(next["tool_count"], 0);
+    assert_eq!(next["usage_status"], "unknown");
+    assert_eq!(next["continuation"], true);
+}
+
+#[test]
+fn native_usage_sums_requests_and_never_emits_accounting_identifiers() {
+    use zuse_protocol::{AgentEvent, HarnessId};
+    let mut turn = turn::Turn::new(HarnessId::Zuse, &request(), false, false);
+    turn.observe(&AgentEvent::Usage {
+        input_tokens: 100,
+        output_tokens: 20,
+    });
+    turn.observe(&AgentEvent::Usage {
+        input_tokens: 40,
+        output_tokens: 10,
+    });
+    let accounting = AgentEvent::RequestUsage {
+        details: json!({"requestId": "private-request-id", "retryIndex": 0,
+        "connectionId": "private-account-id", "model": "private-model", "errorCode": "private-error-message",
+        "usage": {"cachedTokens": 8, "cacheWriteTokens": 4, "reasoningTokens": 6} }),
+    };
+    turn.observe(&accounting);
+    turn.observe(&accounting);
+    let result = turn.finish();
+    assert_eq!(result["input_tokens"], 140);
+    assert_eq!(result["output_tokens"], 30);
+    assert_eq!(result["request_attempt_count"], 1);
+    assert_eq!(result["request_failure_count"], 1);
+    assert_eq!(result["cache_read_tokens"], 8);
+    assert_eq!(result["cache_creation_tokens"], 4);
+    assert_eq!(result["reasoning_tokens"], 6);
+    assert!(!result.to_string().contains("private"));
+}
+
+#[tokio::test]
+async fn persisted_opt_out_and_account_rotation() {
+    let dir = tempfile::tempdir().unwrap();
+    let analytics = Analytics::start(dir.path(), "test".into(), "http://127.0.0.1:1".into(), true);
+    let original = analytics
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .preference
+        .anonymous_id
+        .clone();
+    let install = analytics
+        .0
+        .state
+        .lock()
+        .unwrap()
+        .preference
+        .install_id
+        .clone();
+    analytics.set_account(Some("private-account"));
+    let id = analytics.0.state.lock().unwrap().account.clone().unwrap();
+    assert_eq!(id, account_id("private-account"));
+    assert!(!id.contains("private-account"));
+    analytics.set_account(None);
+    assert_eq!(
+        analytics.0.state.lock().unwrap().preference.install_id,
+        install
+    );
+    assert_ne!(
+        original,
+        analytics.0.state.lock().unwrap().preference.anonymous_id
+    );
+    analytics.set_enabled(false).unwrap();
+    analytics.shutdown().await;
+    let reopened = Analytics::start(dir.path(), "test".into(), "http://127.0.0.1:1".into(), true);
+    assert!(!reopened.status().enabled);
+    reopened.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_consent_fails_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("analytics.json"), b"broken").unwrap();
+    let analytics = Analytics::start(dir.path(), "test".into(), "http://127.0.0.1:1".into(), true);
+    assert!(!analytics.status().enabled);
+    analytics.shutdown().await;
+}
+
+async fn server(status: &'static str) -> (String, tokio::task::JoinHandle<Value>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut bytes = Vec::new();
+        let body = loop {
+            let mut buffer = [0; 8192];
+            let count = stream.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0);
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(end) = bytes.windows(4).position(|v| v == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..end]);
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_owned)
+                    })
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                if bytes.len() >= end + 4 + length {
+                    break serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap();
+                }
+            }
+        };
+        stream
+            .write_all(
+                format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        body
+    });
+    (url, handle)
+}
+
+#[tokio::test]
+async fn batch_delivery_preserves_identity_and_scrubs_payload() {
+    let (url, request) = server("200 OK").await;
+    let dir = tempfile::tempdir().unwrap();
+    let analytics = Analytics::start(dir.path(), "public-test-key".into(), url, true);
+    analytics.register_vendor_models("codex", ["gpt-6-astra".to_owned()]);
+    analytics.capture(
+        "turn completed",
+        json!({"provider": "codex", "model": "gpt-6-astra", "reasoning_effort": "high", "tool_count": 2, "prompt": "private prompt"}),
+    );
+    analytics.shutdown().await;
+    let payload = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload["api_key"], "public-test-key");
+    let event = &payload["batch"][0];
+    assert_eq!(event["event"], "turn completed");
+    assert_eq!(event["properties"]["model"], "gpt-6-astra");
+    assert_eq!(event["properties"]["reasoning_effort"], "high");
+    assert!(
+        event["properties"]["install_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("install_")
+    );
+    assert!(uuid::Uuid::parse_str(event["uuid"].as_str().unwrap()).is_ok());
+    assert_eq!(event["properties"]["$process_person_profile"], false);
+    assert_eq!(event["properties"]["analytics_schema_version"], 2);
+    assert!(!payload.to_string().contains("private prompt"));
+}
+
+#[tokio::test]
+async fn revocation_discards_queued_events_before_delivery() {
+    let (url, request) = server("200 OK").await;
+    let dir = tempfile::tempdir().unwrap();
+    let analytics = Analytics::start(dir.path(), "test".into(), url, true);
+    analytics.capture("app opened", json!({}));
+    analytics.set_enabled(false).unwrap();
+    analytics.capture("app opened", json!({}));
+    analytics.shutdown().await;
+    assert!(!request.is_finished());
+    request.abort();
+}
+
+#[tokio::test]
+async fn missing_configuration_never_delivers() {
+    let (url, request) = server("200 OK").await;
+    let dir = tempfile::tempdir().unwrap();
+    let analytics = Analytics::start(dir.path(), "".into(), url, false);
+    analytics.capture("app opened", json!({}));
+    analytics.shutdown().await;
+    assert!(!request.is_finished());
+    request.abort();
+}

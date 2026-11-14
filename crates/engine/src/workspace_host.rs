@@ -175,6 +175,7 @@ pub struct WorkspaceHostConfig {
 }
 
 struct WorkspaceHostInner {
+    analytics: std::sync::OnceLock<zuse_analytics::Analytics>,
     store: Arc<DocsStore>,
     config: WorkspaceHostConfig,
     reg: Arc<Mutex<RegistryDoc>>,
@@ -326,6 +327,7 @@ impl WorkspaceHost {
 
         let host = Self {
             inner: Arc::new(WorkspaceHostInner {
+                analytics: std::sync::OnceLock::new(),
                 store,
                 config,
                 reg: Arc::new(Mutex::new(doc)),
@@ -668,6 +670,57 @@ impl WorkspaceHost {
 
     fn read<R>(&self, f: impl FnOnce(&RegistryDoc) -> R) -> R {
         f(&lock(&self.inner.reg))
+    }
+
+    pub fn set_analytics(&self, analytics: zuse_analytics::Analytics) {
+        let _ = self.inner.analytics.set(analytics);
+    }
+
+    pub fn record_chat_opened(&self, chat_id: &str, surface: &str) -> Result<(), EngineError> {
+        let Some(chat) = self.chat(chat_id)? else {
+            return Ok(());
+        };
+        self.record_chat_event("chat opened", &chat, surface);
+        Ok(())
+    }
+
+    fn record_chat_event(&self, event: &str, chat: &Chat, surface: &str) {
+        if zuse_protocol::voice::is_orchestrator_chat(&chat.id) {
+            return;
+        }
+        if let Some(analytics) = self.inner.analytics.get() {
+            let mut properties = chat
+                .config
+                .as_ref()
+                .map(zuse_analytics::dimensions::config)
+                .unwrap_or_else(|| serde_json::json!({}));
+            properties["subagent"] = serde_json::json!(chat.parent_chat_id.is_some());
+            properties["projectless"] = serde_json::json!(chat.space_id.is_none());
+            analytics.capture_from(surface, event, properties);
+        }
+    }
+
+    fn record_config_change(&self, previous: Option<&ChatConfig>, config: &ChatConfig) {
+        if previous == Some(config) {
+            return;
+        }
+        if let Some(analytics) = self.inner.analytics.get() {
+            let mut properties = zuse_analytics::dimensions::config(config);
+            let model_changed = previous.is_none_or(|before| {
+                before.harness != config.harness || before.model != config.model
+            });
+            if model_changed {
+                if let Some(before) = previous {
+                    properties["previous_provider"] =
+                        serde_json::json!(zuse_analytics::dimensions::provider(before.harness));
+                    properties["previous_model"] =
+                        serde_json::json!(before.model.as_deref().unwrap_or("default"));
+                }
+                analytics.capture("model changed", properties);
+            } else {
+                analytics.capture("chat settings changed", properties);
+            }
+        }
     }
 
     /// The chat row as currently known (overlay view).
@@ -1040,7 +1093,10 @@ impl WorkspaceHost {
             }
             None => cwd.unwrap_or_default(),
         };
-        self.mutate(|doc| {
+        let created = self.mutate(|doc| -> Result<bool, zuse_doc::DocError> {
+            if doc.chat(chat_id)?.is_some() {
+                return Ok(false);
+            }
             doc.upsert_chat(&Chat {
                 id: chat_id.to_string(),
                 device_id: host_device.clone(),
@@ -1064,8 +1120,12 @@ impl WorkspaceHost {
                 last_seen_at: None,
                 parent_chat_id: parent_chat_id.filter(|p| !p.trim().is_empty()),
                 thread_id: None,
-            })
+            })?;
+            Ok(true)
         })?;
+        if created && let Ok(Some(chat)) = self.chat(chat_id) {
+            self.record_chat_event("chat created", &chat, "engine");
+        }
         Ok(())
     }
 
@@ -1238,13 +1298,29 @@ impl WorkspaceHost {
     }
 
     pub fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.set_chat_archived(chat_id, archived))?)
+        let (updated, changed) = self.mutate(|doc| -> Result<_, zuse_doc::DocError> {
+            let previous = doc.chat(chat_id)?.map(|chat| chat.archived);
+            let updated = doc.set_chat_archived(chat_id, archived)?;
+            Ok((updated, updated && previous != Some(archived)))
+        })?;
+        if changed && let Ok(Some(chat)) = self.chat(chat_id) {
+            self.record_chat_event(
+                if archived {
+                    "chat archived"
+                } else {
+                    "chat restored"
+                },
+                &chat,
+                "engine",
+            );
+        }
+        Ok(updated)
     }
 
     /// Fresh conversation in an existing thread's exact checkout. No history,
     /// provider cursor or orchestration ancestry is copied into the new tab.
     pub fn create_thread_session(&self, source: &Chat, id: &str) -> Result<Chat, EngineError> {
-        self.mutate(|doc| -> Result<Chat, EngineError> {
+        let (chat, created) = self.mutate(|doc| -> Result<(Chat, bool), EngineError> {
             let current = doc
                 .chat(&source.id)?
                 .ok_or_else(|| EngineError::Other("Thread no longer exists.".into()))?;
@@ -1260,7 +1336,7 @@ impl WorkspaceHost {
             }
             if let Some(existing) = doc.chat(id)? {
                 if existing.thread_id.as_deref() == Some(source.id.as_str()) {
-                    return Ok(existing);
+                    return Ok((existing, false));
                 }
                 return Err(EngineError::Other(
                     "Conversation id is already in use.".into(),
@@ -1278,8 +1354,12 @@ impl WorkspaceHost {
             chat.harness_session_cwd = None;
             chat.created_at = Utc::now();
             doc.upsert_chat(&chat)?;
-            Ok(chat)
-        })
+            Ok((chat, true))
+        })?;
+        if created {
+            self.record_chat_event("chat created", &chat, "engine");
+        }
+        Ok(chat)
     }
 
     /// Install an authority-registered cloud conversation before its first
@@ -1348,12 +1428,12 @@ impl WorkspaceHost {
         checkout_id: Option<&str>,
         branch: Option<&str>,
     ) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| {
+        let (updated, changed) = self.mutate(|doc| -> Result<_, zuse_doc::DocError> {
             let Some(current) = doc.chat(&expected.id)? else {
-                return Ok(false);
+                return Ok((false, false));
             };
             if current.device_id != expected.device_id || current.cwd != expected.cwd {
-                return Ok(false);
+                return Ok((false, false));
             }
             if let Some(checkout) = checkout_id {
                 doc.set_chat_checkout(&expected.id, checkout)?;
@@ -1361,8 +1441,21 @@ impl WorkspaceHost {
             if let Some(branch) = branch {
                 doc.set_chat_branch(&expected.id, branch)?;
             }
-            doc.set_chat_archived(&expected.id, archived)
-        })?)
+            let updated = doc.set_chat_archived(&expected.id, archived)?;
+            Ok((updated, updated && current.archived != archived))
+        })?;
+        if changed && let Ok(Some(chat)) = self.chat(&expected.id) {
+            self.record_chat_event(
+                if archived {
+                    "chat archived"
+                } else {
+                    "chat restored"
+                },
+                &chat,
+                "engine",
+            );
+        }
+        Ok(updated)
     }
 
     /// Compare ownership and configuration under the registry mutation lock.
@@ -1373,18 +1466,35 @@ impl WorkspaceHost {
         expected: &Option<ChatConfig>,
         config: &ChatConfig,
     ) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.compare_set_chat_config(chat_id, device_id, expected, config))?)
+        let (updated, previous) = self.mutate(|doc| -> Result<_, zuse_doc::DocError> {
+            let previous = doc.chat(chat_id)?.and_then(|chat| chat.config);
+            let updated = doc.compare_set_chat_config(chat_id, device_id, expected, config)?;
+            Ok((updated, previous))
+        })?;
+        if updated {
+            self.record_config_change(previous.as_ref(), config);
+        }
+        Ok(updated)
     }
 
     /// Replace the saved configuration; false when the chat does not exist.
     pub fn set_chat_config(&self, chat_id: &str, config: &ChatConfig) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| doc.set_chat_config(chat_id, config))?)
+        let (updated, previous) = self.mutate(|doc| -> Result<_, zuse_doc::DocError> {
+            let previous = doc.chat(chat_id)?.and_then(|chat| chat.config);
+            let updated = doc.set_chat_config(chat_id, config)?;
+            Ok((updated, previous))
+        })?;
+        if updated {
+            self.record_config_change(previous.as_ref(), config);
+        }
+        Ok(updated)
     }
 
     /// Tombstone: removes the chats (and session-status) row; the per-chat session
     /// doc remains untouched.
     pub fn delete_chat(&self, chat_id: &str) -> Result<bool, EngineError> {
-        Ok(self.mutate(|doc| -> Result<bool, zuse_doc::DocError> {
+        let previous = self.chat(chat_id).ok().flatten();
+        let deleted = self.mutate(|doc| -> Result<bool, zuse_doc::DocError> {
             // Deleting a conversation never hides the other saved sessions.
             for mut conversation in doc
                 .read_chats()?
@@ -1395,7 +1505,11 @@ impl WorkspaceHost {
                 doc.upsert_chat(&conversation)?;
             }
             doc.delete_chat(chat_id)
-        })?)
+        })?;
+        if deleted && let Some(chat) = previous {
+            self.record_chat_event("chat deleted", &chat, "engine");
+        }
+        Ok(deleted)
     }
 
     pub fn rename_device(&self, device_id: &str, name: &str) -> Result<bool, EngineError> {

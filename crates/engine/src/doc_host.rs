@@ -245,6 +245,7 @@ pub struct DocHostConfig {
 }
 
 struct DocHostInner {
+    analytics: OnceLock<zuse_analytics::Analytics>,
     canonical_cloud_commands: AtomicBool,
     managed_recovery: AtomicBool,
     managed_opened: Mutex<HashSet<String>>,
@@ -1047,6 +1048,57 @@ impl ChatDocHandle {
 }
 
 impl DocHost {
+    pub(crate) fn workspace_host(&self) -> Option<WorkspaceHost> {
+        self.inner.workspace.get().cloned()
+    }
+
+    pub fn set_analytics(&self, analytics: zuse_analytics::Analytics) {
+        let _ = self.inner.analytics.set(analytics);
+    }
+
+    fn record_command_analytics(&self, chat_id: &str, payload: &SessionCommandPayload) {
+        let Some(analytics) = self.inner.analytics.get() else {
+            return;
+        };
+        let config = self
+            .inner
+            .workspace
+            .get()
+            .and_then(|workspace| workspace.chat_config(chat_id));
+        let mut properties = config
+            .as_ref()
+            .map(zuse_analytics::dimensions::config)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let event = match payload {
+            SessionCommandPayload::Run { request, .. } => {
+                properties = zuse_analytics::dimensions::request(
+                    request
+                        .harness
+                        .or(config.as_ref().map(|c| c.harness))
+                        .unwrap_or(self.inner.config.default_harness),
+                    request,
+                );
+                properties["submission_kind"] = serde_json::json!("run");
+                properties["attachment_count"] = serde_json::json!(request.attachments.len());
+                properties["input_length_bucket"] = serde_json::json!(
+                    zuse_analytics::dimensions::input_length(request.prompt.chars().count())
+                );
+                "message submitted"
+            }
+            SessionCommandPayload::Steer { prompt, .. } => {
+                properties["submission_kind"] = serde_json::json!("steer");
+                properties["input_length_bucket"] = serde_json::json!(
+                    zuse_analytics::dimensions::input_length(prompt.chars().count())
+                );
+                "message submitted"
+            }
+            SessionCommandPayload::Interrupt {} => "turn interrupt requested",
+            SessionCommandPayload::RespondInput { .. } => "permission answered",
+            _ => return,
+        };
+        analytics.capture(event, properties);
+    }
+
     /// Best-effort dirty notifications, not transcript history. Subscribe before
     /// reading a baseline and rescan persisted documents if the receiver lags.
     pub fn document_changes(&self) -> tokio::sync::broadcast::Receiver<String> {
@@ -1056,6 +1108,7 @@ impl DocHost {
     pub fn new(store: Arc<DocsStore>, config: DocHostConfig) -> Self {
         let host = Self {
             inner: Arc::new(DocHostInner {
+                analytics: OnceLock::new(),
                 canonical_cloud_commands: AtomicBool::new(false),
                 managed_recovery: AtomicBool::new(false),
                 managed_opened: Mutex::new(HashSet::new()),
@@ -3722,16 +3775,24 @@ impl DocHost {
             self.require_unarchived(chat_id)?;
         }
         let handle = self.open(chat_id)?;
-        if let Some(entry) = handle
-            .doc
-            .read_commands()?
-            .into_iter()
-            .find(|entry| entry.id == id)
-        {
+        let previous_commands = handle.doc.read_commands()?;
+        if let Some(entry) = previous_commands.iter().find(|entry| entry.id == id) {
             self.nudge_remote_host(chat_id);
-            self.spawn_command_delivery(chat_id, entry, transfers);
+            self.spawn_command_delivery(chat_id, entry.clone(), transfers);
             return Ok(id);
         }
+        let message_id = |payload: &SessionCommandPayload| -> Option<String> {
+            match payload {
+                SessionCommandPayload::Run { message_id, .. } => Some(message_id.clone()),
+                SessionCommandPayload::Steer { message_id, .. } => message_id.clone(),
+                _ => None,
+            }
+        };
+        let duplicate_message = message_id(&payload).is_some_and(|id| {
+            previous_commands
+                .iter()
+                .any(|entry| message_id(&entry.payload).as_deref() == Some(id.as_str()))
+        });
         let now = now_ms();
         let based_on = handle.doc.last_entry_id().map(|id| CommandBasedOn {
             turn_id: Some(id),
@@ -3748,6 +3809,9 @@ impl DocHost {
             resolution: None,
         };
         handle.doc.queue_command(&entry)?;
+        if !duplicate_message {
+            self.record_command_analytics(chat_id, &entry.payload);
+        }
         // The cold host must discover the command even after its room rows
         // are ACKed. Persist that wake independently and recover it on restart.
         self.nudge_remote_host(chat_id);

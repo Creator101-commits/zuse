@@ -738,6 +738,7 @@ enum MutateParams {
 
 #[derive(Clone)]
 pub struct EngineRpc {
+    analytics: Option<zuse_analytics::Analytics>,
     archives: crate::archives::Archives,
     usage: Option<crate::usage::Usage>,
     pairings: Option<zuse_remote::authority::Authority>,
@@ -805,6 +806,7 @@ impl EngineRpc {
         let github = GitHubCli::new().with_store(repos.data_dir());
         let archives = crate::archives::Archives::new(repos.data_dir());
         Self {
+            analytics: None,
             archives,
             usage: None,
             pairings: None,
@@ -852,6 +854,11 @@ impl EngineRpc {
         service: crate::project_creation::ProjectCreationService,
     ) -> Self {
         self.project_creation = Some(service);
+        self
+    }
+
+    pub fn with_analytics(mut self, analytics: zuse_analytics::Analytics) -> Self {
+        self.analytics = Some(analytics);
         self
     }
 
@@ -2475,6 +2482,88 @@ impl RpcService for AuthRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if method == methods::RECORD_CHAT_OPENED {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Opened {
+                chat_id: String,
+                surface: String,
+            }
+            let opened: Opened = parse_params(params)?;
+            if !["desktop", "web", "ios", "android"].contains(&opened.surface.as_str()) {
+                return Err(RpcError::BadParams("Unknown analytics surface".into()));
+            }
+            self.workspace
+                .record_chat_opened(&opened.chat_id, &opened.surface)
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+            return RpcReply::value(&serde_json::json!({"ok": true}));
+        }
+        if method == methods::GET_ANALYTICS_SETTINGS || method == methods::SET_ANALYTICS_SETTINGS {
+            if params
+                .get("targetDeviceId")
+                .filter(|value| !value.is_null())
+                .is_some_and(|value| value.as_str() != Some(self.doc_host.device_id()))
+            {
+                return Err(RpcError::BadParams(
+                    "Analytics settings belong to the connected engine".into(),
+                ));
+            }
+            let analytics = self
+                .analytics
+                .as_ref()
+                .ok_or_else(|| RpcError::Failed("Analytics unavailable".into()))?;
+            if method == methods::SET_ANALYTICS_SETTINGS {
+                let enabled = params
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .ok_or_else(|| RpcError::BadParams("enabled must be a boolean".into()))?;
+                analytics
+                    .set_enabled(enabled)
+                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+            }
+            return RpcReply::value(&analytics.status());
+        }
+        if let Some(analytics) = &self.analytics {
+            let id = self
+                .account
+                .as_ref()
+                .and_then(|account| account.status().user.map(|user| user.id))
+                .or_else(|| {
+                    if matches!(
+                        self.engine_info.workspace_scope,
+                        WorkspaceScope::Local | WorkspaceScope::Development
+                    ) {
+                        None
+                    } else {
+                        self.auth.as_ref().and_then(|auth| auth.user_id())
+                    }
+                });
+            analytics.set_account(id.as_deref());
+        }
+        let feature = zuse_analytics::feature(method, &params);
+        let started = std::time::Instant::now();
+        let result = self.handle_with_admission(method, params).await;
+        if method == methods::CLOUD_ACCOUNT_SIGN_OUT
+            && result.is_ok()
+            && let Some(analytics) = &self.analytics
+        {
+            analytics.set_account(None);
+        }
+        if let (Some(analytics), Some(feature)) = (&self.analytics, feature) {
+            analytics.capture("feature used", serde_json::json!({
+                "feature": feature, "outcome": if result.is_ok() { "success" } else { "failure" },
+                "duration_ms": started.elapsed().as_millis() as u64,
+            }));
+        }
+        result
+    }
+}
+impl EngineRpc {
+    async fn handle_with_admission(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
         if methods::retryable_read(method, &params) {
             return self.handle_admitted(method, params).await;
         }
@@ -3737,6 +3826,14 @@ impl EngineRpc {
                 )
                 .await
                 .map_err(|e| RpcError::Failed(e.to_string()))?;
+                if matches!(p.harness, HarnessId::Cursor | HarnessId::Zuse)
+                    && let Some(analytics) = &self.analytics
+                {
+                    analytics.register_vendor_models(
+                        &zuse_analytics::dimensions::provider(p.harness),
+                        models.iter().map(|model| model.id.clone()),
+                    );
+                }
                 RpcReply::value(&self.registry.apply_model_prefs(p.harness, models))
             }
             methods::LIST_PROVIDER_MODELS | methods::SET_PROVIDER_MODELS => {

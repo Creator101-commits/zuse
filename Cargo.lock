@@ -14376,6 +14376,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "zuse-analytics"
+version = "0.26.0"
+dependencies = [
+ "chrono",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "zuse-protocol",
+]
+
+[[package]]
 name = "zuse-audio"
 version = "0.26.0"
 dependencies = [
@@ -14689,6 +14704,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "zeroize",
  "zip",
+ "zuse-analytics",
  "zuse-browser-page",
  "zuse-cloud-projection",
  "zuse-doc",
@@ -15210,6 +15226,7 @@ dependencies = [
  "wry",
  "x11rb 0.14.0",
  "zkit-dither",
+ "zuse-analytics",
  "zuse-doc",
  "zuse-engine",
  "zuse-i18n",

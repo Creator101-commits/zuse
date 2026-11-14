@@ -89,6 +89,8 @@ export const M = {
   GET_CHECKOUT_FILE_DIFF_TEXT: "GetCheckoutFileDiffText",
   GET_CUSTOM_ACP_AGENTS: "GetCustomAcpAgents",
   GET_GIT_WORKSPACE: "GetGitWorkspace",
+  RECORD_CHAT_OPENED: "RecordChatOpened",
+  GET_ANALYTICS_SETTINGS: "GetAnalyticsSettings",
   GET_TITLE_SETTINGS: "GetTitleSettings",
   GET_WORKTREE_SETTINGS: "GetWorktreeSettings",
   GIT_WORKSPACE_ACTION: "GitWorkspaceAction",
@@ -186,6 +188,7 @@ export const M = {
   SET_HARNESS_UPDATE_POLICY: "SetHarnessUpdatePolicy",
   SET_PR_WATCH: "SetPrWatch",
   SET_RELAY_AUTO_START: "SetRelayAutoStart",
+  SET_ANALYTICS_SETTINGS: "SetAnalyticsSettings",
   SET_TITLE_SETTINGS: "SetTitleSettings",
   SET_WORKTREE_SETTINGS: "SetWorktreeSettings",
   SIGN_IN: "SignIn",
@@ -250,6 +253,7 @@ export type Method = (typeof M)[keyof typeof M]
 
 /** Reads that may be repeated after a dropped connection. Everything else is a mutation. */
 const RETRYABLE = new Set<string>([
+  "GetAnalyticsSettings",
   "AuthStatus",
   "BrowserAccessStatus",
   "CloudAccountStatus",

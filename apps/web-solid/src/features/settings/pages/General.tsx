@@ -4,6 +4,7 @@ import { createEffect, createSignal, For, on, onMount, Show } from "solid-js";
 import { M } from "@/core/methods";
 import { rpc } from "@/core/connection";
 import { state } from "@/core/store";
+import { analyticsEnabled, setAnalyticsEnabled } from "@/core/analytics";
 import { setView, view } from "@/core/view";
 import { signInToAccount } from "@/features/connection";
 import { signOutOfAccount } from "@/features/connection/signin";
@@ -29,12 +30,50 @@ export function General() {
         <Language />
         <Theme />
         <Notices />
+        <Analytics />
         <ThreadNaming />
         <Worktrees />
         <About />
       </div>
     </>
   );
+}
+
+function Analytics() {
+  const [browser, setBrowser] = createSignal(analyticsEnabled());
+  const [engine, setEngine] = createSignal<{ enabled: boolean; configured: boolean } | null>(null);
+  const [busy, setBusy] = createSignal(false);
+  const [error, setError] = createSignal<string | null>(null);
+  createEffect(() => {
+    const epoch = state.epoch;
+    if (state.connection.kind !== "connected") { setEngine(null); return; }
+    void rpc.call<{ enabled: boolean; configured: boolean }>(M.GET_ANALYTICS_SETTINGS).then(
+      (status) => { if (state.epoch === epoch) setEngine(status); },
+      () => { if (state.epoch === epoch) setEngine(null); },
+    );
+  });
+  const saveBrowser = async (enabled: boolean) => {
+    setBrowser(enabled);
+    try { await setAnalyticsEnabled(enabled); setError(null); }
+    catch { setBrowser(false); setError("The analytics preference could not be saved."); }
+  };
+  const saveEngine = async (enabled: boolean) => {
+    setBusy(true);
+    try { setEngine(await rpc.call(M.SET_ANALYTICS_SETTINGS, { enabled })); setError(null); }
+    catch (error) { setError(message(error)); setEngine(null); }
+    finally { setBusy(false); }
+  };
+  return <Group title="Privacy" description="Pseudonymous product usage. Prompts, code, paths, and credentials are excluded.">
+    <Card>
+      <Row title="Share browser usage analytics" description="Screen visits and active time in this browser.">
+        <Switch checked={browser()} label="Share browser usage analytics" onChange={(value) => void saveBrowser(value)} />
+      </Row>
+      <Row title="Share engine usage analytics" description="Feature usage and turn outcomes on the connected engine.">
+        <Switch checked={engine()?.enabled ?? false} label="Share engine usage analytics" disabled={!engine() || busy()} onChange={(value) => void saveEngine(value)} />
+      </Row>
+    </Card>
+    <Show when={error()}>{(value) => <ErrorStrip>{value()}</ErrorStrip>}</Show>
+  </Group>;
 }
 
 interface AccountStatus {

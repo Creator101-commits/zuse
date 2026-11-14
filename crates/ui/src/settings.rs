@@ -18,6 +18,7 @@ use zuse_protocol::{AuthState, WorkspaceScope};
 
 mod access_widgets;
 pub mod accounts;
+mod analytics;
 pub mod appearance;
 pub mod archived;
 pub mod cloud_billing;
