@@ -133,24 +133,22 @@ impl AgentAccounts {
         let (status, body) = match &result {
             Ok(()) => (
                 "200 OK",
-                "<!doctype html><title>Signed in</title><p>Signed in to ChatGPT.</p>\
-                 <p>You can close this tab and return to Zuse.</p>"
-                    .to_string(),
+                zuse_browser_page::integration(
+                    "ChatGPT",
+                    zuse_browser_page::Outcome::Success,
+                    Some("Signed in to ChatGPT. You can close this tab and return to Zuse."),
+                ),
             ),
             Err(error) => (
                 "400 Bad Request",
-                format!(
-                    "<!doctype html><title>Sign-in failed</title><p>{}</p>\
-                     <p>Return to Zuse to try again.</p>",
-                    html_escape(&error.to_string())
+                zuse_browser_page::integration(
+                    "ChatGPT",
+                    zuse_browser_page::Outcome::Failure,
+                    Some(&format!("{error} Return to Zuse to try again.")),
                 ),
             ),
         };
-        let response = http_response(
-            status,
-            &[("Content-Type", "text/html; charset=utf-8")],
-            &body,
-        );
+        let response = zuse_browser_page::http_response(status, &body);
         let _ = browser.write_all(response.as_bytes()).await;
         let _ = browser.shutdown().await;
         result

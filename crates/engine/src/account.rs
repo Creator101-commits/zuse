@@ -16,6 +16,7 @@ use std::{
 };
 use tokio::sync::{Mutex as AsyncMutex, watch};
 use tokio_util::sync::CancellationToken;
+use zuse_browser_page::Outcome;
 use zuse_protocol::UserProfile;
 
 pub const API_URL: &str = crate::api_origins::DEFAULT_API_URL;
@@ -530,7 +531,12 @@ impl Account {
             };
             let outcome = match callback.parse(&request) {
                 CallbackRequest::Ignored(status, message) => {
-                    respond(&mut stream, status, message).await;
+                    let html = if status.starts_with("404") {
+                        zuse_browser_page::message("Nothing here", message)
+                    } else {
+                        zuse_browser_page::sign_in(Outcome::Failure, Some(message))
+                    };
+                    respond(&mut stream, status, &html).await;
                     continue;
                 }
                 CallbackRequest::Denied => Err(AccountError::Denied),
@@ -539,20 +545,24 @@ impl Account {
                     result = self.redeem(&code, &callback.verifier, generation) => result,
                 },
             };
-            let (status, message) = match &outcome {
-                Ok(()) => (
+            let (status, html) = match &outcome {
+                Ok(()) => ("200 OK", zuse_browser_page::sign_in(Outcome::Success, None)),
+                Err(AccountError::Denied) => (
                     "200 OK",
-                    "Signed in. You can close this tab and return to Zuse.",
+                    zuse_browser_page::sign_in(
+                        Outcome::Failure,
+                        Some("Sign-in was denied. Return to Zuse to try again."),
+                    ),
                 ),
-                Err(AccountError::Denied) => {
-                    ("200 OK", "Sign-in was denied. Return to Zuse to try again.")
-                }
                 Err(_) => (
                     "502 Bad Gateway",
-                    "Sign-in could not be completed. Return to Zuse and retry.",
+                    zuse_browser_page::sign_in(
+                        Outcome::Failure,
+                        Some("Sign-in could not be completed. Return to Zuse and retry."),
+                    ),
                 ),
             };
-            respond(&mut stream, status, message).await;
+            respond(&mut stream, status, &html).await;
             return outcome;
         }
     }
@@ -859,17 +869,9 @@ async fn read_request_head(stream: &mut tokio::net::TcpStream) -> Option<String>
     Some(String::from_utf8_lossy(&head).into_owned())
 }
 
-async fn respond(stream: &mut tokio::net::TcpStream, status: &str, message: &str) {
+async fn respond(stream: &mut tokio::net::TcpStream, status: &str, html: &str) {
     use tokio::io::AsyncWriteExt;
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Zuse</title><h1>Zuse</h1><p>{message}</p>"
-    );
-    let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncache-control: no-store\r\n\
-         referrer-policy: no-referrer\r\ncontent-security-policy: default-src 'none'\r\n\
-         content-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
+    let response = zuse_browser_page::http_response(status, html);
     let _ = stream.write_all(response.as_bytes()).await;
     let _ = stream.shutdown().await;
 }

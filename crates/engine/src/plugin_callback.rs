@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
+use zuse_browser_page::Outcome;
 use zuse_plugins::PluginClient;
 use zuse_protocol::plugins::PluginRequest;
 
@@ -67,16 +68,25 @@ async fn complete(
 ) -> Response {
     let expected = format!("127.0.0.1:{}", state.port);
     if headers.get(header::HOST).and_then(|v| v.to_str().ok()) != Some(expected.as_str()) {
-        return page(StatusCode::BAD_REQUEST, "Invalid sign-in callback.");
+        return page(
+            StatusCode::BAD_REQUEST,
+            Outcome::Failure,
+            "Invalid sign-in callback. Return to Zuse and retry.",
+        );
     }
     let (Some(ticket), Some(tenant)) = (query.plugin_ticket, query.plugin_tenant) else {
         return page(
             StatusCode::BAD_REQUEST,
+            Outcome::Failure,
             "Plugin sign-in did not complete. Return to Zuse and retry.",
         );
     };
     if ticket.len() > 256 || ticket.is_empty() || tenant.len() > 512 || tenant.is_empty() {
-        return page(StatusCode::BAD_REQUEST, "Invalid sign-in callback.");
+        return page(
+            StatusCode::BAD_REQUEST,
+            Outcome::Failure,
+            "Invalid sign-in callback. Return to Zuse and retry.",
+        );
     }
     match state
         .client
@@ -91,15 +101,17 @@ async fn complete(
     {
         Ok(_) => page(
             StatusCode::OK,
+            Outcome::Success,
             "Plugin authorization received. Return to Zuse to check the connection.",
         ),
         Err(_) => page(
             StatusCode::BAD_REQUEST,
+            Outcome::Failure,
             "Plugin sign-in could not be confirmed. Return to Zuse and retry.",
         ),
     }
 }
-fn page(status: StatusCode, message: &'static str) -> Response {
+fn page(status: StatusCode, outcome: Outcome, message: &'static str) -> Response {
     (
         status,
         [
@@ -108,13 +120,11 @@ fn page(status: StatusCode, message: &'static str) -> Response {
             (header::REFERRER_POLICY, "no-referrer"),
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; frame-ancestors 'none'",
+                zuse_browser_page::content_security_policy(),
             ),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
         ],
-        format!(
-            "<!doctype html><meta charset=utf-8><title>Zuse</title><h1>Zuse</h1><p>{message}</p>"
-        ),
+        zuse_browser_page::integration("Plugin", outcome, Some(message)),
     )
         .into_response()
 }

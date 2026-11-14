@@ -1,0 +1,89 @@
+:root{
+	--shell:#2a2a27;--shell-edge:#181713;--screen:#141412;--screen-fg:#f2f2ee;
+	--paper:#ffffff;--ink:#181713;
+}
+@media (prefers-color-scheme:dark){:root{--shell:#232320;--shell-edge:#0a0a09}}
+body{place-items:start center;padding:3rem 1.25rem 4rem}
+.stage{gap:0;max-width:24rem}
+.printer{
+	position:relative;z-index:2;width:100%;padding:.75rem .75rem 2rem;
+	border:1px solid var(--shell-edge);border-radius:1.5rem;background:var(--shell);
+	box-shadow:0 20px 36px -20px rgb(10 10 9 / 55%),0 6px 14px -8px rgb(10 10 9 / 34%),
+		inset 0 1px 0 rgb(255 255 255 / 10%),inset 0 -1px 0 rgb(10 10 9 / 55%);
+}
+.printer-head{
+	display:flex;align-items:center;justify-content:space-between;gap:.75rem;
+	padding:.25rem .5rem .75rem;color:rgb(242 242 238 / 62%);
+}
+.printer-head .micro{opacity:1}
+.screen{
+	position:relative;padding:1rem;border:1px solid var(--shell-edge);border-radius:.75rem;
+	background:var(--screen);color:var(--screen-fg);
+	box-shadow:inset 0 0 24px 4px rgb(10 10 9 / 52%);
+}
+.screen-row{display:flex;align-items:center;gap:.5rem}
+.screen-row span{font-size:.75rem;font-weight:500;line-height:1}
+.spinner{
+	width:14px;height:14px;flex:none;border-radius:50%;
+	border:2px solid rgb(242 242 238 / 25%);border-top-color:var(--accent);
+	animation:spin 900ms linear infinite;
+}
+.dot{width:14px;height:14px;flex:none;border-radius:50%;background:var(--accent)}
+.dot.failed{background:var(--danger)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.slot{
+	position:absolute;left:1.5rem;right:1.5rem;bottom:.75rem;height:8px;border-radius:.25rem;
+	background:var(--shell-edge);box-shadow:inset 0 1px 2px rgb(0 0 0 / 60%);
+}
+.output{position:relative;z-index:1;width:calc(100% - 3rem);margin-top:-1rem;overflow:hidden}
+.output::before{
+	content:"";position:absolute;left:0;right:0;top:0;height:8px;z-index:2;
+	background:rgb(10 10 9 / 55%);filter:blur(6px);
+}
+.receipt{
+	--tooth:14px;
+	position:relative;padding:1.75rem 1.5rem 2.25rem;background:var(--paper);color:var(--ink);
+	font-family:var(--font-mono);
+	background-image:repeating-linear-gradient(180deg,rgb(24 23 19 / 3%) 0 1px,transparent 1px 3px);
+	box-shadow:inset 0 0 0 1px rgb(24 23 19 / 12%);
+	-webkit-mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/var(--tooth) 100% repeat-x;
+	mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/var(--tooth) 100% repeat-x;
+	animation:feed 1.9s linear both;
+}
+@keyframes feed{
+	0%{transform:translateY(calc(-100% + 2px))}
+	7.5%,10.5%{transform:translateY(-91%)}
+	18%,21%{transform:translateY(-81%)}
+	28.5%,31.5%{transform:translateY(-70%)}
+	39%,42%{transform:translateY(-58%)}
+	49.5%,52.5%{transform:translateY(-45%)}
+	60%,63%{transform:translateY(-32%)}
+	70.5%,73.5%{transform:translateY(-20%)}
+	81%,84%{transform:translateY(-10%)}
+	91.5%,94.5%{transform:translateY(-3%)}
+	100%{transform:translateY(0)}
+}
+.receipt h1{
+	margin:0;font-family:var(--font-sans);font-size:1.375rem;font-weight:750;
+	line-height:.9;letter-spacing:-.05em;text-transform:uppercase;
+}
+.receipt-meta{
+	display:flex;justify-content:space-between;gap:.75rem;margin-top:.75rem;
+	font-size:.5rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;opacity:.6;
+}
+.rule{margin:1rem 0;border-top:1px dashed currentColor;opacity:.35}
+.line{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;font-size:.75rem}
+.line+.line{margin-top:.5rem}
+.line .label{font-weight:600;overflow-wrap:anywhere}
+.line .value{font-weight:700;white-space:nowrap}
+.total{font-size:.9375rem;font-weight:750}
+.status{
+	display:inline-block;margin-top:1rem;padding:.25rem .5rem;
+	font-size:.5625rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+	background:var(--accent);color:#181713;
+}
+.status.failed{background:var(--danger)}
+.receipt p{margin:1rem 0 0;font-size:.625rem;line-height:1.5;opacity:.72}
+.receipt .barcode{height:26px;margin-top:1.25rem}
+.hint{margin:2rem 0 0;max-width:22rem;text-align:center;color:var(--muted);font-size:.8125rem;line-height:1.5}
+@media (prefers-reduced-motion:reduce){.receipt{transform:none}}

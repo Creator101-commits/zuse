@@ -314,13 +314,27 @@ pub(super) async fn start(
         .organization_id
         .as_deref()
         .unwrap_or("Personal");
-    let html = format!(
-        "<!doctype html><html><head><meta name=viewport content='width=device-width'><title>Connect Slack</title></head><body><main><h1>Connect Slack to Zuse</h1><p>Zuse account: <strong>{}</strong></p><p>Workspace: {}<br>Repository: {}</p><p>Tasks from your Slack member will use this account’s repository access and cloud usage.</p><form method=post action='/slack/oauth/authorize'><input type=hidden name=state value='{}'><button type=submit>Choose Slack workspace</button></form><p>Close this page to cancel.</p></main></body></html>",
-        escape(&pending.member.actor_id),
-        escape(workspace),
-        escape(&pending.member.settings.project_id),
-        escape(&q.state)
-    );
+    let html = zuse_browser_page::card(&zuse_browser_page::Card {
+        facts: vec![
+            ("Zuse account", pending.member.actor_id.clone()),
+            ("Workspace", workspace.to_owned()),
+            ("Repository", pending.member.settings.project_id.clone()),
+        ],
+        actions: vec![zuse_browser_page::Action::Form {
+            label: "Choose Slack workspace",
+            action: "/slack/oauth/authorize",
+            fields: vec![("state", q.state.clone())],
+            pending: "Opening Slack…",
+        }],
+        hint: Some("Close this page to cancel."),
+        ..zuse_browser_page::Card::notice(
+            "Slack",
+            "Connect",
+            zuse_browser_page::Tone::Waiting,
+            "Connect Slack to Zuse",
+            "Tasks from your Slack member will use this account’s repository access and cloud usage.",
+        )
+    });
     let mut response = Html(html).into_response();
     response
         .headers_mut()
@@ -333,19 +347,9 @@ pub(super) async fn start(
         .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     response.headers_mut().insert(
         "content-security-policy",
-        HeaderValue::from_static(
-            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-        ),
+        HeaderValue::from_static(zuse_browser_page::content_security_policy()),
     );
     Ok(response)
-}
-fn escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\"', "&quot;")
-        .replace('\'', "&#39;")
 }
 #[derive(Deserialize)]
 pub(super) struct Authorize {
@@ -456,7 +460,21 @@ pub(super) async fn callback(
         .bind(now() + PENDING_TTL_MS)
         .execute(&mut *tx).await?;
     tx.commit().await?;
-    let mut response=Html("<!doctype html><html><head><meta name=viewport content='width=device-width'><title>Confirm in Zuse</title></head><body><main><h1>One more step</h1><p>Return to Zuse and open Settings → Cloud. Confirm this Slack user and workspace there to finish connecting. Nothing runs from Slack until you confirm.</p></main></body></html>").into_response();
+    let mut response = Html(zuse_browser_page::card(&zuse_browser_page::Card {
+        hint: Some("Nothing runs from Slack until you confirm. You can close this tab."),
+        ..zuse_browser_page::Card::notice(
+            "Slack",
+            "Confirm in Zuse",
+            zuse_browser_page::Tone::Waiting,
+            "One more step",
+            "Return to Zuse and open Settings → Cloud. Confirm this Slack user and workspace there to finish connecting.",
+        )
+    }))
+    .into_response();
+    response.headers_mut().insert(
+        "content-security-policy",
+        HeaderValue::from_static(zuse_browser_page::content_security_policy()),
+    );
     response
         .headers_mut()
         .insert(header::SET_COOKIE, cookie("")?);

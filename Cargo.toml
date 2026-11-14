@@ -51,6 +51,7 @@ members = [
     "crates/harness",
     "crates/harness-extensions",
     "crates/model-accounts",
+    "crates/browser-page",
 ]
 
 [workspace.package]
@@ -78,6 +79,7 @@ zuse-preview = { path = "crates/preview" }
 zuse-doc = { path = "crates/doc" }
 zuse-sync = { path = "crates/sync" }
 zuse-providers = { path = "crates/providers" }
+zuse-browser-page = { path = "crates/browser-page" }
 zuse-engine = { path = "crates/engine" }
 zuse-rpc = { path = "crates/rpc" }
 zuse-update = { path = "crates/update" }
