@@ -5,7 +5,7 @@ import { analyticsDashboards } from "./analytics-dashboards.mjs";
 import { provisionAnalytics } from "./provision-analytics.mjs";
 
 test("dashboard definitions separate durable events, navigation, models and usage coverage", () => {
-  assert.equal(analyticsDashboards.length, 5);
+  assert.equal(analyticsDashboards.length, 7);
   const tiles = analyticsDashboards.flatMap(dashboard => dashboard.tiles);
   assert.equal(new Set(tiles.map(tile => tile.name)).size, tiles.length);
   const eventSeries = tiles.flatMap(tile => tile.query.source.series ?? []);
@@ -53,7 +53,7 @@ test("provisioning twice updates existing objects and preserves dashboard member
   assert.deepEqual(first, second);
   assert.equal(creations, originalCreations);
   assert(rows.insights[0].dashboards.includes(999));
-  assert.equal(rows.dashboards.length, 5);
+  assert.equal(rows.dashboards.length, 7);
 });
 
 test("pagination cannot forward operations credentials to another host", async () => {
@@ -97,4 +97,29 @@ test("native release and distribution source builds use optional public reposito
   assert(prebuild.includes("./.github/workflows/native-binaries.yml"));
   assert(binaries.includes("./.github/workflows/native-compile.yml"));
   assert(release.includes("./.github/workflows/native-compile.yml"));
+});
+
+test("usage totals include failed and interrupted turns and retain unknown coverage", () => {
+  const usage = analyticsDashboards.find(row => row.name === "Zuse — Usage and coverage");
+  for (const tile of usage.tiles) {
+    assert.deepEqual(tile.query.source.series.map(node => node.event), ["turn completed", "turn failed", "turn interrupted"]);
+  }
+  const coverage = usage.tiles.find(tile => tile.query.source.breakdownFilter?.breakdown === "usage_status");
+  for (const node of coverage.query.source.series) {
+    assert(node.properties.some(property => property.key === "usage_report_version" && property.value[0] === 1));
+    assert(!node.properties.some(property => property.key === "usage_status"));
+  }
+});
+
+test("retention cohorts use the same persisted submission event and explicit attribution", () => {
+  const queries = analyticsDashboards.flatMap(row => row.tiles)
+    .map(tile => tile.query.source).filter(query => query.kind === "RetentionQuery");
+  assert.equal(queries.length, 2);
+  for (const query of queries) {
+    assert.equal(query.retentionFilter.targetEntity.id, "message submitted");
+    assert.deepEqual(query.retentionFilter.targetEntity, query.retentionFilter.returningEntity);
+    assert.equal(query.retentionFilter.retentionType, "retention_first_time");
+    assert(query.properties.some(property => property.key === "surface" && property.value[0] === "engine"));
+    assert(query.properties.some(property => property.key === "analytics_schema_version" && property.value[0] === 2));
+  }
 });

@@ -13,13 +13,37 @@ pub fn provider(harness: HarnessId) -> String {
 }
 
 pub fn config(config: &ChatConfig) -> Value {
-    json!({
+    let mut properties = json!({
         "provider": provider(config.harness),
         "model": config.model.as_deref().unwrap_or("default"),
         "reasoning_effort": config.reasoning.map(|value| serde_json::to_value(value).unwrap()).unwrap_or(json!("default")),
         "permission_mode": config.sandbox,
         "plan_mode": config.plan,
-    })
+    });
+    let tier = match config.harness {
+        HarnessId::Codex => config
+            .model_options
+            .get("serviceTier")
+            .and_then(Value::as_str)
+            .and_then(|tier| match tier {
+                "default" => Some("default"),
+                "fast" | "priority" => Some("fast"),
+                "flex" => Some("flex"),
+                _ => None,
+            }),
+        HarnessId::ClaudeCode => match config.model_options.get("fastMode") {
+            Some(Value::Bool(true)) => Some("fast"),
+            Some(Value::Bool(false)) => Some("default"),
+            Some(Value::String(value)) if value == "on" || value == "true" => Some("fast"),
+            Some(Value::String(value)) if value == "off" || value == "false" => Some("default"),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(tier) = tier {
+        properties["service_tier"] = json!(tier);
+    }
+    properties
 }
 
 pub fn request(harness: HarnessId, request: &RunRequest) -> Value {
@@ -27,7 +51,7 @@ pub fn request(harness: HarnessId, request: &RunRequest) -> Value {
         harness,
         model: request.model.clone(),
         reasoning: request.reasoning,
-        model_options: Default::default(),
+        model_options: request.model_options.clone(),
         sandbox: request.sandbox,
         plan: request.plan,
     });

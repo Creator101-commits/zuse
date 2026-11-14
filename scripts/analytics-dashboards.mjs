@@ -99,6 +99,69 @@ export const analyticsDashboards = [
   },
 ];
 
+const terminalEvents = ["turn completed", "turn failed", "turn interrupted"];
+const terminalMetric = (name, description, options = {}) => tile(`Zuse — ${name}`, description, {
+  ...trend("turn completed", options),
+  series: terminalEvents.map(event => series(event, options)),
+});
+
+analyticsDashboards[1].tiles.push(
+  engine("Selected service tiers", "message submitted", "Explicit supported Codex tier or Claude fast-mode selection; unknown/unsupported settings remain absent.", { breakdown: "service_tier" }),
+);
+analyticsDashboards.push({
+  name: "Zuse — Usage and coverage",
+  description: "Observed root-turn measurements across completed, failed and interrupted turns. Partial measurements are lower bounds; absent usage is unknown. These are not request counts, complete child-agent totals, or bills.",
+  tiles: [
+    terminalMetric("All-outcome input tokens", "Reported root input tokens, split by terminal outcome; partial interrupted/failed measurements are retained.", { math: "sum", math_property: "input_tokens" }),
+    terminalMetric("All-outcome output tokens", "Reported root output tokens across every terminal outcome; not estimated from character counts.", { math: "sum", math_property: "output_tokens" }),
+    terminalMetric("All-outcome cache read tokens", "Reported cache reads where available. Unknown is absent, not zero.", { math: "sum", math_property: "cache_read_tokens" }),
+    terminalMetric("All-outcome cache write tokens", "Reported cache creation where available; no inferred pricing.", { math: "sum", math_property: "cache_creation_tokens" }),
+    terminalMetric("All-outcome reasoning tokens", "Reported reasoning tokens, which may be a subset of output; do not add them to output totals.", { math: "sum", math_property: "reasoning_tokens" }),
+    terminalMetric("Usage measurement coverage", "New reports distinguish observed completed usage, partial interrupted/failed usage, and unknown. All three outcomes remain in the denominator.", { breakdown: "usage_status", properties: [property("usage_report_version", 1)] }),
+    terminalMetric("Root output characters", "Unicode scalar count of streamed root text. No content is sent; this is not a token estimate.", { math: "sum", math_property: "output_character_count" }),
+    terminalMetric("Root reasoning characters", "Root reasoning character counts without the reasoning content. Provider redaction can limit observation.", { math: "sum", math_property: "reasoning_character_count" }),
+    terminalMetric("Approval and input prompts", "Unique root input-request identifiers per turn; repeated notifications are excluded. Includes questions and approvals.", { math: "sum", math_property: "input_request_count" }),
+    terminalMetric("All-outcome tool calls", "Distinct root tool IDs within each turn, including failed/interrupted turns.", { math: "sum", math_property: "tool_count" }),
+    terminalMetric("All-outcome tool failures", "Distinct failed root tool result IDs, including failed/interrupted turns.", { math: "sum", math_property: "tool_failure_count" }),
+    terminalMetric("Root context occupancy", "Median latest measured root context tokens, excluding nested agents; missing and explicit zero remain distinct.", { math: "median", math_property: "context_tokens" }),
+    terminalMetric("Root context capacity", "Median latest reported root context window, excluding nested agents.", { math: "median", math_property: "context_window_tokens" }),
+    terminalMetric("All-outcome duration", "P95 observed root-turn elapsed time by terminal outcome, including tool and approval waits.", { math: "p95", math_property: "duration_ms" }),
+    terminalMetric("Terminal outcomes by provider", "Completed, failed, and interrupted root-turn cohorts for each provider; includes continuations and child-chat turns.", { breakdown: "provider" }),
+  ],
+});
+
+const retention = (name, period, totalIntervals) => tile(`Zuse — ${name}`,
+  "Pseudonymous identities returning to submit a persisted command. Cohorts start at their first submission within the selected range, not verified first-ever use; human versus automation origin is unknown.", {
+    kind: "RetentionQuery", dateRange: { date_from: period === "Week" ? "-90d" : "-30d" },
+    properties: [property("analytics_schema_version", 2), property("surface", "engine")],
+    retentionFilter: {
+      period, totalIntervals, retentionType: "retention_first_time", retentionReference: "total", cumulative: false,
+      targetEntity: { id: "message submitted", name: "message submitted", type: "events" },
+      returningEntity: { id: "message submitted", name: "message submitted", type: "events" },
+    },
+  });
+const featureMetric = (name, description, feature, options = {}) => engine(name, "feature used", description, {
+  ...options, properties: [property("feature", feature), ...(options.properties ?? [])],
+});
+analyticsDashboards.push({
+  name: "Zuse — Retention and feature adoption",
+  description: "Returning submitter identities and explicit feature RPCs. RPC success means a successful response, not guaranteed business completion; no-op/refused replies may still succeed. Forwarding/retries can add attempts, so these are not durable outcome counts.",
+  tiles: [
+    retention("Daily submitter retention", "Day", 14),
+    retention("Weekly submitter retention", "Week", 8),
+    engine("Monthly active submitters", "message submitted", "Unique submitting identities per calendar-month bucket, not summed daily uniques or exact people.", { math: "dau", interval: "month" }),
+    engine("RPC feature adopters", "feature used", "Unique identities using each allowlisted feature; one identity may use several features.", { math: "dau", breakdown: "feature" }),
+    featureMetric("Git action breakdown", "Explicit stage/unstage, commits, push/pull/fetch, branch and pull-request creation attempts; no paths, branch names, titles or messages.", "git action", { breakdown: "variant" }),
+    featureMetric("Pull request action breakdown", "Explicit merge/auto-merge, ready/draft, close/reopen, edit and reviewer actions; no request IDs or text.", "pull request updated", { breakdown: "variant" }),
+    featureMetric("Archive versus restore attempts", "Requested directions, separate from durable archive/restore transition events.", "chat archived", { breakdown: "variant" }),
+    engine("Feature failure categories", "feature used", "Typed RPC error category only; raw errors and provider messages are excluded.", { breakdown: "failure_kind", properties: [property("outcome", "failure")] }),
+    engine("Feature failure counts", "feature used", "Failed RPC attempts grouped by feature; include matching attempt counts when interpreting rates.", { breakdown: "feature", properties: [property("outcome", "failure")] }),
+    engine("Feature P95 latency", "feature used", "RPC response latency by action; queued asynchronous work can finish later.", { math: "p95", math_property: "duration_ms", breakdown: "feature" }),
+    featureMetric("Conversation imports", "Import RPC attempts only, with no source titles, identifiers or content.", "conversation imported"),
+    featureMetric("Delivery retry use", "Explicit user delivery retries; standing sync probes and reconnects do not count.", "delivery retried"),
+  ],
+});
+
 const native = (name, event, description, options = {}) => engine(`Desktop ${name}`, event, description, { ...options, surface: "desktop" });
 analyticsDashboards.push({
   name: "Zuse — Native desktop",
@@ -119,6 +182,11 @@ analyticsDashboards.push({
     native("surface adoption", "surface selected", "Changes of the active right-pane tab, grouped by type; different tabs of the same type can each count.", { math: "dau", breakdown: "surface_kind" }),
     native("preference adoption", "preference changed", "Applied settings changes grouped by finite category; values, geometry saves and startup hydration are excluded.", { math: "dau", breakdown: "preference" }),
     native("chat openers", "chat opened", "Unique native navigation identities opening persisted chats.", { math: "dau" }),
+    native("client operating systems", "app foregrounded", "Explicit desktop client OS, independently of the collecting engine host; older clients remain unknown.", { math: "dau", breakdown: "client_os" }),
+    native("client architectures", "app foregrounded", "Explicit desktop client architecture; no inference from the remote engine.", { math: "dau", breakdown: "client_architecture" }),
+    native("client package versions", "app foregrounded", "Numeric desktop workspace package version, independently of engine version; prerelease/build labels are excluded.", { math: "dau", breakdown: "client_version" }),
+    native("onboarding steps", "onboarding step viewed", "Actual visible onboarding step entries; repeated requests for the current step do not count.", { breakdown: "step" }),
+    native("onboarding outcomes", "onboarding finished", "Explicit completed or skipped wizard; automatic existing-user bypasses are excluded.", { breakdown: "outcome" }),
     tile("Zuse — Desktop activation funnel", "Same connected-engine identity starting a native workspace-window session, opening a chat, submitting and completing a turn within one day. Changing engines/accounts can break attribution; execution events are not labeled desktop.", {
       kind: "FunnelsQuery", dateRange: { date_from: "-30d" },
       series: [series("app opened", { surface: "desktop" }), series("chat opened", { surface: "desktop" }), series("message submitted"), series("turn completed")].map((node, order) => ({ ...node, order })),

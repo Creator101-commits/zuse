@@ -143,6 +143,7 @@ impl Wizard {
             return;
         }
         self.visible = true;
+        self.record_step(cx);
         self.focus_pending = true;
         self.load_harnesses(cx);
         cx.notify();
@@ -230,12 +231,32 @@ impl Wizard {
         )
     }
 
+    fn record_step(&self, cx: &mut Context<Self>) {
+        use zuse_analytics::desktop::OnboardingStep;
+        let step = match self.step {
+            Step::Welcome => OnboardingStep::Welcome,
+            Step::Agents => OnboardingStep::Agents,
+            Step::SignIn => OnboardingStep::SignIn,
+            Step::Plugins => OnboardingStep::Plugins,
+            Step::Chats => OnboardingStep::Chats,
+            Step::Personalize => OnboardingStep::Personalize,
+            Step::Launch => OnboardingStep::Launch,
+        };
+        self.state.update(cx, |state, cx| {
+            state.desktop_onboarding(Some(step), cx);
+        });
+    }
+
     fn go(&mut self, step: Step, cx: &mut Context<Self>) {
+        let changed = self.step != step;
         if self.step == Step::Agents && step != Step::Welcome {
             self.ask_sign_in
                 .get_or_insert_with(|| !self.plugins.read(cx).is_signed_in());
         }
         self.step = step;
+        if changed {
+            self.record_step(cx);
+        }
         self.language_open = false;
         self.focus_pending = true;
         match step {
@@ -277,6 +298,18 @@ impl Wizard {
     fn complete(&mut self, add_project: bool, open_chat: Option<String>, cx: &mut Context<Self>) {
         if self.busy(cx) {
             return;
+        }
+        use zuse_analytics::desktop::{Event, OnboardingOutcome};
+        let outcome = if self.step == Step::Welcome {
+            OnboardingOutcome::Skipped
+        } else {
+            OnboardingOutcome::Completed
+        };
+        if self.visible {
+            self.state.update(cx, |state, cx| {
+                state.desktop_onboarding(None, cx);
+                state.record_desktop_events(vec![Event::OnboardingFinished { outcome }], cx);
+            });
         }
         self.visible = false;
         self.finish_silently(cx);

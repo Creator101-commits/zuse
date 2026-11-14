@@ -3194,6 +3194,7 @@ impl AppState {
                                 serde_json::to_value(zuse_analytics::desktop::Observation {
                                     collection_epoch: epoch.clone(),
                                     event,
+                                    client: Some(zuse_analytics::desktop::Client::current()),
                                 })
                                 .unwrap(),
                             );
@@ -3255,6 +3256,15 @@ impl AppState {
         let events = self
             .desktop_analytics
             .foreground(active, std::time::Instant::now());
+        self.record_desktop_events(events, cx);
+    }
+
+    pub(crate) fn desktop_onboarding(
+        &mut self,
+        step: Option<zuse_analytics::desktop::OnboardingStep>,
+        cx: &mut Context<Self>,
+    ) {
+        let events = self.desktop_analytics.onboarding(step);
         self.record_desktop_events(events, cx);
     }
 

@@ -4,7 +4,7 @@ use std::{
     collections::{HashMap, HashSet},
     time::Instant,
 };
-use zuse_protocol::{AgentEvent, HarnessId, RunRequest, ToolCall};
+use zuse_protocol::{AgentEvent, DoneStatus, HarnessId, RunRequest, ToolCall};
 
 pub struct Turn {
     dimensions: Value,
@@ -18,7 +18,12 @@ pub struct Turn {
     reported_model: Option<String>,
     mixed_models: bool,
     first_token_ms: Option<u64>,
-    input_requests: u64,
+    input_requests: HashSet<String>,
+    output_chars: u64,
+    reasoning_chars: u64,
+    context_tokens: Option<u64>,
+    context_window: Option<u64>,
+    terminal_status: Option<DoneStatus>,
     attempts: HashSet<String>,
     attempt_failures: u64,
     cache_read: Option<u64>,
@@ -48,7 +53,12 @@ impl Turn {
             reported_model: None,
             mixed_models: false,
             first_token_ms: None,
-            input_requests: 0,
+            input_requests: HashSet::new(),
+            output_chars: 0,
+            reasoning_chars: 0,
+            context_tokens: None,
+            context_window: None,
+            terminal_status: None,
             attempts: HashSet::new(),
             attempt_failures: 0,
             cache_read: None,
@@ -67,16 +77,25 @@ impl Turn {
             completed_subagents: HashSet::new(),
             usage: None,
             sum_usage: self.sum_usage,
-            reported_model: self.reported_model.clone(),
+            reported_model: None,
             mixed_models: false,
             first_token_ms: None,
-            input_requests: 0,
+            input_requests: HashSet::new(),
+            output_chars: 0,
+            reasoning_chars: 0,
+            context_tokens: None,
+            context_window: None,
+            terminal_status: None,
             attempts: HashSet::new(),
             attempt_failures: 0,
             cache_read: None,
             cache_write: None,
             reasoning: None,
         };
+        next.dimensions
+            .as_object_mut()
+            .unwrap()
+            .remove("actual_model");
         next.dimensions["continuation"] = json!(continuation);
         next
     }
@@ -94,9 +113,28 @@ impl Turn {
                 self.reported_model = Some(model.clone());
                 self.dimensions["actual_model"] = json!(model);
             }
-            AgentEvent::TextDelta { text } if !text.is_empty() && self.first_token_ms.is_none() => {
-                self.first_token_ms = Some(self.started.elapsed().as_millis() as u64);
+            AgentEvent::TextDelta { text } => {
+                self.output_chars = self
+                    .output_chars
+                    .saturating_add(text.chars().count() as u64);
+                if !text.is_empty() && self.first_token_ms.is_none() {
+                    self.first_token_ms = Some(self.started.elapsed().as_millis() as u64);
+                }
             }
+            AgentEvent::ReasoningDelta { text } => {
+                self.reasoning_chars = self
+                    .reasoning_chars
+                    .saturating_add(text.chars().count() as u64);
+            }
+            AgentEvent::ContextUsage { tokens, window } => {
+                if let Some(tokens) = tokens {
+                    self.context_tokens = Some(*tokens);
+                }
+                if let Some(window) = window {
+                    self.context_window = Some(*window);
+                }
+            }
+            AgentEvent::Done { status, .. } => self.terminal_status = Some(*status),
             AgentEvent::ToolCall { id, call } => {
                 self.tools
                     .entry(id.clone())
@@ -121,7 +159,9 @@ impl Turn {
                     (*input_tokens, *output_tokens)
                 });
             }
-            AgentEvent::InputRequested { .. } => self.input_requests += 1,
+            AgentEvent::InputRequested { request_id, .. } => {
+                self.input_requests.insert(request_id.clone());
+            }
             AgentEvent::RequestUsage { details } => {
                 // Internal request identity only suppresses repeated accounting notifications.
                 // No request/account/connection identifiers or raw errors enter the result.
@@ -167,7 +207,16 @@ impl Turn {
         }
     }
 
+    /// Used only when the stream ends without a normalized Done event.
+    pub fn finish_with_status(&self, status: DoneStatus) -> Value {
+        self.finish_inner(self.terminal_status.or(Some(status)))
+    }
+
     pub fn finish(&self) -> Value {
+        self.finish_inner(self.terminal_status)
+    }
+
+    fn finish_inner(&self, terminal_status: Option<DoneStatus>) -> Value {
         let mut properties = self.dimensions();
         properties["duration_ms"] = json!(self.started.elapsed().as_millis() as u64);
         properties["tool_count"] = json!(self.tools.len());
@@ -182,7 +231,16 @@ impl Turn {
         }
         properties["subagent_count"] = json!(self.subagents.len());
         properties["subagent_completed_count"] = json!(self.completed_subagents.len());
-        properties["input_request_count"] = json!(self.input_requests);
+        properties["input_request_count"] = json!(self.input_requests.len());
+        properties["output_character_count"] = json!(self.output_chars);
+        properties["reasoning_character_count"] = json!(self.reasoning_chars);
+        properties["usage_report_version"] = json!(1);
+        properties["terminal_status"] = json!(match terminal_status {
+            Some(DoneStatus::Completed) => "completed",
+            Some(DoneStatus::Interrupted) => "interrupted",
+            Some(DoneStatus::Errored) => "errored",
+            None => "unknown",
+        });
         properties["mixed_models"] = json!(self.mixed_models);
         if !self.attempts.is_empty() {
             properties["request_attempt_count"] = json!(self.attempts.len());
@@ -192,13 +250,19 @@ impl Turn {
             ("cache_read_tokens", self.cache_read),
             ("cache_creation_tokens", self.cache_write),
             ("reasoning_tokens", self.reasoning),
+            ("context_tokens", self.context_tokens),
+            ("context_window_tokens", self.context_window),
         ] {
             if let Some(value) = value {
                 properties[key] = json!(value);
             }
         }
         properties["usage_status"] = json!(if self.usage.is_some() {
-            "observed"
+            if terminal_status == Some(DoneStatus::Completed) {
+                "observed"
+            } else {
+                "partial"
+            }
         } else {
             "unknown"
         });
@@ -235,3 +299,7 @@ fn category(call: &ToolCall) -> &'static str {
         _ => "other",
     }
 }
+
+#[cfg(test)]
+#[path = "turn_tests.rs"]
+mod tests;

@@ -5,6 +5,109 @@ use tokio::{
 };
 
 #[test]
+fn expanded_stats_keep_variants_and_measurements_inside_the_closed_boundary() {
+    assert_eq!(
+        sanitize(
+            "feature used",
+            json!({
+                "feature":"git action", "variant":"commit", "failure_kind":"operation",
+                "outcome":"failure", "duration_ms":42, "message":"private", "branch":"private",
+            })
+        ),
+        Some(
+            json!({"feature":"git action","variant":"commit","failure_kind":"operation","outcome":"failure","duration_ms":42})
+        )
+    );
+    let invalid = sanitize(
+        "feature used",
+        json!({
+            "feature":"git action", "variant":"private command", "failure_kind":"private failure",
+        }),
+    )
+    .unwrap();
+    assert_eq!(invalid, json!({"feature":"git action"}));
+    let report = sanitize(
+        "turn interrupted",
+        json!({
+            "output_character_count":0, "reasoning_character_count":7,
+            "context_tokens":0, "context_window_tokens":200000,
+            "usage_report_version":1, "usage_status":"partial", "terminal_status":"interrupted",
+            "service_tier":"fast", "input_tokens":5, "text":"private",
+        }),
+    )
+    .unwrap();
+    assert_eq!(report["context_tokens"], 0);
+    assert_eq!(report["output_character_count"], 0);
+    assert_eq!(report["usage_report_version"], 1);
+    assert_eq!(report["usage_status"], "partial");
+    assert_eq!(report["terminal_status"], "interrupted");
+    assert_eq!(report["service_tier"], "fast");
+    assert!(!report.to_string().contains("private"));
+    assert_eq!(
+        sanitize(
+            "turn failed",
+            json!({"usage_report_version":2,"terminal_status":"private","service_tier":"private"})
+        ),
+        Some(json!({}))
+    );
+    assert_eq!(
+        sanitize(
+            "onboarding step viewed",
+            json!({"step":"agents","name":"private"})
+        ),
+        Some(json!({"step":"agents"}))
+    );
+    assert!(sanitize("onboarding step viewed", json!({"step":"private"})).is_none());
+}
+
+#[tokio::test]
+async fn client_metadata_is_explicit_and_does_not_replace_engine_environment() {
+    use desktop::{Client, ClientArchitecture, ClientOs, Event, Observation};
+    let (url, request) = server("200 OK").await;
+    let dir = tempfile::tempdir().unwrap();
+    let analytics = Analytics::start(dir.path(), "test".into(), url, true);
+    let epoch = analytics.status().collection_epoch;
+    analytics.capture_observation(Observation {
+        collection_epoch: epoch.clone(),
+        event: Event::Foregrounded,
+        client: Some(Client {
+            os: ClientOs::Windows,
+            architecture: ClientArchitecture::X86_64,
+            version: "1.2.3".into(),
+        }),
+    });
+    analytics.capture_observation(Observation {
+        collection_epoch: epoch.clone(),
+        event: Event::PaletteOpened,
+        client: Some(Client {
+            os: ClientOs::Linux,
+            architecture: ClientArchitecture::Aarch64,
+            version: "private-build".into(),
+        }),
+    });
+    analytics.capture_observation(Observation {
+        collection_epoch: epoch,
+        event: Event::Backgrounded,
+        client: None,
+    });
+    analytics.shutdown().await;
+    let payload = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .unwrap()
+        .unwrap();
+    let batch = payload["batch"].as_array().unwrap();
+    assert_eq!(batch.len(), 3);
+    assert_eq!(batch[0]["properties"]["client_os"], "windows");
+    assert_eq!(batch[0]["properties"]["client_version"], "1.2.3");
+    assert_eq!(batch[0]["properties"]["os"], std::env::consts::OS);
+    assert!(batch[1]["properties"].get("client_version").is_none());
+    assert!(batch[2]["properties"].get("client_os").is_none());
+    assert!(!payload.to_string().contains("private"));
+    let invalid = json!({"collectionEpoch":"x","event":{"event":"palette opened"},"client":{"os":"private","architecture":"x86_64","version":"1.2.3"}});
+    assert!(serde_json::from_value::<Observation>(invalid).is_err());
+}
+
+#[test]
 fn payload_boundary_rejects_content_and_unknown_events() {
     assert!(sanitize("untrusted title", json!({})).is_none());
     assert_eq!(

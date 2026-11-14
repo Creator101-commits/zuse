@@ -1759,6 +1759,14 @@ mod tests {
             gpui_base::init(cx);
             cx.set_global(Theme::default());
             crate::app_menus::init(cx);
+            let settings = UiSettings::default();
+            crate::history::init(
+                settings.git_history_columns,
+                settings.git_history_column_widths,
+                settings.git_history_column_order,
+                settings.git_history_author_display,
+                cx,
+            );
         });
         let window = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());

@@ -1,7 +1,9 @@
 //! Best-effort product analytics. No content, provider payloads, or raw errors.
 pub mod desktop;
 pub mod dimensions;
+pub mod features;
 pub mod turn;
+pub use features::feature;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -189,13 +191,24 @@ impl Analytics {
     }
 
     pub fn capture_from(&self, surface: &str, event: &str, properties: Value) {
-        self.capture_with_epoch(surface, event, properties, None);
+        self.capture_with_epoch(surface, event, properties, None, None);
     }
 
     /// Validate the observation epoch atomically with consent and attribution.
     pub fn capture_desktop(&self, epoch: &str, event: desktop::Event) {
         let (name, properties) = event.parts();
-        self.capture_with_epoch("desktop", &name, properties, Some(epoch));
+        self.capture_with_epoch("desktop", &name, properties, Some(epoch), None);
+    }
+
+    pub fn capture_observation(&self, observation: desktop::Observation) {
+        let (name, properties) = observation.event.parts();
+        self.capture_with_epoch(
+            "desktop",
+            &name,
+            properties,
+            Some(&observation.collection_epoch),
+            observation.client.as_ref(),
+        );
     }
 
     fn capture_with_epoch(
@@ -204,6 +217,7 @@ impl Analytics {
         event: &str,
         properties: Value,
         epoch: Option<&str>,
+        client: Option<&desktop::Client>,
     ) {
         let state = self.0.state.lock().unwrap();
         if epoch.is_some_and(|epoch| epoch != state.collection_epoch) {
@@ -214,6 +228,11 @@ impl Analytics {
         };
         if !self.0.configured || !state.preference.enabled {
             return;
+        }
+        if let Some(client) = client {
+            for (key, value) in client.properties().as_object().unwrap() {
+                properties[key] = value.clone();
+            }
         }
         // Never attribute foreground time from a previous consent/account epoch.
         if surface == "desktop" && event == "app active interval" {
@@ -315,6 +334,8 @@ fn sanitize_with_models(
         "palette tab changed",
         "palette action invoked",
         "preference changed",
+        "onboarding step viewed",
+        "onboarding finished",
     ]
     .contains(&event)
     {
@@ -332,10 +353,17 @@ fn sanitize_with_models(
         "subagent",
         "continuation",
         "resumed",
+        "service_tier",
     ];
     let event_keys: &[&str] = match event {
         "app opened" | "app closed" => &[],
-        "feature used" => &["feature", "outcome", "duration_ms"],
+        "feature used" => &[
+            "feature",
+            "variant",
+            "outcome",
+            "failure_kind",
+            "duration_ms",
+        ],
         "chat created" | "chat opened" | "chat archived" | "chat restored" | "chat deleted" => {
             &["projectless"]
         }
@@ -368,6 +396,12 @@ fn sanitize_with_models(
             "reasoning_tokens",
             "usage_status",
             "usage_scope",
+            "output_character_count",
+            "reasoning_character_count",
+            "context_tokens",
+            "context_window_tokens",
+            "usage_report_version",
+            "terminal_status",
         ],
         _ => return None,
     };
@@ -443,17 +477,36 @@ fn sanitize_with_models(
                     ["run", "steer"].contains(&value.as_str())
                 }
                 ("usage_status", Value::String(value)) => {
-                    ["unknown", "observed"].contains(&value.as_str())
+                    ["unknown", "observed", "partial"].contains(&value.as_str())
                 }
+                ("terminal_status", Value::String(value)) => {
+                    ["completed", "interrupted", "errored", "unknown"].contains(&value.as_str())
+                }
+                ("service_tier", Value::String(value)) => {
+                    ["default", "fast", "flex"].contains(&value.as_str())
+                }
+                ("usage_report_version", Value::Number(value)) => value.as_u64() == Some(1),
                 ("usage_scope", Value::String(value)) => {
                     ["provider_snapshot", "main_request_sum"].contains(&value.as_str())
                 }
                 ("outcome", Value::String(value)) => {
                     ["success", "failure"].contains(&value.as_str())
                 }
-                ("feature", Value::String(value)) => {
-                    FEATURES.iter().any(|(_, feature)| feature == value)
-                }
+                ("feature", Value::String(value)) => features::valid_name(value),
+                ("variant", Value::String(value)) => properties
+                    .get("feature")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| features::valid_variant(name, value)),
+                ("failure_kind", Value::String(value)) => [
+                    "unsupported",
+                    "invalid_request",
+                    "capability",
+                    "operation",
+                    "transport",
+                    "closed",
+                    "refused",
+                ]
+                .contains(&value.as_str()),
                 (
                     "plan_mode" | "subagent" | "continuation" | "resumed" | "mixed_models"
                     | "projectless",
@@ -474,63 +527,6 @@ fn sanitize_with_models(
         }
     }
     Some(Value::Object(output))
-}
-
-const FEATURES: &[(&str, &str)] = &[
-    ("Mutate:createChat", "chat created"),
-    ("Mutate:createSpace", "project created"),
-    ("Mutate:deleteChat", "chat deleted"),
-    ("Mutate:setChatArchived", "chat archived"),
-    ("QueueCommand", "command queued"),
-    ("QueueMessage", "message queued"),
-    ("QueueCommand:run", "message submitted"),
-    ("QueueCommand:steer", "message submitted"),
-    ("QueueCommand:interrupt", "turn interrupted"),
-    ("QueueCommand:respondInput", "permission answered"),
-    ("StartProjectCreation", "project creation started"),
-    ("AddRepo", "repository added"),
-    ("CloneRepo", "repository cloned"),
-    ("CreateWorktree", "worktree created"),
-    ("DeleteWorktree", "worktree deleted"),
-    ("OpenTerminal", "terminal opened"),
-    ("StartAgentLogin", "provider login"),
-    ("Plugins:connect", "plugin connected"),
-    ("Plugins:removeServer", "plugin removed"),
-    ("CloudCreate", "cloud workspace created"),
-    ("CloudPause", "cloud workspace paused"),
-    ("CloudUnarchive", "cloud workspace resumed"),
-    ("CloudDelete", "cloud workspace deleted"),
-    ("ApplyUpdate", "update applied"),
-    ("ForkSideChat", "session forked"),
-];
-pub fn feature(method: &str, params: &Value) -> Option<&'static str> {
-    if method == "QueueCommand" {
-        return match params.pointer("/command/kind").and_then(Value::as_str) {
-            Some("run" | "steer") => Some("message submitted"),
-            Some("interrupt") => Some("turn interrupted"),
-            Some("respondInput") => Some("permission answered"),
-            _ => None,
-        };
-    }
-    if method == "Plugins" {
-        return match params.get("action").and_then(Value::as_str) {
-            Some("connect" | "addServer" | "addLocalServer") => Some("plugin connected"),
-            Some("removeServer") => Some("plugin removed"),
-            _ => None,
-        };
-    }
-    if method == "Mutate" {
-        return match params.get("op").and_then(Value::as_str) {
-            Some("createChat") => Some("chat created"),
-            Some("createSpace") => Some("project created"),
-            Some("deleteChat") => Some("chat deleted"),
-            Some("setChatArchived") => Some("chat archived"),
-            _ => None,
-        };
-    }
-    FEATURES
-        .iter()
-        .find_map(|(name, feature)| (*name == method).then_some(*feature))
 }
 
 async fn deliver(

@@ -10,6 +10,69 @@ pub struct Observation {
     #[serde(default)]
     pub collection_epoch: String,
     pub event: Event,
+    #[serde(default)]
+    pub client: Option<Client>,
+}
+
+/// Client facts are explicit; the connected engine may run on another OS/version.
+#[derive(Serialize, Deserialize)]
+pub struct Client {
+    pub os: ClientOs,
+    pub architecture: ClientArchitecture,
+    pub version: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientOs {
+    Macos,
+    Windows,
+    Linux,
+    Other,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientArchitecture {
+    Aarch64,
+    X86_64,
+    Other,
+}
+
+impl Client {
+    pub fn current() -> Self {
+        Self {
+            os: match std::env::consts::OS {
+                "macos" => ClientOs::Macos,
+                "windows" => ClientOs::Windows,
+                "linux" => ClientOs::Linux,
+                _ => ClientOs::Other,
+            },
+            architecture: match std::env::consts::ARCH {
+                "aarch64" => ClientArchitecture::Aarch64,
+                "x86_64" => ClientArchitecture::X86_64,
+                _ => ClientArchitecture::Other,
+            },
+            version: env!("CARGO_PKG_VERSION").into(),
+        }
+    }
+
+    pub(crate) fn properties(&self) -> Value {
+        let mut properties = serde_json::json!({
+            "client_os": self.os, "client_architecture": self.architecture,
+        });
+        // Public workspace package versions are numeric. Custom build labels stay out.
+        let parts: Vec<_> = self.version.split('.').collect();
+        if self.version.len() <= 32
+            && parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        {
+            properties["client_version"] = serde_json::json!(self.version);
+        }
+        properties
+    }
 }
 
 macro_rules! catalog {
@@ -100,10 +163,24 @@ catalog!(Preference {
     DefaultModel,
     DefaultPermissions
 });
+catalog!(OnboardingStep {
+    Welcome,
+    Agents,
+    SignIn,
+    Plugins,
+    Chats,
+    Personalize,
+    Launch
+});
+catalog!(OnboardingOutcome { Completed, Skipped });
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", content = "properties")]
 pub enum Event {
+    #[serde(rename = "onboarding step viewed")]
+    OnboardingStepViewed { step: OnboardingStep },
+    #[serde(rename = "onboarding finished")]
+    OnboardingFinished { outcome: OnboardingOutcome },
     #[serde(rename = "app opened")]
     Opened,
     #[serde(rename = "app closed")]
@@ -156,9 +233,10 @@ pub struct Lifecycle {
     foreground: bool,
     since: Option<Instant>,
     screen: Option<(Screen, Option<SettingsPage>)>,
+    onboarding: Option<OnboardingStep>,
 }
 impl Lifecycle {
-    /// Snapshot only the current route when a new engine binding becomes ready.
+    /// Snapshot the current route and visible onboarding step when a binding becomes ready.
     pub fn ready(&mut self) -> Vec<Event> {
         if !self.opened {
             return self.open();
@@ -169,6 +247,9 @@ impl Lifecycle {
             if let Some(section) = section {
                 events.push(Event::SettingsViewed { section });
             }
+        }
+        if let Some(step) = self.onboarding {
+            events.push(Event::OnboardingStepViewed { step });
         }
         events
     }
@@ -187,7 +268,18 @@ impl Lifecycle {
                 events.push(Event::SettingsViewed { section });
             }
         }
+        if let Some(step) = self.onboarding {
+            events.push(Event::OnboardingStepViewed { step });
+        }
         events
+    }
+    pub fn onboarding(&mut self, step: Option<OnboardingStep>) -> Vec<Event> {
+        if self.closed || self.onboarding == step {
+            return vec![];
+        }
+        self.onboarding = step;
+        step.map(|step| vec![Event::OnboardingStepViewed { step }])
+            .unwrap_or_default()
     }
     pub fn screen(&mut self, screen: Screen, section: Option<SettingsPage>) -> Vec<Event> {
         let next = (screen, section);
@@ -258,6 +350,28 @@ impl Lifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn readiness_snapshots_only_the_current_visible_onboarding_step() {
+        let mut lifecycle = Lifecycle::default();
+        lifecycle.onboarding(Some(OnboardingStep::Welcome));
+        lifecycle.onboarding(Some(OnboardingStep::Agents));
+        assert_eq!(
+            lifecycle.ready(),
+            vec![
+                Event::Opened,
+                Event::OnboardingStepViewed {
+                    step: OnboardingStep::Agents
+                }
+            ]
+        );
+        assert!(
+            lifecycle
+                .onboarding(Some(OnboardingStep::Agents))
+                .is_empty()
+        );
+        lifecycle.onboarding(None);
+        assert!(lifecycle.ready().is_empty());
+    }
     #[test]
     fn transitions_deduplicate_and_cap_sleep() {
         let mut lifecycle = Lifecycle::default();

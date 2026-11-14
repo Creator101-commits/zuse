@@ -2479,6 +2479,14 @@ impl RpcService for AuthRpc {
     }
 }
 
+fn feature_rpc_refused(method: &str, reply: &RpcReply) -> bool {
+    matches!(
+        method,
+        methods::UPDATE_CHANGE_REQUEST | methods::UPDATE_CHANGE_REQUEST_AT_HEAD
+    ) && matches!(reply, RpcReply::Value(value) if value.get("refusal")
+            .and_then(serde_json::Value::as_str).is_some_and(|value| !value.trim().is_empty()))
+}
+
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -2505,7 +2513,7 @@ impl RpcService for EngineRpc {
                 return Err(RpcError::BadParams("Invalid desktop interval".into()));
             }
             if let Some(analytics) = &self.analytics {
-                analytics.capture_desktop(&observation.collection_epoch, observation.event);
+                analytics.capture_observation(observation);
                 return RpcReply::value(&analytics.status());
             }
             return RpcReply::value(&serde_json::json!({"ok": true}));
@@ -2552,8 +2560,12 @@ impl RpcService for EngineRpc {
             return RpcReply::value(&analytics.status());
         }
         let feature = zuse_analytics::feature(method, &params);
+        let variant = zuse_analytics::features::variant(method, &params);
         let started = std::time::Instant::now();
         let result = self.handle_with_admission(method, params).await;
+        let refused = result
+            .as_ref()
+            .is_ok_and(|reply| feature_rpc_refused(method, reply));
         if method == methods::CLOUD_ACCOUNT_SIGN_OUT
             && result.is_ok()
             && let Some(analytics) = &self.analytics
@@ -2561,10 +2573,27 @@ impl RpcService for EngineRpc {
             analytics.set_account(None);
         }
         if let (Some(analytics), Some(feature)) = (&self.analytics, feature) {
-            analytics.capture("feature used", serde_json::json!({
-                "feature": feature, "outcome": if result.is_ok() { "success" } else { "failure" },
+            let mut properties = serde_json::json!({
+                "feature": feature, "outcome": if result.is_ok() && !refused { "success" } else { "failure" },
                 "duration_ms": started.elapsed().as_millis() as u64,
-            }));
+            });
+            if let Some(variant) = variant {
+                properties["variant"] = serde_json::json!(variant);
+            }
+            if refused {
+                properties["failure_kind"] = serde_json::json!("refused");
+            }
+            if let Err(error) = &result {
+                properties["failure_kind"] = serde_json::json!(match error {
+                    RpcError::UnknownMethod(_) => "unsupported",
+                    RpcError::BadParams(_) => "invalid_request",
+                    RpcError::Capability(_) => "capability",
+                    RpcError::Failed(_) => "operation",
+                    RpcError::Transport(_) => "transport",
+                    RpcError::Closed => "closed",
+                });
+            }
+            analytics.capture("feature used", properties);
         }
         result
     }
@@ -6400,6 +6429,28 @@ impl EngineRpc {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn analytics_counts_structured_refusal_without_recording_the_reason() {
+        let reply = super::RpcReply::Value(serde_json::json!({"refusal":"private reason"}));
+        assert!(super::feature_rpc_refused(
+            super::methods::UPDATE_CHANGE_REQUEST,
+            &reply
+        ));
+        assert!(!super::feature_rpc_refused(
+            super::methods::QUEUE_COMMAND,
+            &reply
+        ));
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(" "),
+        ] {
+            assert!(!super::feature_rpc_refused(
+                super::methods::UPDATE_CHANGE_REQUEST,
+                &super::RpcReply::Value(serde_json::json!({"refusal":value}))
+            ));
+        }
+    }
     use super::*;
 
     #[tokio::test]
