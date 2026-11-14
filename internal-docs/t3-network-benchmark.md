@@ -8,7 +8,7 @@ The measurements below use the browser UI. Desktop remote chats and live agent p
 
 Rust HTTP clients also negotiate gzip when supported by the server, including built-in provider streaming and catalog responses. A fragmented compressed-stream test verifies exact text, delivery before EOF, and cancellation while the response remains open. External agent CLIs manage their own provider connections.
 
-These changes address desktop network traffic. Downloading the browser WASM shell is a separate metric and does not describe launching an installed desktop application. **Native desktop timing versus T3 is not measured in the charts below.** The native regression fixture exercises a real encrypted paired connection with 1,500 retained messages, paging, verified resume and live updates; it is a correctness check without 3G throttling.
+These changes address desktop network traffic. Downloading the browser WASM shell is a separate metric and does not describe launching an installed desktop application. **Native desktop timing versus T3 is not measured in the charts below;** see the [desktop head-to-head report](zuse-vs-t3-desktop.html) for launch, memory, idle CPU, typing lag, chat switching and scrolling of both desktop apps. The native regression fixture exercises a real encrypted paired connection with 1,500 retained messages, paging, verified resume and live updates; it is a correctness check without 3G throttling.
 
 Both apps used Chrome for Testing 151.0.7922.34, a 1280 × 1000 viewport, 400 ms emulated latency, 400 kbps download and 200 kbps upload. Values below are medians of three samples per app per metric. Workspaces were empty, authentication was established before measurement, and T3 onboarding was completed.
 
