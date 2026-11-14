@@ -1494,10 +1494,17 @@ impl EngineRpc {
                 .map(drop),
             MutateParams::SetChatCwd { chat_id, cwd } => {
                 self.voice.retire_chat(&chat_id);
-                self.workspace
+                let moved = self
+                    .workspace
                     .set_chat_cwd(&chat_id, &cwd)
-                    .map_err(failed)
-                    .map(drop)
+                    .map_err(failed)?;
+                if moved {
+                    let doc_host = self.doc_host.clone();
+                    tokio::spawn(
+                        async move { doc_host.stamp_source_context(&chat_id, &cwd).await },
+                    );
+                }
+                Ok(())
             }
             MutateParams::SetChatActivity {
                 chat_id,

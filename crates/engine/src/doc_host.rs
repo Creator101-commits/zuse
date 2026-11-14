@@ -6732,6 +6732,22 @@ impl DocHost {
         })
     }
 
+    /// Record the checkout a chat points at without starting a turn. Imported
+    /// chats may never have dispatched; moved chats may still show their old
+    /// repository or branch. Skipped when the chat's cwd changed while the
+    /// checkout was being read.
+    pub(crate) async fn stamp_source_context(&self, chat_id: &str, cwd: &str) {
+        let Some(workspace) = self.workspace() else {
+            return;
+        };
+        let Some(context) = self.capture_source_context(cwd).await else {
+            return;
+        };
+        if let Err(err) = workspace.set_chat_source_context_if_current(chat_id, &context) {
+            tracing::warn!(chat = %chat_id, error = %err, "conversation source stamp failed");
+        }
+    }
+
     /// Every fresh harness dispatch crosses this boundary, including
     /// steer/input fallbacks and crash recovery. Capture immediately before
     /// dispatch so the conversation records the checkout the harness will
@@ -7495,6 +7511,75 @@ mod source_context_tests {
         );
         assert!(context.head_sha.is_some());
         assert!(!context.checkout_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stamp_source_context_records_checkout_without_a_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "feature/imported"]);
+        git(&repo, &["config", "user.name", "Zuse Test"]);
+        git(&repo, &["config", "user.email", "zuse@example.com"]);
+        std::fs::write(repo.join("README.md"), "import\n").unwrap();
+        git(&repo, &["add", "README.md"]);
+        git(&repo, &["commit", "-m", "import"]);
+        let cwd = repo.to_string_lossy().into_owned();
+
+        let store =
+            Arc::new(zuse_sync::DocsStore::open(dir.path().join("docs")).expect("store opens"));
+        let host = DocHost::new(
+            store.clone(),
+            DocHostConfig {
+                device_id: "device-a".into(),
+                default_harness: zuse_protocol::HarnessId::Mock,
+                edge: None,
+            },
+        );
+        host.set_repos(crate::repos::Repos::new(
+            &dir.path().join("data"),
+            "device-a",
+        ));
+        let workspace = crate::workspace_host::WorkspaceHost::open(
+            store,
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "device-a".into(),
+                device_name: "Test host".into(),
+                platform: "linux".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: false,
+            },
+        )
+        .unwrap();
+        workspace
+            .create_chat("imported", None, Some("device-a"), None, Some(cwd.clone()))
+            .unwrap();
+        workspace
+            .create_chat("moved", None, Some("device-a"), None, Some(cwd.clone()))
+            .unwrap();
+        host.set_workspace(workspace.clone());
+
+        host.stamp_source_context("imported", &cwd).await;
+        let source = workspace
+            .chat("imported")
+            .unwrap()
+            .unwrap()
+            .source_context
+            .expect("imported chat gets a source context");
+        assert_eq!(source.branch, "feature/imported");
+        assert_eq!(source.cwd, cwd);
+
+        host.stamp_source_context("moved", &cwd).await;
+        let previous = workspace.chat("moved").unwrap().unwrap().source_context;
+        workspace.set_chat_cwd("moved", "/elsewhere").unwrap();
+        // A late stamp must not overwrite the previously recorded context.
+        host.stamp_source_context("moved", &cwd).await;
+        assert_eq!(
+            workspace.chat("moved").unwrap().unwrap().source_context,
+            previous
+        );
     }
 }
 

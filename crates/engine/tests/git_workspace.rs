@@ -86,6 +86,64 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn moving_chat_to_worktree_records_source_context_without_a_turn() {
+    let f = Fixture::new().await;
+    git(&f.repo, &["commit", "--allow-empty", "-m", "Initial"]);
+    let worktree = f.root.path().join("linked");
+    git(
+        &f.repo,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/moved",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    f.client
+        .call(
+            methods::MUTATE,
+            json!({"op":"setChatCwd","chatId":"chat","cwd":worktree}),
+        )
+        .await
+        .unwrap();
+    let source = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let chat = f.core.workspace.chat("chat").unwrap().unwrap();
+            if let Some(source) = chat.source_context
+                && source.cwd == worktree.to_string_lossy()
+            {
+                return source;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(source.branch, "feature/moved");
+    assert_eq!(source.head_sha.as_deref(), Some(head.as_str()));
+    assert_eq!(
+        source.repo_root,
+        worktree.canonicalize().unwrap().to_string_lossy()
+    );
+    assert!(!source.checkout_id.is_empty());
+    let chat = f.core.workspace.chat("chat").unwrap().unwrap();
+    assert!(chat.harness_session_id.is_none());
+    assert!(
+        f.core
+            .doc_host
+            .open_local("chat")
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap()
+            .is_empty()
+    );
+    f.core.shutdown().await;
+}
+
+#[tokio::test]
 async fn workspace_subscription_tracks_external_branch_changes_and_rejects_another_checkout() {
     let f = Fixture::new().await;
     std::fs::write(f.repo.join("file"), "initial").unwrap();
