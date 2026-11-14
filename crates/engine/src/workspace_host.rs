@@ -1553,6 +1553,24 @@ impl WorkspaceHost {
         Ok(self.mutate(|doc| doc.set_chat_source_context(chat_id, context))?)
     }
 
+    /// Apply an asynchronous checkout read only while the chat still points
+    /// at that folder. Check and write under the same registry lock.
+    pub(crate) fn set_chat_source_context_if_current(
+        &self,
+        chat_id: &str,
+        context: &zuse_protocol::ConversationSourceContext,
+    ) -> Result<bool, EngineError> {
+        Ok(self.mutate(|doc| {
+            let Some(chat) = doc.chat(chat_id)? else {
+                return Ok(false);
+            };
+            if chat.cwd.as_deref() != Some(context.cwd.as_str()) {
+                return Ok(false);
+            }
+            doc.set_chat_source_context(chat_id, context)
+        })?)
+    }
+
     /// Retarget a chat onto another folder (mid-session switch to an existing
     /// worktree). Resume is cwd-scoped — the next run there starts fresh.
     pub fn set_chat_cwd(&self, chat_id: &str, cwd: &str) -> Result<bool, EngineError> {

@@ -79,11 +79,38 @@ fn registry(requests: Arc<Mutex<Vec<RunRequest>>>) -> Arc<HarnessRegistry> {
     }
     registry
 }
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@localhost")
+        .env("GIT_COMMITTER_NAME", "Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@localhost")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().into()
+}
 #[tokio::test]
 async fn discovery_import_receipts_restart_and_continuation_preserve_provider_history() {
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("Sample project");
     std::fs::create_dir(&project).unwrap();
+    let project = project.canonicalize().unwrap();
+    git(&project, &["init", "-b", "feature/imported"]);
+    git(
+        &project,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Initial",
+        ],
+    );
+    let head = git(&project, &["rev-parse", "HEAD"]);
     let (claude, codex) = (temp.path().join("claude"), temp.path().join("codex"));
     unsafe {
         std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
@@ -163,6 +190,15 @@ async fn discovery_import_receipts_restart_and_continuation_preserve_provider_hi
     let first: Imported = client.call_as(wire::IMPORT, import.clone()).await.unwrap();
     let replay: Imported = client.call_as(wire::IMPORT, import.clone()).await.unwrap();
     assert_eq!(first.chat.id, replay.chat.id);
+    let source_context = first.chat.source_context.as_ref().expect("import context");
+    assert_eq!(
+        source_context.cwd,
+        project.canonicalize().unwrap().to_string_lossy()
+    );
+    assert_eq!(source_context.branch, "feature/imported");
+    assert_eq!(source_context.head_sha.as_deref(), Some(head.as_str()));
+    assert!(!source_context.checkout_id.is_empty());
+    assert_eq!(replay.chat.source_context, first.chat.source_context);
     assert_eq!(
         first.chat.harness_session_id.as_deref(),
         Some("original-claude-session")
@@ -219,6 +255,7 @@ async fn discovery_import_receipts_restart_and_continuation_preserve_provider_hi
     let client = zuse_rpc::memory_client(core.rpc_service());
     let reopened: Imported = client.call_as(wire::IMPORT, import.clone()).await.unwrap();
     assert_eq!(reopened.chat.id, first.chat.id);
+    assert_eq!(reopened.chat.source_context, first.chat.source_context);
     let reopened_doc = core.doc_host.open_local(&first.chat.id).unwrap();
     assert_eq!(
         serde_json::to_string(&reopened_doc.doc().read_entries().unwrap()).unwrap(),
