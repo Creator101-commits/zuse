@@ -241,6 +241,7 @@ impl EngineRpc {
                 conversation.row.updated_at,
             )
             .map_err(failed)?;
+        this.doc_host.stamp_source_context(&chat_id, &cwd).await;
         let result = wire::Imported {
             chat: this
                 .workspace
