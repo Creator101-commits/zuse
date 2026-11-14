@@ -216,6 +216,10 @@ def assemble(destination, binaries, assets, system, arch, version, provenance):
     # Each layout keeps web/ where the desktop app's asset discovery looks:
     # beside the executable, or ../Resources/web inside the macOS bundle.
     copy_tree(assets, resources / "web" if macos else destination / "web" if windows else executable_dir / "web")
+    identity = json.dumps({"version": version}) + "\n"
+    (executable_dir / "release.json").write_text(identity)
+    if windows:
+        (destination / "release.json").write_text(identity)
     if macos:
         info = plistlib.loads((ROOT / "dist/macos/Info.plist").read_bytes())
         # Apple bundle versions remain numeric; the archive and manifest retain
@@ -329,6 +333,7 @@ def assemble_cli(destination, binary, assets, system, arch, version, provenance)
         shutil.copyfile(binary, bin_dir / "zuse")
         (bin_dir / "zuse").chmod(0o755)
         (bin_dir / "zuse-server").symlink_to("zuse")
+    (bin_dir / "release.json").write_text(json.dumps({"version": version}) + "\n")
     share = destination / "share/zuse"
     copy_tree(assets, share / "web")
     copy_legal(share / "legal")

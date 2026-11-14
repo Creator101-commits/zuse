@@ -269,39 +269,92 @@ impl ShortcutsPage {
     }
 
     pub(super) fn general_app_updates(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
+        let Some(update) = crate::app_update::AppUpdate::global(cx) else {
+            return div();
+        };
+        let channel = update.read(cx).channel();
+        let error = update.read(cx).channel_error();
+        let label = tr(cx, msg::settings::update_channel_label);
+        let labels = [
+            tr(cx, msg::settings::update_channel_stable),
+            tr(cx, msg::settings::update_channel_preview),
+        ];
+        let channel_select = widgets::select(
+            "release-channel",
+            label.clone(),
+            theme,
+            |page: &mut Self| &mut page.release_channel_select,
+        )
+        .options(
+            labels.into_iter().map(widgets::SelectOption::new),
+            zuse_update::ReleaseChannel::ALL
+                .iter()
+                .position(|choice| *choice == channel)
+                .unwrap_or_default(),
+        )
+        .width(140.0)
+        .on_select(move |_, index, _, cx| {
+            update.update(cx, |update, cx| {
+                update.set_channel(zuse_update::ReleaseChannel::ALL[index], cx)
+            });
+            cx.refresh_windows();
+            cx.notify();
+        })
+        .render(&self.release_channel_select, cx);
         widgets::group(theme, tr(cx, msg::native::about_zuse), "").child(
-            widgets::section_card(theme).mt_0().child(
-                widgets::card_row(theme, true)
-                    .child(general_details(
-                        theme,
-                        &tr(cx, msg::native::app_updates),
-                        &tr(cx, msg::native::check_for_a_newer_version_of_zuse),
-                    ))
-                    .child(
-                        widgets::text_action(
+            widgets::section_card(theme)
+                .mt_0()
+                .child(
+                    widgets::card_row(theme, true)
+                        .child(general_details(
                             theme,
-                            widgets::ActionTone::Outlined,
-                            tr(cx, msg::native::check_for_updates),
-                        )
-                        .id("general-check-updates")
-                        .debug_selector(|| "general-check-updates".into())
-                        .track_focus(&self.general_updates_focus)
-                        .tab_index(0)
-                        .on_mouse_down(
-                            gpui::MouseButton::Left,
-                            cx.listener(|this, _, window, cx| {
-                                window.focus(&this.general_updates_focus, cx);
-                            }),
-                        )
-                        .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
-                            if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                                crate::app_update::check_for_updates(cx);
-                                cx.stop_propagation();
-                            }
-                        }))
-                        .on_click(|_, _, cx| crate::app_update::check_for_updates(cx)),
-                    ),
-            ),
+                            &label,
+                            &tr(cx, msg::native::release_channel_description),
+                        ))
+                        .child(channel_select),
+                )
+                .when_some(error, |card, error| {
+                    card.child(
+                        div()
+                            .px(px(16.))
+                            .py(px(8.))
+                            .text_size(crate::typography::text_xs())
+                            .text_color(theme.text)
+                            .child(error),
+                    )
+                })
+                .child(
+                    widgets::card_row(theme, false)
+                        .child(general_details(
+                            theme,
+                            &tr(cx, msg::native::app_updates),
+                            &tr(cx, msg::native::check_for_a_newer_version_of_zuse),
+                        ))
+                        .child(
+                            widgets::text_action(
+                                theme,
+                                widgets::ActionTone::Outlined,
+                                tr(cx, msg::native::check_for_updates),
+                            )
+                            .id("general-check-updates")
+                            .debug_selector(|| "general-check-updates".into())
+                            .track_focus(&self.general_updates_focus)
+                            .tab_index(0)
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    window.focus(&this.general_updates_focus, cx);
+                                }),
+                            )
+                            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, _, cx| {
+                                if matches!(event.keystroke.key.as_str(), "enter" | "space") {
+                                    crate::app_update::check_for_updates(cx);
+                                    cx.stop_propagation();
+                                }
+                            }))
+                            .on_click(|_, _, cx| crate::app_update::check_for_updates(cx)),
+                        ),
+                ),
         )
     }
 }

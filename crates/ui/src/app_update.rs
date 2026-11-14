@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{App, AppContext as _, Context, Entity, Global, SharedString, Task};
 use gpui_tokio::Tokio;
-use zuse_update::{InstallKind, UpdateBlocker, UpdateStatus, Updater};
+use zuse_update::{InstallKind, ReleaseChannel, UpdateBlocker, UpdateStatus, Updater};
 
 /// Download/install lifecycle of the newest release in this process.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,6 +149,9 @@ pub struct AppUpdate {
     edge_url: String,
     data_dir: PathBuf,
     checker: Updater,
+    channel: ReleaseChannel,
+    channel_error: Option<SharedString>,
+    channel_generation: u64,
     status: Option<UpdateStatus>,
     flow: Flow,
     prompt: Option<Prompt>,
@@ -191,22 +194,27 @@ impl AppUpdate {
             .supports_desktop_update()
             .then(|| install.desktop_update_blocker())
             .flatten();
+        let (channel, channel_error) = match zuse_update::initialize_channel(&data_dir) {
+            Ok(channel) => (channel, None),
+            Err(error) => {
+                tracing::warn!(%error, "could not load release channel");
+                (
+                    ReleaseChannel::Stable,
+                    Some(
+                        crate::localization::message(
+                            cx,
+                            zuse_i18n::messages::settings::update_channel_load_error,
+                        )
+                        .into(),
+                    ),
+                )
+            }
+        };
         let checker = {
             let _runtime = Tokio::handle(cx).enter();
-            Updater::spawn_desktop(edge_url.clone())
+            Updater::spawn_desktop_for_profile(edge_url.clone(), data_dir.clone())
         };
-        let mut statuses = checker.watch();
-        let status_watch = cx.spawn(async move |this, cx| {
-            while statuses.changed().await.is_ok() {
-                let status = statuses.borrow_and_update().clone();
-                if this
-                    .update(cx, |this, cx| this.apply_status(status, cx))
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
+        let status_watch = Self::watch_status(&checker, 0, cx);
         tracing::info!(?install, ?blocker, "desktop update checker started");
         let outcome = take_install_attempt(&data_dir)
             .and_then(|attempted| install_outcome(&attempted, zuse_update::current_version()));
@@ -259,6 +267,9 @@ impl AppUpdate {
             edge_url,
             data_dir,
             checker,
+            channel,
+            channel_error,
+            channel_generation: 0,
             status: None,
             flow,
             prompt: None,
@@ -271,6 +282,78 @@ impl AppUpdate {
             not_applied,
             staging_newer: false,
         }
+    }
+
+    fn watch_status(checker: &Updater, generation: u64, cx: &mut Context<Self>) -> Task<()> {
+        let mut statuses = checker.watch();
+        cx.spawn(async move |this, cx| {
+            while statuses.changed().await.is_ok() {
+                let status = statuses.borrow_and_update().clone();
+                if this
+                    .update(cx, |this, cx| {
+                        if this.channel_generation == generation {
+                            this.apply_status(status, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+    }
+
+    pub fn channel(&self) -> ReleaseChannel {
+        self.channel
+    }
+
+    pub fn channel_error(&self) -> Option<SharedString> {
+        self.channel_error.clone()
+    }
+
+    /// Save first, then invalidate every result and staged installer from the
+    /// old track. A late download cannot restore it or install it on quit.
+    pub fn set_channel(&mut self, channel: ReleaseChannel, cx: &mut Context<Self>) {
+        if matches!(self.flow, Flow::Installed)
+            || (self.channel == channel && self.channel_error.is_none())
+        {
+            return;
+        }
+        if let Err(error) = zuse_update::save_channel(&self.data_dir, channel) {
+            tracing::warn!(%error, "could not save release channel");
+            self.channel_error = Some(
+                crate::localization::message(
+                    cx,
+                    zuse_i18n::messages::settings::update_channel_save_error,
+                )
+                .into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.channel = channel;
+        self.channel_error = None;
+        self.channel_generation = self.channel_generation.wrapping_add(1);
+        self.download = None;
+        self.user_check = None;
+        self.notes_fetch = None;
+        self.release_notes = None;
+        self.status = None;
+        self.flow = Flow::Idle;
+        self.prompt = None;
+        self.dismissed = None;
+        self.not_applied = None;
+        self.staging_newer = false;
+        let checker = {
+            let _runtime = Tokio::handle(cx).enter();
+            Updater::spawn_desktop_for_profile(self.edge_url.clone(), self.data_dir.clone())
+        };
+        self._status_watch = Self::watch_status(&checker, self.channel_generation, cx);
+        let previous = std::mem::replace(&mut self.checker, checker);
+        Tokio::spawn(cx, async move { previous.shutdown().await }).detach();
+        self.checker.check_now();
+        cx.notify();
+        cx.refresh_windows();
     }
 
     pub fn install(&self) -> &InstallKind {
@@ -325,6 +408,19 @@ impl AppUpdate {
             .as_ref()
             .filter(|status| status.update_available)
             .and_then(|status| status.latest_version.as_deref())
+    }
+
+    /// Manual installs open the release actually offered by this track.
+    pub fn download_page(&self) -> String {
+        self.available()
+            .map(zuse_update::release_page)
+            .unwrap_or_else(|| {
+                match self.channel {
+                    ReleaseChannel::Stable => zuse_update::LATEST_RELEASE_PAGE,
+                    ReleaseChannel::Preview => zuse_update::RELEASES_PAGE,
+                }
+                .to_owned()
+            })
     }
 
     /// The offered version with its changelog, once that has loaded.
@@ -438,6 +534,8 @@ impl AppUpdate {
         let edge_url = self.edge_url.clone();
         let data_dir = self.data_dir.clone();
         let install = self.install.clone();
+        let channel = self.channel;
+        let generation = self.channel_generation;
         // Restart stays available while a newer release downloads behind it.
         self.staging_newer = matches!(self.flow, Flow::Ready { .. });
         if !self.staging_newer {
@@ -448,7 +546,7 @@ impl AppUpdate {
         let stage = Tokio::spawn(cx, async move {
             // Re-read the manifest so a long-lived status still downloads the
             // newest release, with that release's checksums.
-            let manifest = zuse_update::fetch_latest(&edge_url).await?;
+            let manifest = zuse_update::fetch_latest_for_channel(&edge_url, channel).await?;
             anyhow::ensure!(
                 zuse_update::version_newer(&manifest.version, zuse_update::current_version()),
                 "the release feed no longer offers a newer version"
@@ -465,6 +563,9 @@ impl AppUpdate {
                 Err(join) => Err(join.to_string()),
             };
             this.update(cx, |this, cx| {
+                if this.channel_generation != generation {
+                    return;
+                }
                 this.staging_newer = false;
                 let previous = std::mem::replace(&mut this.flow, Flow::Idle);
                 this.flow = flow_after_stage(previous, version, outcome);
@@ -486,6 +587,7 @@ impl AppUpdate {
     pub fn check_for_updates(&mut self, cx: &mut Context<Self>) {
         self.prompt = Some(Prompt::Checking);
         let checker = self.checker.clone();
+        let generation = self.channel_generation;
         let check = Tokio::spawn(cx, async move { checker.check().await });
         self.user_check = Some(cx.spawn(async move |this, cx| {
             let result = match check.await {
@@ -498,6 +600,9 @@ impl AppUpdate {
                 Err(join) => Err(join.to_string()),
             };
             this.update(cx, |this, cx| {
+                if this.channel_generation != generation {
+                    return;
+                }
                 let outcome = match result {
                     Ok(status) => {
                         this.status = Some(status);
@@ -546,9 +651,22 @@ impl AppUpdate {
         staged: &Path,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        if let Flow::Ready { version, .. } = &self.flow {
-            record_install_attempt(&self.data_dir, version);
-        }
+        anyhow::ensure!(
+            zuse_update::load_channel(&self.data_dir)? == self.channel,
+            "release channel changed; check for updates again"
+        );
+        let Flow::Ready {
+            version,
+            staged: ready,
+        } = &self.flow
+        else {
+            anyhow::bail!("the staged update is no longer available; check for updates again");
+        };
+        anyhow::ensure!(
+            ready == staged && self.channel.accepts(version),
+            "the staged update belongs to a previous release channel"
+        );
+        record_install_attempt(&self.data_dir, version);
         let result = self.install.apply_desktop(staged, true);
         if result.is_err() {
             clear_install_attempt(&self.data_dir);
@@ -570,7 +688,7 @@ impl AppUpdate {
     /// Quit hook: a staged update the user never restarted for installs now,
     /// so the next launch is current. Runs synchronously inside the quit.
     fn install_on_quit(&mut self) {
-        if !self.automatic {
+        if !self.automatic || zuse_update::load_channel(&self.data_dir).ok() != Some(self.channel) {
             return;
         }
         let Flow::Ready { version, staged } = &self.flow else {
@@ -681,6 +799,56 @@ pub fn install_on_quit(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn changing_tracks_discards_staged_updates_and_failed_saves_keep_them(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        zuse_update::save_channel(dir.path(), ReleaseChannel::Stable).unwrap();
+        cx.update(|cx| {
+            gpui_tokio::init(cx);
+            crate::localization::init(Default::default(), cx);
+        });
+        let update =
+            cx.new(|cx| AppUpdate::new("http://127.0.0.1:1".into(), dir.path().to_owned(), cx));
+        update.update(cx, |update, cx| {
+            update.flow = ready("999.0.0");
+            update.release_notes = Some(("999.0.0".into(), vec![]));
+            update.set_channel(ReleaseChannel::Preview, cx);
+            assert_eq!(update.channel(), ReleaseChannel::Preview);
+            assert_eq!(update.download_page(), zuse_update::RELEASES_PAGE);
+            assert_eq!(
+                zuse_update::load_channel(dir.path()).unwrap(),
+                ReleaseChannel::Preview
+            );
+            assert_eq!(update.flow(), &Flow::Idle);
+            assert!(update.staged().is_none());
+            assert!(
+                update
+                    .install_for_restart(Path::new("/stage/999.0.0"), cx)
+                    .is_err()
+            );
+            assert!(!install_attempt_path(dir.path()).exists());
+            assert!(update.release_notes.is_none());
+            assert!(update.available().is_none());
+            assert_eq!(update.channel_generation, 1);
+
+            update.flow = ready("999.1.0-preview.1");
+            let blocked = dir.path().join("file");
+            std::fs::write(&blocked, "keep").unwrap();
+            update.data_dir = blocked;
+            update.set_channel(ReleaseChannel::Stable, cx);
+            assert_eq!(update.channel(), ReleaseChannel::Preview);
+            assert_eq!(update.flow(), &ready("999.1.0-preview.1"));
+            assert!(update.channel_error().is_some());
+            assert_eq!(update.channel_generation, 1);
+            assert_eq!(
+                zuse_update::load_channel(dir.path()).unwrap(),
+                ReleaseChannel::Preview
+            );
+        });
+    }
 
     fn ready(version: &str) -> Flow {
         Flow::Ready {

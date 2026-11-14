@@ -294,10 +294,8 @@ jobs:
               exit 1
             fi
           done
-          cd dist/release
-          sha256sum zuse-* install.sh > SHA256SUMS
-          cat SHA256SUMS
-          cd ../..
+          python3 release-tools/scripts/publish_distributions.py --write-checksums "$TAG" dist/release
+          cat dist/release/SHA256SUMS
           python3 release-tools/scripts/release_notes.py "$TAG" > dist/changelog.md
           test -s dist/changelog.md
           python3 release-tools/scripts/distribution-notes.py "$TAG" dist/changelog.md --cli-archives > dist/notes.md

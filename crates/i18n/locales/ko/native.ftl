@@ -1230,3 +1230,7 @@ native-pr_watch_repairs_used = { $used } of { $limit } used
 
 # Context: tooltip for the auto-fix switch.
 native-pr_watch_auto_fix_help = Let this chat fix failing CI, review comments and merge conflicts, up to five times per PR, committing and pushing normally. It never force-pushes, merges or replies on the PR. On by default for PRs this chat opens. Restarting grants a fresh budget after you review earlier follow-ups.
+
+# Draft English fallback; translation pending review.
+# Context: Settings > General, release channel explanation. Track changes do not downgrade local data.
+native-release_channel_description = Stable receives tested releases. Preview receives early builds. Switching channels waits for a newer version; your sessions stay in place.

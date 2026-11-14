@@ -1148,7 +1148,11 @@ impl Engine {
             let terminals = core.terminals.clone();
             Arc::new(move || !sessions.any_active() && !terminals.any_open())
         };
-        let updater = zuse_update::Updater::spawn(config.edge_url.clone(), Some(quiescent));
+        let updater = zuse_update::Updater::spawn_for_profile(
+            config.edge_url.clone(),
+            config.data_dir.clone(),
+            Some(quiescent),
+        );
         tokio::spawn(async {
             if let Err(error) = zuse_update::control::synchronize_bundled().await {
                 tracing::warn!(%error,"bundled control update failed");

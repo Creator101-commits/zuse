@@ -9,7 +9,8 @@ use zuse_update::{InstallKind, current_version, version_newer};
 /// `--check` prints the verdict and exits (nonzero when an update is available,
 /// so scripts can gate on it).
 pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
-    let manifest = zuse_update::fetch_latest(edge_url).await?;
+    let channel = zuse_update::load_channel(&crate::paths::data_dir())?;
+    let manifest = zuse_update::fetch_latest_for_channel(edge_url, channel).await?;
     let current = current_version();
     if !version_newer(&manifest.version, current) {
         println!(
@@ -72,7 +73,7 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
                  Linux: curl -fsSL https://zuse.sh/install.sh | sh, or run install.sh from the release tarball\n\
                  macOS: download the new Zuse.app dmg, or rebuild from source.\n\
                  Windows: install with the Zuse setup .exe from {}, or rebuild from source.",
-                zuse_update::LATEST_RELEASE_PAGE
+                zuse_update::release_page(&manifest.version)
             )
         }
     }
