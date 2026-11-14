@@ -34,6 +34,7 @@ mod composer_dock;
 mod composer_markdown;
 pub mod context_items;
 mod context_usage;
+mod desktop_analytics;
 pub mod desktop_import;
 mod dictation;
 pub mod edge_fade;
@@ -257,6 +258,7 @@ pub fn run_app(config: UiConfig) {
             state.watch_clock_transitions(cx);
             state
         });
+        desktop_analytics::bind(&state, cx);
         let url_state = state.clone();
         cx.spawn(async move |cx| {
             while let Some(url) = url_rx.next().await {
@@ -284,16 +286,30 @@ pub fn run_app(config: UiConfig) {
         let quit_state = state.clone();
         cx.on_app_quit(move |cx| {
             settings::flush(cx);
+            let analytics_states = desktop_analytics::states(cx);
+            let drains: Vec<_> = analytics_states
+                .iter()
+                .filter_map(|state| {
+                    state.update(cx, |state, cx| state.finish_desktop_analytics(cx))
+                })
+                .collect();
             let engine = quit_state.read(cx).engine().cloned();
             // Quit means stop: agents come back only from a restart the user
             // asked for, however long until Zuse is next opened.
             app_update::install_on_quit(cx);
-            let shutdown = engine
-                .map(|handle| gpui_tokio::Tokio::spawn(cx, async move { handle.shutdown().await }));
-            async move {
-                if let Some(task) = shutdown {
-                    let _ = task.await;
+            let shutdown = gpui_tokio::Tokio::spawn(cx, async move {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    futures::future::join_all(drains),
+                )
+                .await;
+                if let Some(handle) = engine {
+                    handle.shutdown().await
                 }
+            });
+            async move {
+                let _ = shutdown.await;
+                drop(analytics_states);
             }
         })
         .detach();
@@ -489,6 +505,7 @@ fn open_main_window(
     boot: EngineBootConfig,
     cx: &mut App,
 ) -> gpui::WindowHandle<shell::Shell> {
+    desktop_analytics::register(&state, cx);
     let (bounds, display_id) = restored_main_window_bounds(cx);
     let handle = cx
         .open_window(
@@ -550,6 +567,7 @@ fn open_main_window(
                 // the subscription lives as long as the window does, and the window
                 // owns nothing that would drop it early.
                 appearance::observe_window(window, cx).detach();
+                let close_state = state.downgrade();
                 let shell = cx.new(|cx| {
                     observe_main_window_geometry(window, cx);
                     shell::Shell::new(state, boot, cx)
@@ -561,6 +579,31 @@ fn open_main_window(
                         .update(cx, |shell, cx| shell.prepare_window_close(cx))
                         .unwrap_or(true);
                     if should_close {
+                        if let Some(state) = close_state.upgrade() {
+                            let primary = cx.try_global::<ReopenState>().is_some_and(|reopen| {
+                                reopen.state.entity_id() == state.entity_id()
+                            });
+                            let drained = state.update(cx, |state, cx| {
+                                state.desktop_foreground(false, cx);
+                                (!primary)
+                                    .then(|| state.finish_desktop_analytics(cx))
+                                    .flatten()
+                            });
+                            if let Some(drained) = drained {
+                                let task = gpui_tokio::Tokio::spawn(cx, async move {
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_secs(3),
+                                        drained,
+                                    )
+                                    .await;
+                                });
+                                cx.spawn(async move |_| {
+                                    let _ = task.await;
+                                    drop(state);
+                                })
+                                .detach();
+                            }
+                        }
                         save_window_geometry(window, false, cx);
                         settings::flush(cx);
                     }

@@ -1,9 +1,8 @@
 # PostHog product analytics
 
 Explicit product events cover chat lifecycle, client navigation, models, messages,
-settings, execution, reliability, engagement, and feature adoption. This follows
-`pingdotgg/t3code`'s distinction between client actions and provider execution,
-adapted to the Rust engine, native desktop, Solid browser, and Expo clients.
+settings, execution, reliability, engagement, and feature adoption across the
+Rust engine, native desktop, Solid browser, and Expo clients.
 
 ## Questions the instrumentation answers
 
@@ -37,6 +36,54 @@ Conversation identifiers, titles, and content are not collected, so an open coun
 is a count of visits, not the number of distinct historical conversations opened.
 Created-chat counts and unique opener identities remain available. Counts begin
 with deployment; historical activity cannot be reconstructed.
+
+## Native desktop semantics
+
+The native viewport sends a typed `RecordDesktopEvent` RPC to its **connected
+engine**, using the same collector, installation/account identity, preference,
+bounded delivery queue, and sanitizer as engine execution. It does not open an
+analytics preference file or initialize a second SDK. This applies to embedded,
+local daemon, cloud/account, and paired engines. The connected engine owns
+configuration and consent: a remote connection uses that remote engine's ingest
+configuration and installation ID, not the desktop machine's. Native `os` and
+`architecture` currently describe the collecting engine host. Do not interpret
+them as the viewer's hardware when connected remotely.
+
+| Event | Successful transition / exact interpretation |
+| --- | --- |
+| `app opened` (`desktop`) | Once per workspace-window state after its first analytics handshake. Additional paired/account/cloud windows count separately, so this is a window-session metric, not a process-launch count. Reconnects, engine replacement, and reopening the primary window do not count another session. Startup without a usable analytics handshake is unobserved. Existing `engine` events still mean engine startup/shutdown. |
+| `app closed` (`desktop`) | Graceful quit or closing an auxiliary workspace window. All registered states get a bounded three-second concurrent drain before embedded-engine shutdown. Closing only the primary window backgrounds its session for later reopening; crashes/forced quits cannot report closure. |
+| `app foregrounded`, `app backgrounded` | Deduplicated GPUI activation changes and closure for the originating workspace window, including its initial active state. |
+| `app active interval` | Whole monotonic foreground seconds, flushed every 60 seconds while foreground, on focus loss, and on quit. Each measurement is 1–60 seconds; suspension gaps are capped. Engine reattachment discards time from the old engine. Collector consent/account changes trim intervals to time in the current epoch. This is focused dwell, including reading/idle time, **not** mouse/keyboard activity or a verified engaged-user metric. Subsecond remainders are discarded. |
+| `screen viewed` | Initial route and changes among `chat`, `pull_requests`, `plugins`, `archives`, `usage`, `zot`, `settings`; identical route categories are deduplicated. Chat-to-chat visits remain the separate existing `chat opened` event. |
+| `settings viewed` | Section entry, section changes, and revisits after leaving settings, using a finite section enum. Legacy section aliases are canonicalized. No repeated event for opening the current section. |
+| `palette opened` | Palette successfully mounted; closing/reopening counts again. |
+| `palette tab changed` | Actual change among `all`, `threads`, `commands`, `files`; opening defaults to All without a tab-change event. |
+| `palette action invoked` | Accepted result activation: `new_chat`, `new_project`, `settings`, `theme`, `archive_thread`, `chat`, `file`, `folder`, `content`. It measures invoking an action, not successful completion of an asynchronous mutation. Query edits, debounce/index polling and result refreshes emit nothing. |
+| `panel changed` | Explicit sidebar or surface-host open/close state change (`panel`, `open`); viewport fitting, resizing and no-op requests are excluded. |
+| `surface selected` | Right-pane active tab changes with `surface_kind`: `picker`, `file`, `browser`, `simulator`, `diff`, `terminal`, `subagent`, `side_chat`, `pull_request`, `files`. Switching to a different tab of the same type counts, without its ID. No event for reselecting the same tab. |
+| `preference changed` | Applied changes in the central native settings store, after clamping, one per changed finite category per update. Categories: file word wrap, show-all files, typography, appearance, language, composer, notifications, sound, dictation, shortcuts, sidebar, browser, diff, transcript, autosave, appshots, default model, default permissions. Values are never sent. Startup settings loading, unchanged writes, geometry, paths, display names, stash contents, and entity state are excluded. Applied does not guarantee a later disk write succeeds. |
+
+The native transport buffers at most 64 event groups per window and sends them
+serially with a 250 ms timeout per request, without retries. Overflow, unsupported
+methods, timeouts, and disconnected errors are dropped. Binding another engine
+cancels the old queue. Each observation carries an opaque collection epoch issued
+by that engine; the collector checks it atomically with capture. Consent/account
+changes and collector restarts invalidate older observations, including events
+delayed before receipt. The epoch is never included in public event properties.
+Before the initial 750 ms handshake succeeds, interactions are dropped. Status
+refreshes every minute and in event replies; a new engine receives the current
+screen snapshot, without replaying earlier visits. Preferences use the originating
+active window's engine and epoch, even when dispatch is deferred. Native
+and execution events share identity only while using the same engine/account;
+engine switches can split activation funnels. Window-session/focus counts are observed
+coverage, not complete installations. There is no per-search-query, per-file,
+per-project, per-tab-ID, or per-conversation-ID analytics dimension.
+
+Native dashboard queries filter `surface=desktop`; `surface_kind` is deliberately
+separate from the collector's reserved `surface` attribution. The activation
+funnel uses a native window session/chat navigation then engine submission/completion,
+within one day for the same identity; it is not a proof of first-ever activation.
 
 ## Model catalog boundary
 
@@ -94,6 +141,16 @@ cross-platform reporting is wanted.
 - Rust reads `ZUSE_POSTHOG_KEY` and `ZUSE_POSTHOG_HOST` at runtime, falling back to
   values embedded when Cargo compiled the analytics crate. Export these during
   release builds; Cargo does not automatically read dotenv files.
+  `.github/workflows/native-compile.yml` reads optional repository variables
+  `ZUSE_POSTHOG_KEY` (public ingest token) and `ZUSE_POSTHOG_HOST`, covering tagged
+  native releases and main prebuilds through the reusable compiler. Distribution
+  fallback source builds receive the same variables. An empty host uses the US
+  default. No operations/personal API key is embedded. Reused prebuilt/release
+  archives retain their original compiled settings: changing variables does not
+  retrofit an existing artifact; rebuild to change its embedded configuration.
+  This change does not set repository variables or verify their presence; without
+  a configured public token the native build remains network-disabled. Remote
+  engines need their own runtime/build ingest configuration.
 - Vite reads `VITE_POSTHOG_*` at build time or from `apps/web-solid/.env.local`.
 - Expo uses `EXPO_PUBLIC_POSTHOG_*` in its build environment.
 - US ingest defaults to `https://us.i.posthog.com`; EU projects need
@@ -117,7 +174,7 @@ invalidate queued engine events. PostHog person-profile processing is disabled.
 
 ## Dashboards
 
-`scripts/analytics-dashboards.mjs` defines four dashboards:
+`scripts/analytics-dashboards.mjs` defines five dashboards:
 
 1. **Zuse — Chats and activation**: creation, opening, messages, lifecycle and
    creation-to-submission-to-completion funnel.
@@ -127,6 +184,9 @@ invalidate queued engine events. PostHog person-profile processing is disabled.
    tool categories/failures, observed tokens, usage coverage and subagents.
 4. **Zuse — Engagement and environment**: daily/weekly submitters, installations,
    host OS/architecture/version, feature adoption, and browser engagement.
+5. **Zuse — Native desktop**: workspace-window sessions and closure, focus and foreground dwell,
+   route/settings visits, palette/search-result actions, panel/tab adoption,
+   preference categories, native chat openers, and an activation funnel.
 
 Preview definitions without credentials or network requests:
 
@@ -177,7 +237,8 @@ Validation commands:
 
 ```sh
 cargo test -p zuse-analytics
-cargo check -p zuse-engine
+cargo check -p zuse-engine -p zuse-ui -p zuse
+cargo test -p zuse-ui desktop_analytics::tests
 node --test scripts/analytics-dashboards.test.mjs
 bun test --cwd packages/analytics
 cd apps/web-solid

@@ -3811,6 +3811,13 @@ impl Shell {
         self.pane_resize_active = None;
         self.pane_resize_dragging = None;
         self.settings.sidebar_collapsed = !self.settings.sidebar_collapsed;
+        self.desktop_event(
+            zuse_analytics::desktop::Event::PanelChanged {
+                panel: zuse_analytics::desktop::Panel::Sidebar,
+                open: !self.settings.sidebar_collapsed,
+            },
+            cx,
+        );
         // Record the open before targeting: the fit ranks columns by recency,
         // and an unrecorded sidebar would target the width of a hidden one.
         if !self.settings.sidebar_collapsed {
@@ -3884,6 +3891,13 @@ impl Shell {
             self.right_pane_expanded = false;
         }
         self.panels.update(&key, |p| p.changes_open = open);
+        self.desktop_event(
+            zuse_analytics::desktop::Event::PanelChanged {
+                panel: zuse_analytics::desktop::Panel::Surfaces,
+                open,
+            },
+            cx,
+        );
         self.resplit_panels(before, Some(AuxiliaryPanel::Right), cx);
         let to = self.right_settled_target(cx);
         let pane = self.panel_tween(from, to);
@@ -4184,6 +4198,25 @@ impl Shell {
                 .update(cx, |state, cx| state.focus_subagent_sync(&doc_id, cx));
         }
         if self.resolved_right_active(cx) != surface {
+            use zuse_analytics::desktop::{Event, Surface};
+            let category = match surface {
+                RightSurface::Picker => Surface::Picker,
+                RightSurface::File(_) => Surface::File,
+                RightSurface::Browser(_) => Surface::Browser,
+                RightSurface::Simulator(_) => Surface::Simulator,
+                RightSurface::Diff(_) => Surface::Diff,
+                RightSurface::Terminal(_) => Surface::Terminal,
+                RightSurface::Subagent(_) => Surface::Subagent,
+                RightSurface::SideChat(_) => Surface::SideChat,
+                RightSurface::PullRequest(_) => Surface::PullRequest,
+                RightSurface::Files => Surface::Files,
+            };
+            self.desktop_event(
+                Event::SurfaceSelected {
+                    surface_kind: category,
+                },
+                cx,
+            );
             self.suspend_file_images(cx);
         }
         let key = self.panel_key(cx);
@@ -5749,7 +5782,52 @@ impl Shell {
 
     // ---- routes / settings ----
 
+    fn desktop_event(&self, event: zuse_analytics::desktop::Event, cx: &mut Context<Self>) {
+        self.state
+            .update(cx, |state, cx| state.record_desktop_events(vec![event], cx));
+    }
+
+    fn record_route(&self, route: Route, cx: &mut Context<Self>) {
+        use zuse_analytics::desktop::{Screen, SettingsPage};
+        let (screen, section) = match route {
+            Route::Chat => (Screen::Chat, None),
+            Route::PullRequests => (Screen::PullRequests, None),
+            Route::Plugins => (Screen::Plugins, None),
+            Route::Archives => (Screen::Archives, None),
+            Route::Usage => (Screen::Usage, None),
+            Route::Zot => (Screen::Zot, None),
+            Route::Settings(section) => (
+                Screen::Settings,
+                Some(match section.canonical() {
+                    SettingsSection::Cloud => SettingsPage::Cloud,
+                    SettingsSection::CloudRepositories => SettingsPage::CloudRepositories,
+                    SettingsSection::CloudEnvironments => SettingsPage::CloudEnvironments,
+                    SettingsSection::CloudMachine => SettingsPage::CloudMachine,
+                    SettingsSection::CloudAgents => SettingsPage::CloudAgents,
+                    SettingsSection::Usage => SettingsPage::Usage,
+                    SettingsSection::Billing => SettingsPage::Billing,
+                    SettingsSection::Devices => SettingsPage::Devices,
+                    SettingsSection::Harnesses => SettingsPage::Harnesses,
+                    SettingsSection::Defaults => SettingsPage::Defaults,
+                    SettingsSection::Plugins => SettingsPage::Plugins,
+                    SettingsSection::Agents => SettingsPage::Agents,
+                    SettingsSection::Appearance => SettingsPage::Appearance,
+                    SettingsSection::Files => SettingsPage::Files,
+                    SettingsSection::Notifications => SettingsPage::Notifications,
+                    SettingsSection::Voice => SettingsPage::Voice,
+                    SettingsSection::Shortcuts => SettingsPage::Shortcuts,
+                    SettingsSection::General => SettingsPage::General,
+                    SettingsSection::Appshots => SettingsPage::Appshots,
+                    SettingsSection::Archived => SettingsPage::Archived,
+                }),
+            ),
+        };
+        self.state
+            .update(cx, |state, cx| state.desktop_screen(screen, section, cx));
+    }
+
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
+        self.record_route(route, cx);
         if matches!(self.route, Route::Settings(SettingsSection::Archived))
             && !matches!(route, Route::Settings(SettingsSection::Archived))
         {
@@ -15397,9 +15475,23 @@ impl Render for Shell {
         }
 
         if self.activation_sub.is_none() {
+            crate::desktop_analytics::register(&self.state, cx);
+            if window.is_window_active() {
+                crate::desktop_analytics::activate(&self.state, cx);
+            }
+            self.record_route(self.route, cx);
+            self.state.update(cx, |state, cx| {
+                state.desktop_foreground(window.is_window_active(), cx)
+            });
             self.activation_sub = Some(cx.observe_window_activation(
                 window,
                 |this: &mut Shell, window, cx| {
+                    if window.is_window_active() {
+                        crate::desktop_analytics::activate(&this.state, cx);
+                    }
+                    this.state.update(cx, |state, cx| {
+                        state.desktop_foreground(window.is_window_active(), cx)
+                    });
                     motion::window_activation_changed(window.is_window_active(), cx);
                     if window.is_window_active() {
                         crate::localization::refresh_system(cx);

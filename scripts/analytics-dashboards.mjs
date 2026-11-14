@@ -98,3 +98,31 @@ export const analyticsDashboards = [
     ],
   },
 ];
+
+const native = (name, event, description, options = {}) => engine(`Desktop ${name}`, event, description, { ...options, surface: "desktop" });
+analyticsDashboards.push({
+  name: "Zuse — Native desktop",
+  description: "Native UI transitions through the connected engine's consent and identity. Focused time is foreground dwell, including reading and idle time; it is not verified human interaction. No entity identifiers or search text.",
+  tiles: [
+    native("window sessions", "app opened", "Once per native workspace-window state after its analytics handshake; additional workspace windows count separately. Engine startups are excluded."),
+    native("active identities", "app foregrounded", "Daily unique identities bringing the native window to the foreground.", { math: "dau" }),
+    native("window session closes", "app closed", "Graceful quit or auxiliary workspace-window closure. Closing and reopening the primary window retains its session; crashes cannot report closure."),
+    native("foreground transitions", "app foregrounded", "Deduplicated focus gains; repeated focus notifications do not count."),
+    native("background transitions", "app backgrounded", "Focus losses and closure of the originating workspace window."),
+    native("foreground seconds", "app active interval", "Monotonic foreground dwell, emitted at most once per minute plus focus loss/quit, each interval capped at 60 seconds. Consent/account epochs trim intervals.", { math: "sum", math_property: "active_seconds" }),
+    native("screen visits", "screen viewed", "Route category transitions, including the initial screen; no render counts or raw routes.", { breakdown: "screen" }),
+    native("settings visits", "settings viewed", "Section entries and revisits; unchanged section requests are excluded.", { breakdown: "section" }),
+    native("palette opens", "palette opened", "Successful mounting of the command/search palette."),
+    native("palette tabs", "palette tab changed", "Changes between finite palette tabs.", { breakdown: "tab" }),
+    native("palette actions", "palette action invoked", "Activated result categories, including search-result selections; asynchronous commands may subsequently fail. No queries, result labels or paths.", { breakdown: "action" }),
+    native("panel transitions", "panel changed", "Sidebar and surface-host explicit open/close state changes; automatic width fitting is excluded.", { breakdown: "panel" }),
+    native("surface adoption", "surface selected", "Changes of the active right-pane tab, grouped by type; different tabs of the same type can each count.", { math: "dau", breakdown: "surface_kind" }),
+    native("preference adoption", "preference changed", "Applied settings changes grouped by finite category; values, geometry saves and startup hydration are excluded.", { math: "dau", breakdown: "preference" }),
+    native("chat openers", "chat opened", "Unique native navigation identities opening persisted chats.", { math: "dau" }),
+    tile("Zuse — Desktop activation funnel", "Same connected-engine identity starting a native workspace-window session, opening a chat, submitting and completing a turn within one day. Changing engines/accounts can break attribution; execution events are not labeled desktop.", {
+      kind: "FunnelsQuery", dateRange: { date_from: "-30d" },
+      series: [series("app opened", { surface: "desktop" }), series("chat opened", { surface: "desktop" }), series("message submitted"), series("turn completed")].map((node, order) => ({ ...node, order })),
+      funnelsFilter: { funnelVizType: "steps", funnelOrderType: "ordered", funnelWindowInterval: 1, funnelWindowIntervalUnit: "day" },
+    }),
+  ],
+});

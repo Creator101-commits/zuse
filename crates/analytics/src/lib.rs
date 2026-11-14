@@ -1,4 +1,5 @@
 //! Best-effort product analytics. No content, provider payloads, or raw errors.
+pub mod desktop;
 pub mod dimensions;
 pub mod turn;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,8 @@ struct State {
     preference: Preference,
     account: Option<String>,
     generation: u64,
+    collection_epoch: String,
+    identity_since: std::time::Instant,
     models: HashMap<String, HashSet<String>>,
 }
 #[derive(Serialize, Deserialize)]
@@ -46,6 +49,8 @@ enum Message {
 pub struct Status {
     pub enabled: bool,
     pub configured: bool,
+    #[serde(default)]
+    pub collection_epoch: String,
 }
 
 pub fn account_id(id: &str) -> String {
@@ -65,6 +70,7 @@ impl Analytics {
         let host = std::env::var("ZUSE_POSTHOG_HOST")
             .ok()
             .or_else(|| option_env!("ZUSE_POSTHOG_HOST").map(str::to_owned))
+            .filter(|host| !host.trim().is_empty())
             .unwrap_or_else(|| "https://us.i.posthog.com".into());
         let configured = !key.trim().is_empty()
             && (!cfg!(debug_assertions)
@@ -97,6 +103,8 @@ impl Analytics {
                 preference,
                 account: None,
                 generation: 0,
+                collection_epoch: uuid::Uuid::new_v4().to_string(),
+                identity_since: std::time::Instant::now(),
                 models: HashMap::new(),
             }),
             configured: configured && durable && runtime.is_some(),
@@ -114,6 +122,7 @@ impl Analytics {
         Status {
             enabled: state.preference.enabled,
             configured: self.0.configured,
+            collection_epoch: state.collection_epoch.clone(),
         }
     }
 
@@ -121,6 +130,8 @@ impl Analytics {
         let mut state = self.0.state.lock().unwrap();
         // Revoke in memory first, even if the disk write fails.
         state.generation += 1;
+        state.collection_epoch = uuid::Uuid::new_v4().to_string();
+        state.identity_since = std::time::Instant::now();
         if !enabled {
             state.preference.enabled = false;
         }
@@ -152,6 +163,8 @@ impl Analytics {
         }
         state.account = next;
         state.generation += 1;
+        state.collection_epoch = uuid::Uuid::new_v4().to_string();
+        state.identity_since = std::time::Instant::now();
         drop(state);
         self.0.changed.notify_one();
     }
@@ -176,12 +189,42 @@ impl Analytics {
     }
 
     pub fn capture_from(&self, surface: &str, event: &str, properties: Value) {
+        self.capture_with_epoch(surface, event, properties, None);
+    }
+
+    /// Validate the observation epoch atomically with consent and attribution.
+    pub fn capture_desktop(&self, epoch: &str, event: desktop::Event) {
+        let (name, properties) = event.parts();
+        self.capture_with_epoch("desktop", &name, properties, Some(epoch));
+    }
+
+    fn capture_with_epoch(
+        &self,
+        surface: &str,
+        event: &str,
+        properties: Value,
+        epoch: Option<&str>,
+    ) {
         let state = self.0.state.lock().unwrap();
+        if epoch.is_some_and(|epoch| epoch != state.collection_epoch) {
+            return;
+        }
         let Some(mut properties) = sanitize_with_models(event, properties, &state.models) else {
             return;
         };
         if !self.0.configured || !state.preference.enabled {
             return;
+        }
+        // Never attribute foreground time from a previous consent/account epoch.
+        if surface == "desktop" && event == "app active interval" {
+            let seconds = properties["active_seconds"]
+                .as_u64()
+                .unwrap_or(0)
+                .min(state.identity_since.elapsed().as_secs());
+            if seconds == 0 {
+                return;
+            }
+            properties["active_seconds"] = json!(seconds);
         }
         properties["analytics_schema_version"] = json!(2);
         properties["surface"] = json!(if ["engine", "desktop", "web", "ios", "android"]
@@ -257,6 +300,28 @@ fn sanitize_with_models(
     properties: Value,
     models: &HashMap<String, HashSet<String>>,
 ) -> Option<Value> {
+    if ["app foregrounded", "app backgrounded", "palette opened"].contains(&event) {
+        return Some(json!({}));
+    }
+    if [
+        "app foregrounded",
+        "app backgrounded",
+        "app active interval",
+        "screen viewed",
+        "settings viewed",
+        "panel changed",
+        "surface selected",
+        "palette opened",
+        "palette tab changed",
+        "palette action invoked",
+        "preference changed",
+    ]
+    .contains(&event)
+    {
+        let event: desktop::Event =
+            serde_json::from_value(json!({"event": event, "properties": properties})).ok()?;
+        return event.valid().then(|| event.parts().1);
+    }
     let dimensions = [
         "provider",
         "model",
@@ -484,6 +549,7 @@ async fn deliver(
     let endpoint = format!("{}/batch/", host.trim_end_matches('/'));
     let mut batch = Vec::new();
     let mut interval = tokio::time::interval(Duration::from_secs(10));
+    interval.tick().await;
     let Some(changed) = inner.upgrade().map(|owner| owner.changed.clone()) else {
         return;
     };
@@ -496,7 +562,7 @@ async fn deliver(
                 None => break,
             },
             _ = interval.tick() => {},
-            _ = changed.notified() => {},
+            _ = changed.notified() => { continue; },
         }
         let Some(owner) = inner.upgrade() else {
             break;

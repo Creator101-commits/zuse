@@ -25,6 +25,7 @@ pub const GET_CUSTOM_ACP_AGENTS: &str = "GetCustomAcpAgents";
 pub const SET_CUSTOM_ACP_AGENT: &str = "SetCustomAcpAgent";
 pub const DELETE_CUSTOM_ACP_AGENT: &str = "DeleteCustomAcpAgent";
 pub const GET_TITLE_SETTINGS: &str = "GetTitleSettings";
+pub const RECORD_DESKTOP_EVENT: &str = "RecordDesktopEvent";
 pub const RECORD_CHAT_OPENED: &str = "RecordChatOpened";
 pub const GET_ANALYTICS_SETTINGS: &str = "GetAnalyticsSettings";
 pub const SET_ANALYTICS_SETTINGS: &str = "SetAnalyticsSettings";

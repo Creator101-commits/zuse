@@ -486,6 +486,7 @@ impl Shell {
             content: WorkspaceQuery::default(),
             _search_events: events,
         });
+        self.desktop_event(zuse_analytics::desktop::Event::PaletteOpened, cx);
         // Load the default Files list (recently changed files) right away.
         self.search_palette_workspace(cx);
         cx.notify();
@@ -499,6 +500,16 @@ impl Shell {
             palette.tab = tab;
             palette.reset_active();
             palette.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            let tab = match tab {
+                Tab::All => zuse_analytics::desktop::PaletteTab::All,
+                Tab::Threads => zuse_analytics::desktop::PaletteTab::Threads,
+                Tab::Commands => zuse_analytics::desktop::PaletteTab::Commands,
+                Tab::Files => zuse_analytics::desktop::PaletteTab::Files,
+            };
+            self.desktop_event(
+                zuse_analytics::desktop::Event::PaletteTabChanged { tab },
+                cx,
+            );
             cx.notify();
         }
     }
@@ -865,6 +876,19 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        use zuse_analytics::desktop::{Event, PaletteAction};
+        let action = match &row.kind {
+            RowKind::Command(Command::NewChat) => PaletteAction::NewChat,
+            RowKind::Command(Command::NewProject) => PaletteAction::NewProject,
+            RowKind::Command(Command::Settings) => PaletteAction::Settings,
+            RowKind::Command(Command::Theme(_)) => PaletteAction::Theme,
+            RowKind::Command(Command::ArchiveThread) => PaletteAction::ArchiveThread,
+            RowKind::Chat(_) => PaletteAction::Chat,
+            RowKind::File { is_dir: true, .. } => PaletteAction::Folder,
+            RowKind::File { .. } => PaletteAction::File,
+            RowKind::Content(_) => PaletteAction::Content,
+        };
+        self.desktop_event(Event::PaletteActionInvoked { action }, cx);
         if let RowKind::Command(Command::Theme(mode)) = row.kind {
             // Keep the palette open so this ordinary action updates to its next state.
             crate::appearance::set_mode(mode, cx);
@@ -2027,6 +2051,27 @@ mod tests {
     }
 
     impl FakeEngine {
+        fn new() -> (crate::state::EngineHandle, Self) {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let (out, requests) = tokio::sync::mpsc::channel(64);
+            let (replies, inbound) = tokio::sync::mpsc::channel(64);
+            let engine = {
+                let _guard = runtime.enter();
+                crate::state::EngineHandle::from_test_client(zuse_rpc::RpcClient::new(out, inbound))
+            };
+            (
+                engine,
+                Self {
+                    runtime,
+                    requests,
+                    replies,
+                },
+            )
+        }
+
         /// Every request sent so far for `method`; other methods are
         /// answered with an empty object (or a ready search index).
         fn take(&mut self, method: &str, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
@@ -2038,10 +2083,15 @@ mod tests {
                     return found;
                 };
                 let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                if request["cancel"] == true {
+                    continue;
+                }
                 if request["method"] == method {
                     found.push(request);
                 } else if request["method"] == methods::WARM_WORKSPACE_SEARCH {
                     self.reply(&request, serde_json::json!({ "state": "ready" }));
+                } else if request["method"] == methods::GET_ANALYTICS_SETTINGS {
+                    self.reply(&request, native_status());
                 } else {
                     self.reply(&request, serde_json::json!({}));
                 }
@@ -2073,16 +2123,7 @@ mod tests {
         cx: &mut TestAppContext,
         focused: bool,
     ) -> (gpui::WindowHandle<Shell>, tempfile::TempDir, FakeEngine) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let (out, requests) = tokio::sync::mpsc::channel(64);
-        let (replies, inbound) = tokio::sync::mpsc::channel(64);
-        let engine = {
-            let _guard = runtime.enter();
-            crate::state::EngineHandle::from_test_client(zuse_rpc::RpcClient::new(out, inbound))
-        };
+        let (engine, fake) = FakeEngine::new();
         let (window, dir) = palette_window(cx);
         window
             .update(cx, |shell, window, cx| {
@@ -2103,12 +2144,188 @@ mod tests {
                 shell.toggle_command_palette(window, cx);
             })
             .unwrap();
-        let fake = FakeEngine {
-            runtime,
-            requests,
-            replies,
-        };
         (window, dir, fake)
+    }
+
+    fn native_status() -> serde_json::Value {
+        serde_json::json!({
+            "enabled": true,
+            "configured": true,
+            "collection_epoch": "analytics-test-epoch",
+        })
+    }
+
+    fn native_events(engine: &mut FakeEngine, cx: &mut TestAppContext) -> Vec<serde_json::Value> {
+        let mut events = Vec::new();
+        loop {
+            let requests = engine.take(zuse_rpc::methods::RECORD_DESKTOP_EVENT, cx);
+            if requests.is_empty() {
+                return events;
+            }
+            for request in requests {
+                assert_eq!(request["params"]["collectionEpoch"], "analytics-test-epoch");
+                events.push(request["params"]["event"].clone());
+                engine.reply(&request, native_status());
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn native_analytics_tracks_transitions_without_query_edits_or_duplicate_visits(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, _dir, mut engine) = engine_palette(cx, false);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.start_test_desktop_delivery(cx);
+                });
+            })
+            .unwrap();
+        native_events(&mut engine, cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.toggle_command_palette(window, cx);
+                shell.toggle_command_palette(window, cx);
+            })
+            .unwrap();
+        let initial = native_events(&mut engine, cx);
+        assert_eq!(
+            initial
+                .iter()
+                .filter(|event| event["event"] == "palette opened")
+                .count(),
+            1
+        );
+        type_query(window, "private search text", cx);
+        assert!(native_events(&mut engine, cx).is_empty());
+        window
+            .update(cx, |shell, _, cx| {
+                shell.select_palette_tab(Tab::Files, cx);
+                shell.select_palette_tab(Tab::Files, cx);
+                shell.open_settings(SettingsSection::General, cx);
+                shell.open_settings(SettingsSection::General, cx);
+                shell.open_settings(SettingsSection::Files, cx);
+            })
+            .unwrap();
+        let events = native_events(&mut engine, cx);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"] == "palette tab changed")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"] == "screen viewed")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"] == "settings viewed")
+                .count(),
+            2
+        );
+        assert!(!serde_json::to_string(&events).unwrap().contains("private"));
+    }
+
+    #[gpui::test]
+    fn native_analytics_timeout_and_engine_rebind_keep_delivery_moving(cx: &mut TestAppContext) {
+        let (window, _dir, mut old) = engine_palette(cx, false);
+        window
+            .update(cx, |shell, _, cx| {
+                shell
+                    .state
+                    .update(cx, |state, cx| state.start_test_desktop_delivery(cx));
+            })
+            .unwrap();
+        native_events(&mut old, cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.toggle_command_palette(window, cx);
+                shell.toggle_command_palette(window, cx);
+            })
+            .unwrap();
+        let unanswered = old.take(methods::RECORD_DESKTOP_EVENT, cx);
+        assert_eq!(unanswered.len(), 1);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.toggle_command_palette(window, cx);
+                shell.toggle_command_palette(window, cx);
+            })
+            .unwrap();
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+        let following = old.take(methods::RECORD_DESKTOP_EVENT, cx);
+        assert_eq!(
+            following.len(),
+            1,
+            "a silent request must not block the next event"
+        );
+
+        let (replacement, mut healthy) = FakeEngine::new();
+        window
+            .update(cx, |shell, _, cx| {
+                shell.state.update(cx, |state, cx| {
+                    state.set_test_engine(replacement);
+                    state.start_test_desktop_delivery(cx);
+                });
+            })
+            .unwrap();
+        native_events(&mut healthy, cx);
+        window
+            .update(cx, |shell, window, cx| {
+                shell.toggle_command_palette(window, cx);
+                shell.toggle_command_palette(window, cx);
+            })
+            .unwrap();
+        let events = native_events(&mut healthy, cx);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"] == "palette opened")
+                .count(),
+            1
+        );
+    }
+
+    #[gpui::test]
+    fn native_analytics_records_new_side_chat_selection_once(cx: &mut TestAppContext) {
+        let (window, _dir, mut engine) = engine_palette(cx, true);
+        window
+            .update(cx, |shell, _, cx| {
+                shell
+                    .state
+                    .update(cx, |state, cx| state.start_test_desktop_delivery(cx));
+            })
+            .unwrap();
+        native_events(&mut engine, cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.create_child_chat(None, cx);
+            })
+            .unwrap();
+        let events = native_events(&mut engine, cx);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    event["event"] == "surface selected"
+                        && event["properties"]["surface_kind"] == "side_chat"
+                })
+                .count(),
+            1
+        );
+        window
+            .update(cx, |shell, _, cx| {
+                shell.set_right_active(RightSurface::SideChat(shell.side_chat_seq), cx);
+            })
+            .unwrap();
+        assert!(native_events(&mut engine, cx).is_empty());
     }
 
     fn type_query(window: gpui::WindowHandle<Shell>, query: &str, cx: &mut TestAppContext) {

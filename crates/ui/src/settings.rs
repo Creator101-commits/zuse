@@ -657,10 +657,12 @@ pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSetti
     if !cx.has_global::<SettingsStore>() {
         return false;
     }
+    let before = current(cx);
     if !cx.global_mut::<SettingsStore>().update_current(mutate) {
         return false;
     }
     schedule(policy, cx);
+    crate::desktop_analytics::preferences_changed(&before, &current(cx), cx);
     true
 }
 

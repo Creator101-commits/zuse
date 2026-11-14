@@ -2482,6 +2482,34 @@ impl RpcService for AuthRpc {
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
+        if let Some(analytics) = &self.analytics {
+            let id = self
+                .account
+                .as_ref()
+                .and_then(|account| account.status().user.map(|user| user.id))
+                .or_else(|| {
+                    if matches!(
+                        self.engine_info.workspace_scope,
+                        WorkspaceScope::Local | WorkspaceScope::Development
+                    ) {
+                        None
+                    } else {
+                        self.auth.as_ref().and_then(|auth| auth.user_id())
+                    }
+                });
+            analytics.set_account(id.as_deref());
+        }
+        if method == methods::RECORD_DESKTOP_EVENT {
+            let observation: zuse_analytics::desktop::Observation = parse_params(params)?;
+            if !observation.event.valid() {
+                return Err(RpcError::BadParams("Invalid desktop interval".into()));
+            }
+            if let Some(analytics) = &self.analytics {
+                analytics.capture_desktop(&observation.collection_epoch, observation.event);
+                return RpcReply::value(&analytics.status());
+            }
+            return RpcReply::value(&serde_json::json!({"ok": true}));
+        }
         if method == methods::RECORD_CHAT_OPENED {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -2522,23 +2550,6 @@ impl RpcService for EngineRpc {
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
             }
             return RpcReply::value(&analytics.status());
-        }
-        if let Some(analytics) = &self.analytics {
-            let id = self
-                .account
-                .as_ref()
-                .and_then(|account| account.status().user.map(|user| user.id))
-                .or_else(|| {
-                    if matches!(
-                        self.engine_info.workspace_scope,
-                        WorkspaceScope::Local | WorkspaceScope::Development
-                    ) {
-                        None
-                    } else {
-                        self.auth.as_ref().and_then(|auth| auth.user_id())
-                    }
-                });
-            analytics.set_account(id.as_deref());
         }
         let feature = zuse_analytics::feature(method, &params);
         let started = std::time::Instant::now();

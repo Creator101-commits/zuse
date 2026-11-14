@@ -279,6 +279,7 @@ async fn revocation_discards_queued_events_before_delivery() {
     let dir = tempfile::tempdir().unwrap();
     let analytics = Analytics::start(dir.path(), "test".into(), url, true);
     analytics.capture("app opened", json!({}));
+    analytics.capture_from("desktop", "palette opened", json!({}));
     analytics.set_enabled(false).unwrap();
     analytics.capture("app opened", json!({}));
     analytics.shutdown().await;
@@ -295,4 +296,194 @@ async fn missing_configuration_never_delivers() {
     analytics.shutdown().await;
     assert!(!request.is_finished());
     request.abort();
+}
+
+#[test]
+fn native_catalog_rejects_arbitrary_dimensions_and_bounds_time() {
+    for (event, properties, expected) in [
+        (
+            "screen viewed",
+            json!({"screen": "chat", "path": "/private", "provider": "codex", "chat_id": "secret"}),
+            json!({"screen": "chat"}),
+        ),
+        (
+            "settings viewed",
+            json!({"section": "general", "label": "private"}),
+            json!({"section": "general"}),
+        ),
+        (
+            "palette action invoked",
+            json!({"action": "content", "query": "private query"}),
+            json!({"action": "content"}),
+        ),
+        (
+            "surface selected",
+            json!({"surface_kind": "terminal", "title": "private"}),
+            json!({"surface_kind": "terminal"}),
+        ),
+        (
+            "preference changed",
+            json!({"preference": "default_model", "value": "private model"}),
+            json!({"preference": "default_model"}),
+        ),
+        (
+            "app active interval",
+            json!({"active_seconds": 60, "idle": "private"}),
+            json!({"active_seconds": 60}),
+        ),
+        ("app foregrounded", json!({"title": "private"}), json!({})),
+        ("palette opened", json!({"query": "private"}), json!({})),
+    ] {
+        assert_eq!(sanitize(event, properties), Some(expected), "{event}");
+    }
+    for (event, properties) in [
+        ("screen viewed", json!({"screen": "/private/project"})),
+        (
+            "palette action invoked",
+            json!({"action": "private command"}),
+        ),
+        ("settings viewed", json!({"section": "private"})),
+        ("surface selected", json!({"surface_kind": "private"})),
+        ("app active interval", json!({"active_seconds": 61})),
+        ("app active interval", json!({"active_seconds": 0})),
+        ("app active interval", json!({"active_seconds": -1})),
+    ] {
+        assert!(sanitize(event, properties).is_none(), "{event}");
+    }
+}
+
+#[tokio::test]
+async fn native_and_engine_share_consent_identity_and_epoch_boundaries() {
+    let (url, request) = server("200 OK").await;
+    let dir = tempfile::tempdir().unwrap();
+    let analytics = Analytics::start(dir.path(), "test".into(), url, true);
+    analytics.set_enabled(false).unwrap();
+    analytics.capture_from("desktop", "palette opened", json!({}));
+    analytics.set_enabled(true).unwrap();
+    analytics.set_account(Some("private-account"));
+    // A freshly enabled/account-switched collector must not accept old dwell.
+    analytics.capture_from(
+        "desktop",
+        "app active interval",
+        json!({"active_seconds": 60}),
+    );
+    analytics.capture_from(
+        "desktop",
+        "screen viewed",
+        json!({"screen": "chat", "query": "private"}),
+    );
+    analytics.capture("app opened", json!({}));
+    analytics.shutdown().await;
+    let payload = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .unwrap()
+        .unwrap();
+    let batch = payload["batch"].as_array().unwrap();
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0]["properties"]["surface"], "desktop");
+    assert_eq!(batch[1]["properties"]["surface"], "engine");
+    assert_eq!(batch[0]["distinct_id"], batch[1]["distinct_id"]);
+    assert_eq!(
+        batch[0]["properties"]["install_id"],
+        batch[1]["properties"]["install_id"]
+    );
+    assert_eq!(batch[0]["distinct_id"], account_id("private-account"));
+    assert!(!payload.to_string().contains("private"));
+}
+
+#[tokio::test]
+async fn native_intervals_are_trimmed_to_current_identity_epoch() {
+    let (url, request) = server("200 OK").await;
+    let dir = tempfile::tempdir().unwrap();
+    let analytics = Analytics::start(dir.path(), "test".into(), url, true);
+    analytics.0.state.lock().unwrap().identity_since =
+        std::time::Instant::now() - Duration::from_secs(5);
+    analytics.capture_from(
+        "desktop",
+        "app active interval",
+        json!({"active_seconds": 60}),
+    );
+    analytics.shutdown().await;
+    let payload = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload["batch"][0]["properties"]["active_seconds"], 5);
+}
+
+#[tokio::test]
+async fn account_switch_invalidates_native_events_alongside_engine_events() {
+    let (url, request) = server("200 OK").await;
+    let dir = tempfile::tempdir().unwrap();
+    let analytics = Analytics::start(dir.path(), "test".into(), url, true);
+    analytics.set_account(Some("first-private-account"));
+    analytics.capture_from("desktop", "palette opened", json!({}));
+    analytics.capture("app opened", json!({}));
+    analytics.set_account(Some("second-private-account"));
+    analytics.capture_from("desktop", "settings viewed", json!({"section": "general"}));
+    analytics.shutdown().await;
+    let payload = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload["batch"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["batch"][0]["event"], "settings viewed");
+    assert_eq!(
+        payload["batch"][0]["distinct_id"],
+        account_id("second-private-account")
+    );
+}
+
+#[tokio::test]
+async fn delayed_native_observations_cannot_cross_collection_epochs() {
+    use desktop::Event;
+    let (url, request) = server("200 OK").await;
+    let dir = tempfile::tempdir().unwrap();
+    let previous = Analytics::start(dir.path(), "test".into(), url.clone(), true);
+    let restarted_epoch = previous.status().collection_epoch;
+    previous.shutdown().await;
+    let analytics = Analytics::start(dir.path(), "test".into(), url, true);
+    let before_disable = analytics.status().collection_epoch;
+    analytics.set_enabled(false).unwrap();
+    let disabled = analytics.status().collection_epoch;
+    analytics.set_enabled(true).unwrap();
+    let before_account = analytics.status().collection_epoch;
+    analytics.set_account(Some("first-account"));
+    let first_account = analytics.status().collection_epoch;
+    analytics.set_account(Some("second-account"));
+    analytics.0.state.lock().unwrap().identity_since =
+        std::time::Instant::now() - Duration::from_secs(5);
+    for stale in [
+        "".to_owned(),
+        restarted_epoch,
+        before_disable,
+        disabled,
+        before_account,
+        first_account,
+    ] {
+        analytics.capture_desktop(&stale, Event::PaletteOpened);
+        analytics.capture_desktop(&stale, Event::ActiveInterval { active_seconds: 60 });
+    }
+    let current = analytics.status().collection_epoch;
+    analytics.capture_desktop(&current, Event::PaletteOpened);
+    analytics.capture_desktop(&current, Event::ActiveInterval { active_seconds: 3 });
+    analytics.shutdown().await;
+    let payload = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(payload["batch"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        payload["batch"][0]["distinct_id"],
+        account_id("second-account")
+    );
+    assert!(!payload.to_string().contains(&current));
+    assert_eq!(payload["batch"][1]["properties"]["active_seconds"], 3);
+}
+
+#[test]
+fn older_status_does_not_authorize_native_observations() {
+    let status: Status =
+        serde_json::from_value(json!({"enabled": true, "configured": true})).unwrap();
+    assert!(status.collection_epoch.is_empty());
 }
