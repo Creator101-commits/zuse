@@ -304,14 +304,19 @@ impl WorkspaceDoc {
         let Some(row) = self.existing_row("chats", chat_id) else {
             return Ok(false);
         };
-        let current = match row.get("lastSeenAt") {
+        let stamp = |key| match row.get(key) {
             Some(loro::ValueOrContainer::Value(LoroValue::I64(ms))) => Some(ms),
             _ => None,
         };
-        if current.is_some_and(|ms| ms >= at.timestamp_millis()) {
+        // Seeing a chat covers its latest message, even one dated ahead of
+        // this clock; otherwise it would read as unseen after every mark.
+        let at = at
+            .timestamp_millis()
+            .max(stamp("lastMessageAt").unwrap_or(i64::MIN));
+        if stamp("lastSeenAt").is_some_and(|ms| ms >= at) {
             return Ok(true);
         }
-        row.insert("lastSeenAt", at.timestamp_millis())?;
+        row.insert("lastSeenAt", at)?;
         self.doc.commit();
         Ok(true)
     }
@@ -1285,6 +1290,23 @@ mod tests {
         let seen_b = b.chat("chat-1").unwrap().unwrap().last_seen_at;
         assert_eq!(seen_a, seen_b);
         assert!(matches!(seen_a, Some(t) if t == ts(9_000) || t == ts(9_001)));
+    }
+
+    #[test]
+    fn chat_seen_covers_a_message_dated_in_the_future() {
+        let a = WorkspaceDoc::new();
+        let mut row = chat("chat-1", "dev-a");
+        row.last_message_at = Some(ts(90_000));
+        a.upsert_chat(&row).unwrap();
+        // Marked at an earlier clock: the stamp still covers the message, so
+        // the chat stops reading as unseen and no caller re-marks it forever.
+        assert!(a.set_chat_seen("chat-1", ts(5_000)).unwrap());
+        let seen = a.chat("chat-1").unwrap().unwrap();
+        assert_eq!(seen.last_seen_at, Some(ts(90_000)));
+        assert!(!seen.unseen());
+        let before = a.doc().oplog_vv();
+        assert!(a.set_chat_seen("chat-1", ts(6_000)).unwrap());
+        assert_eq!(a.doc().oplog_vv(), before);
     }
 
     #[test]
