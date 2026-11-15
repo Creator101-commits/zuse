@@ -1217,6 +1217,9 @@ const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
+/// The working chat's pixel loader in a sidebar row: smaller than the
+/// 13px status slot so the motion stays a quiet accent beside the label.
+const SIDEBAR_WORKING_LOADER: f32 = 10.0;
 /// Compact-row time slot while a text jump hint ("Ctrl+9") stands in for the
 /// time: wide enough for the widest of them at 11px on one line. In
 /// default-size pixels; scaled with the UI font via `ui_rems`.
@@ -9419,8 +9422,12 @@ impl Shell {
         let working = status == zuse_protocol::ChatIndicator::Working && !queued && !undelivered;
         let compact_status = sidebar.then(|| {
             let glyph = if working {
-                loaders::retro_loader(format!("{row_id}-working"), 13.0, theme.loader_glyph())
-                    .into_any_element()
+                loaders::retro_loader(
+                    format!("{row_id}-working"),
+                    SIDEBAR_WORKING_LOADER,
+                    theme.loader_glyph(),
+                )
+                .into_any_element()
             } else if status == zuse_protocol::ChatIndicator::Completed && !queued && !undelivered {
                 icon(icons::CHECK)
                     .size(px(11.0))
@@ -9522,7 +9529,7 @@ impl Shell {
                     } else if working {
                         loaders::retro_loader(
                             format!("{row_id}-working"),
-                            13.0,
+                            SIDEBAR_WORKING_LOADER,
                             theme.loader_glyph(),
                         )
                         .into_any_element()
