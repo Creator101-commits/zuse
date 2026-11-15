@@ -106,6 +106,41 @@ class PackagingTests(unittest.TestCase):
         with patch.dict("os.environ", {"ZUSE_WEB_ASSETS": "/custom assets"}):
             self.assertEqual(invoke(alias), ["--assets", "/custom assets"])
 
+    def test_update_installer_embedded_entrypoint_preserves_install_locations(self):
+        self.assemble()
+        data, bin_dir = self.root / "custom data", self.root / "custom bin"
+        profile = self.root / "profile"
+        profile.mkdir()
+        (profile / "keep").write_text("profile")
+        environment = dict(os.environ, XDG_DATA_HOME=str(data), ZUSE_BIN_HOME=str(bin_dir))
+        # Exercise the updater's embedded installer entrypoint on either host;
+        # this simulates platform detection and does not execute ELF fixtures.
+        embedded = ("import platform\nplatform.system = lambda: 'Linux'\n"
+                    "platform.machine = lambda: 'x86_64'\n"
+                    + Path(installer.__file__).read_text())
+        command = [sys.executable, "-c", embedded, "--package", str(self.destination)]
+        subprocess.run(command, env=environment, check=True, capture_output=True)
+        first = (bin_dir / "zuse").resolve()
+        owner = first.parent.parent
+        marker = json.loads((owner / ".installed-by-zuse").read_text())
+        self.assertEqual(marker, {"format": 2, "data_home": str(data.resolve()),
+                                  "bin_home": str(bin_dir.resolve())})
+        self.destination = self.root / "next package"
+        self.assemble()
+        command[-1] = str(self.destination)
+        subprocess.run(command + ["--verify-only"], env=environment, check=True, capture_output=True)
+        self.assertEqual((bin_dir / "zuse").resolve(), first)
+        subprocess.run(command, env=environment, check=True, capture_output=True)
+        active = (bin_dir / "zuse").resolve()
+        self.assertNotEqual(active, first)
+        self.assertTrue(first.is_file())
+        self.assertEqual((profile / "keep").read_text(), "profile")
+        (self.destination / "libexec/web/app.js").write_text("tampered")
+        failed = subprocess.run(command, env=environment, capture_output=True, text=True)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("checksum mismatch", failed.stderr)
+        self.assertEqual((bin_dir / "zuse").resolve(), active)
+
     def test_install_upgrade_and_uninstall_preserve_profiles_and_unrelated_files(self):
         self.assemble()
         data, bin_dir = self.root / "user's data", self.root / "user's bin"
