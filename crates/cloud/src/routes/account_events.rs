@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     access::Scope,
     events::{
-        hub::{Hub as EventHub, PROTOCOL},
+        hub::{DeviceLease, Hub as EventHub, PROTOCOL},
         tickets::Pending,
     },
 };
@@ -86,11 +86,6 @@ pub(super) async fn upgrade(
         .events
         .clone()
         .ok_or_else(|| ApiError::unavailable("account_events_disabled"))?;
-    let permit = hub
-        .capacity
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError::unavailable("account_event_capacity"))?;
     let pending = hub
         .tickets
         .take(
@@ -102,11 +97,19 @@ pub(super) async fn upgrade(
     // Consume and recheck before switching protocols, including membership and
     // native GitHub enrollment. A ticket is not a durable authorization grant.
     authorize(&state, &pending).await?;
+    // Capacity is spent only by an authenticated ticket holder, and each account
+    // is capped before it can draw on the shared socket pool.
+    let lease = hub.devices.claim(&pending.actor, pending.device_id)?;
+    let permit = hub
+        .capacity
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::unavailable("account_event_capacity"))?;
     Ok(ws
         .protocols([PROTOCOL])
         .max_message_size(4096)
         .max_frame_size(4096)
-        .on_upgrade(move |socket| serve(state, hub, pending, socket, permit)))
+        .on_upgrade(move |socket| serve(state, hub, pending, socket, (lease, permit))))
 }
 fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
@@ -257,9 +260,9 @@ async fn serve(
     hub: Arc<EventHub>,
     p: Pending,
     mut socket: WebSocket,
-    _permit: OwnedSemaphorePermit,
+    (mut lease, _permit): (DeviceLease, OwnedSemaphorePermit),
 ) {
-    let (device_lease, mut replaced) = hub.claim_device(&p.actor, p.device_id).await;
+    let replaced = &mut lease.replaced;
     let room = hub.room(&p.owner).await;
     let mut changed = room.changed.subscribe();
     let personal_room = if p.owner != p.actor {
@@ -344,6 +347,5 @@ async fn serve(
         let _=send(&mut socket,json!({"type":"error","code":error.code,"status":error.status.as_u16(),"cacheRevoked":clear})).await;
     }
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
-    hub.release_device(&p.actor, p.device_id, device_lease)
-        .await;
+    drop(lease);
 }

@@ -79,6 +79,8 @@ pub struct RepositoryPanel {
     github_connection_state: String,
     github_disconnect_confirm: bool,
     github_poll: Option<Task<()>>,
+    /// Code from the OAuth browser that confirms a fresh GitHub identity.
+    github_code: Entity<TextInput>,
     error: Option<String>,
     notice: Option<String>,
     picker: bool,
@@ -113,6 +115,8 @@ impl RepositoryPanel {
         ]);
         let search = cx.new(|cx| TextInput::new("Search repositories…", window, cx));
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
+        let github_code = cx.new(|cx| TextInput::new("Code from your browser", window, cx));
+        cx.observe(&github_code, |_, _, cx| cx.notify()).detach();
         Self {
             agents: agents::AgentView::new(window, cx),
             environment: environment::EnvironmentView::new(window, cx),
@@ -131,6 +135,7 @@ impl RepositoryPanel {
             github_connection_state: String::new(),
             github_disconnect_confirm: false,
             github_poll: None,
+            github_code,
             error: None,
             notice: None,
             picker: false,
@@ -308,11 +313,13 @@ impl RepositoryPanel {
         match pending.kind {
             "github-install" => self.github_started(data, cx),
             "github-status" => self.github_status(data, cx),
-            "github-select" | "github-cancel" | "github-disconnect" => {
+            "github-select" | "github-confirm" | "github-cancel" | "github-disconnect" => {
                 self.github_operation = None;
                 self.github_poll = None;
+                self.github_code
+                    .update(cx, |input, cx| input.set_value(String::new(), cx));
                 self.notice = Some(
-                    if pending.kind == "github-select" {
+                    if matches!(pending.kind, "github-select" | "github-confirm") {
                         "GitHub connected. Choose your repositories below."
                     } else if pending.kind == "github-disconnect" {
                         "GitHub disconnected."
@@ -396,6 +403,7 @@ impl RepositoryPanel {
                     | "github"
                     | "github-install"
                     | "github-select"
+                    | "github-confirm"
                     | "github-cancel"
                     | "github-disconnect"
                     | "connect"
