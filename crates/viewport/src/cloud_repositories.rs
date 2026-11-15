@@ -195,6 +195,9 @@ impl RepositoryPanel {
         self.keys.clear();
         self.search
             .update(cx, |s, cx| s.set_value(String::new(), cx));
+        // A code typed for one account's GitHub operation never carries over.
+        self.github_code
+            .update(cx, |s, cx| s.set_value(String::new(), cx));
         cx.notify();
     }
     pub fn set_usage(&mut self, usage: bool, cost: Option<i64>, cx: &mut Context<Self>) -> bool {
@@ -431,5 +434,25 @@ impl RepositoryPanel {
             .or_insert_with(|| uuid::Uuid::new_v4().to_string())
             .clone();
         self.call("connect",methods::CLOUD_PROJECT_CONNECT,json!({"repositoryUrl":repo.https_url,"defaultBranch":repo.default_branch,"visibility":if repo.is_private{"private"}else{"public"},"idempotencyKey":key}),cx);
+    }
+}
+#[cfg(test)]
+mod owner_reset_tests {
+    use super::*;
+    use std::prelude::v1::test;
+    #[gpui::test]
+    fn switching_owner_clears_a_typed_github_confirmation_code(cx: &mut TestAppContext) {
+        cx.update(crate::initialize);
+        let window = cx.add_window(RepositoryPanel::new);
+        window
+            .update(cx, |panel, _, cx| {
+                panel.bind_owner(Some(("account-a".into(), None)), cx);
+                panel
+                    .github_code
+                    .update(cx, |input, cx| input.set_value("ABCD-EFGH".into(), cx));
+                panel.bind_owner(Some(("account-b".into(), None)), cx);
+                assert!(panel.github_code.read(cx).value(cx).is_empty());
+            })
+            .unwrap();
     }
 }

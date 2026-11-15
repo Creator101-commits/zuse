@@ -153,19 +153,27 @@ impl NativeGithub {
         let installation = pending
             .browser_installation
             .ok_or_else(|| ApiError::forbidden("github_browser_confirmation_required"))?;
-        if !matches(&confirmation.code, &request.confirmation_code) {
-            confirmation.attempts = confirmation.attempts.saturating_add(1);
-            let locked = confirmation.attempts >= MAX_ATTEMPTS;
-            if locked {
+        if confirmation.attempts >= MAX_ATTEMPTS {
+            self.fail_confirmation(id).await?;
+            return Err(ApiError::forbidden("github_confirmation_locked"));
+        }
+        // Reserve this attempt before comparing. The compare-and-swap on the
+        // sealed record lets exactly one of several concurrent requests that
+        // read the same record proceed; the rest are refused without a
+        // comparison, so parallel guesses cannot share one attempt.
+        let expected = confirmation.code.clone();
+        confirmation.attempts += 1;
+        let attempts = confirmation.attempts;
+        let next = self.seal(&format!("github-pending:{id}"), &pending)?;
+        let reserved=sqlx::query("UPDATE zuse_rust_github_operations SET sealed_pending=$3 WHERE operation_id=$1 AND phase='choosing' AND sealed_pending=$2")
+            .bind(id).bind(&sealed).bind(next).execute(&self.pool).await?;
+        if reserved.rows_affected() != 1 {
+            return Err(ApiError::conflict("github_operation_unavailable"));
+        }
+        if !matches(&expected, &request.confirmation_code) {
+            if attempts >= MAX_ATTEMPTS {
                 self.fail_confirmation(id).await?;
                 return Err(ApiError::forbidden("github_confirmation_locked"));
-            }
-            let next = self.seal(&format!("github-pending:{id}"), &pending)?;
-            // Compare-and-swap: concurrent guesses cannot share one attempt.
-            let updated=sqlx::query("UPDATE zuse_rust_github_operations SET sealed_pending=$3 WHERE operation_id=$1 AND phase='choosing' AND sealed_pending=$2")
-                .bind(id).bind(&sealed).bind(next).execute(&self.pool).await?;
-            if updated.rows_affected() != 1 {
-                return Err(ApiError::conflict("github_operation_unavailable"));
             }
             return Err(ApiError::forbidden("github_confirmation_invalid"));
         }

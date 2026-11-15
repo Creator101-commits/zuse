@@ -1130,6 +1130,38 @@ mod database {
                 .code,
             "github_confirmation_invalid"
         );
+        // Concurrent guesses each reserve their own attempt before comparing:
+        // requests that lose the reservation race are refused uncompared.
+        let guess = AppConfirmation {
+            operation_id: id.clone(),
+            confirmation_code: "WRNG-CODE".into(),
+        };
+        let guesses =
+            futures::future::join_all((0..3).map(|_| authority.confirm_app(&access, &guess))).await;
+        let compared = guesses
+            .iter()
+            .filter(|r| r.as_ref().unwrap_err().code == "github_confirmation_invalid")
+            .count();
+        assert!(compared >= 1);
+        assert!(guesses.iter().all(|r| matches!(
+            r.as_ref().unwrap_err().code,
+            "github_confirmation_invalid" | "github_operation_unavailable"
+        )));
+        let sealed: String = sqlx::query_scalar(
+            "SELECT sealed_pending FROM zuse_rust_github_operations WHERE operation_id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let reserved: Pending = authority
+            .open(&format!("github-pending:{id}"), &sealed)
+            .unwrap();
+        assert_eq!(
+            reserved.confirmation.unwrap().attempts as usize,
+            1 + compared,
+            "every compared guess consumed exactly one attempt"
+        );
         authority
             .confirm_app(
                 &access,
@@ -1773,6 +1805,57 @@ mod database {
             "a disconnected member cannot borrow the other member's identity"
         );
         authority.disconnect(&second_access).await.unwrap();
+        // Wrong codes lock the operation after the attempt budget.
+        let locked = authority.begin(&access).await.unwrap();
+        let locked_id = locked["operationId"].as_str().unwrap().to_owned();
+        let locked_state = reqwest::Url::parse(locked["url"].as_str().unwrap())
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .to_string();
+        let (_, locked_browser) = authority.browser_start(&locked_state, None).await.unwrap();
+        authority
+            .callback(
+                &Callback {
+                    state: locked_state.clone(),
+                    code: Some("lockout-code".into()),
+                    error: None,
+                },
+                Some(&locked_browser),
+            )
+            .await
+            .unwrap();
+        assert!(
+            authority
+                .confirm_identity_browser(&locked_state, Some(&locked_browser))
+                .await
+                .unwrap()
+                .confirmation
+        );
+        for attempt in 1..=confirmation::MAX_ATTEMPTS {
+            let error = authority
+                .confirm_app(
+                    &access,
+                    &AppConfirmation {
+                        operation_id: locked_id.clone(),
+                        confirmation_code: "WRNG-CODE".into(),
+                    },
+                )
+                .await
+                .unwrap_err();
+            let expected = if attempt == confirmation::MAX_ATTEMPTS {
+                "github_confirmation_locked"
+            } else {
+                "github_confirmation_invalid"
+            };
+            assert_eq!(error.code, expected);
+        }
+        assert_eq!(
+            authority.operation(&access, &locked_id).await.unwrap()["state"],
+            "failed"
+        );
         // Cancelled browser transaction cannot later consume an OAuth code.
         let begun = authority.begin(&access).await.unwrap();
         authority
