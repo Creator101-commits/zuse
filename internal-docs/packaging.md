@@ -252,7 +252,8 @@ Keep publishing stable tags as `vX.Y.Z` with `--latest` and preview tags as
 use the same application identity and profile. After publishing `v0.26.1`, bump
 the workspace to `0.27.0` before publishing `v0.27.0-preview.1`; further
 `0.26.0-preview.N` builds are older than the stable `0.26.1` release.
-Package assembly writes the full version to `release.json` beside each executable before signing and checksumming;
+Package assembly writes the full version to `release.json` beside each executable
+(in `Contents/Resources` for macOS apps) before signing and checksumming;
 `zuse --version` and the updater read it, allowing exact-commit prebuilt binaries
 to be reused for preview tags. Source builds use their workspace version.
 

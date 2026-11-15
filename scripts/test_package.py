@@ -359,13 +359,35 @@ class PackagingTests(unittest.TestCase):
         package.assemble(self.destination, self.binaries, self.assets, "macos", "x86_64",
                          "0.26.0-preview.1", {"inputs": "test fixture"})
         info = plistlib.loads((self.destination / "Zuse.app/Contents/Info.plist").read_bytes())
-        self.assertEqual(json.loads((self.destination / "Zuse.app/Contents/MacOS/release.json").read_text())["version"], "0.26.0-preview.1")
+        self.assertEqual(json.loads((self.destination / "Zuse.app/Contents/Resources/release.json").read_text())["version"], "0.26.0-preview.1")
+        self.assertFalse((self.destination / "Zuse.app/Contents/MacOS/release.json").exists())
         manifest = json.loads((self.destination / "manifest.json").read_text())
-        self.assertIn("Zuse.app/Contents/MacOS/release.json", manifest["files"])
+        self.assertIn("Zuse.app/Contents/Resources/release.json", manifest["files"])
         self.assertEqual(info["CFBundleVersion"], "0.26.0")
         self.assertEqual(info["CFBundleShortVersionString"], "0.26.0")
         self.assertEqual(json.loads((self.destination / "manifest.json").read_text())["version"],
                          "0.26.0-preview.1")
+
+    @unittest.skipUnless(sys.platform == "darwin", "requires macOS code signing tools")
+    def test_macos_package_identity_allows_bundle_signing(self):
+        subprocess.run(["clang", "-x", "c", "-", "-o", str(self.binaries[0])],
+                       input="int main(void) { return 0; }\n", text=True, check=True, timeout=30)
+        for binary in self.binaries[1:]:
+            binary.write_bytes(self.binaries[0].read_bytes())
+        _, arch = package.binary_target(self.binaries[0])
+        package.assemble(self.destination, self.binaries, self.assets, "macos", arch,
+                         "0.26.1-preview.1", {"inputs": "signing fixture"})
+        app = self.destination / "Zuse.app"
+        for name in package.BINS:
+            if name != "zuse":
+                subprocess.run(["codesign", "--force", "--sign", "-",
+                                str(app / "Contents/MacOS" / name)],
+                               check=True, capture_output=True, timeout=30)
+        result = subprocess.run(["codesign", "--force", "--sign", "-", str(app)],
+                                text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)],
+                       check=True, capture_output=True, timeout=30)
 
 
 if __name__ == "__main__":

@@ -2236,8 +2236,9 @@ mod tests {
         );
         let mac = tmp.path().join("Zuse.app");
         std::fs::create_dir_all(mac.join("Contents/MacOS")).unwrap();
+        std::fs::create_dir_all(mac.join("Contents/Resources")).unwrap();
         std::fs::write(
-            mac.join("Contents/MacOS/release.json"),
+            mac.join("Contents/Resources/release.json"),
             r#"{"version":"0.4.1-preview.12"}"#,
         )
         .unwrap();
