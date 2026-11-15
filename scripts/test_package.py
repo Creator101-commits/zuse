@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 import zipfile
 from unittest.mock import patch
@@ -254,7 +255,8 @@ class PackagingTests(unittest.TestCase):
             binary.write_bytes(b"MZ" + bytes(0x3A) + struct.pack("<I", 0x40)
                                + b"PE\0\0" + struct.pack("<H", 0x8664) + bytes(18))
             binary.rename(binary.with_suffix(".exe"))
-        version = "0.26.0-preview.1"
+        workspace = tomllib.loads((package.ROOT / "Cargo.toml").read_text())
+        version = workspace["workspace"]["package"]["version"] + "-preview.1"
         output = self.root / "archives"
         argv = ["package.py", "--platform", "windows", "--arch", "x86_64",
                 "--binaries", str(self.source), "--assets", str(self.assets),
