@@ -93,8 +93,8 @@ impl RuntimeControl {
         let mut tx = self.pool.begin().await?;
         self.workspace_asset_locked(id, access, fence, &mut tx)
             .await?;
-        let schema: bool = crate::db::schema::present(
-            &self.pool,
+        let schema: bool = crate::db::schema::present_in(
+            &mut *tx,
             "SELECT to_regclass('zuse_rust_task_asset_chunks') IS NOT NULL",
         )
         .await?;

@@ -104,8 +104,8 @@ impl RuntimeControl {
         {
             return Err(ApiError::forbidden("workspace_access_denied"));
         }
-        let ready: bool = crate::db::schema::present(
-            &self.pool,
+        let ready: bool = crate::db::schema::present_in(
+            &mut *tx,
             "SELECT to_regclass('zuse_rust_deletions') IS NOT NULL",
         )
         .await?;

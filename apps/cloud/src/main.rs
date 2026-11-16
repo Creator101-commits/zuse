@@ -1434,8 +1434,11 @@ async fn main() -> Result<()> {
             let billing_accounts =
                 zuse_cloud::access_policy::Accounts::from_env("ZUSE_CLOUD_BILLING_WRITE_ACCOUNTS")?;
             if !billing_accounts.is_empty() {
-                let mut billing = zuse_cloud::billing::BillingControl::from_pool(
+                // Checkout takes a receipt connection while its control
+                // transaction is open: keep receipts on their own pool.
+                let mut billing = zuse_cloud::billing::BillingControl::from_pools(
                     db.pool.clone(),
+                    db.receipts_pool(),
                     billing_accounts,
                 );
                 if let Some(providers) = zuse_cloud::billing::PaymentProviders::from_env()? {
@@ -1541,6 +1544,12 @@ async fn main() -> Result<()> {
             };
             let mut app = app;
             let slack_worker = if let Some(slack_config) = zuse_cloud::slack::Config::from_env()? {
+                // The Slack worker queries the pool while its advisory-lock
+                // transaction holds one shared connection.
+                anyhow::ensure!(
+                    db.budget.shared_connections() >= 2,
+                    "Slack requires at least two shared database connections; raise ZUSE_CLOUD_DB_MAX_CONNECTIONS"
+                );
                 let slack =
                     zuse_cloud::slack::Slack::connect(state, slack_config, db.pool.clone()).await?;
                 let worker = slack.start_worker();

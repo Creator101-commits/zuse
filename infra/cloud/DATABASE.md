@@ -71,7 +71,7 @@ those pools; none opens its own.
 
 | Process | Pool connections | `LISTEN` connection | Total |
 | --- | ---: | ---: | ---: |
-| `serve` | 6 (4 shared, 2 read-only catalog) | 1 | 7 |
+| `serve` | 6 (3 shared, 2 read-only catalog, 1 billing receipts) | 1 | 7 |
 | `worker` | 3 | 1 | 4 |
 | `billing-worker` | 2 (1 control, 1 delivery receipts) | 0 | 2 |
 | `auth-worker` | 1 | 0 | 1 |
@@ -84,7 +84,8 @@ connection limit for that.
 Settings (per process environment):
 
 - `ZUSE_CLOUD_DB_MAX_CONNECTIONS`: pool connections for this process, replacing
-  the default above (1–64; `serve` and `billing-worker` need at least 2).
+  the default above (1–64; `serve` needs at least 3, `billing-worker` at least
+  2). `serve` with Slack enabled also needs at least 2 shared connections.
 - `ZUSE_CLOUD_DB_LISTEN=false`: drop the `LISTEN` connection. Workers then rely
   on due-time scheduling and a shorter idle poll.
 - `ZUSE_CLOUD_DB_ACQUIRE_TIMEOUT_MS` (default 5000): how long a request waits

@@ -74,6 +74,9 @@ impl Hub {
             let mut failures = 0u32;
             // Drain once at startup: rows may have committed while no one listened.
             let mut wait = Duration::ZERO;
+            // After a failure, wakeups that arrive early are coalesced until
+            // the backoff ends, so notifications cannot bypass it.
+            let mut retry_at: Option<tokio::time::Instant> = None;
             loop {
                 let Some(hub) = weak.upgrade() else { break };
                 let reason = tokio::select! {
@@ -88,6 +91,16 @@ impl Hub {
                     } => Reason::Hint,
                 };
                 tracing::debug!(reason = reason.as_str(), "Account event dispatcher woke");
+                // Do not keep the hub alive while waiting out the backoff.
+                let hub = match retry_at.take() {
+                    Some(at) => {
+                        drop(hub);
+                        tokio::time::sleep_until(at).await;
+                        let Some(hub) = weak.upgrade() else { break };
+                        hub
+                    }
+                    None => hub,
+                };
                 wait = cadence.idle;
                 let mut drained = false;
                 // A dispatch failure is uncertain, so wake current subscribers to
@@ -118,6 +131,7 @@ impl Hub {
                                 Duration::from_secs(1),
                                 cadence.idle,
                             );
+                            retry_at = Some(tokio::time::Instant::now() + wait);
                             tracing::warn!(code = error.code, "Account event dispatch deferred");
                             for room in hub.rooms.lock().await.values().filter_map(Weak::upgrade) {
                                 room.changed.send_modify(|n| *n = n.wrapping_add(1));

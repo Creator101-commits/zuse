@@ -160,8 +160,8 @@ impl RuntimeControl {
         let journal_ready: bool = if capacity_observation.is_some() {
             true
         } else {
-            crate::db::schema::present(
-                &self.pool,
+            crate::db::schema::present_in(
+                &mut *tx,
                 "SELECT to_regclass('zuse_rust_provider_creates') IS NOT NULL",
             )
             .await?

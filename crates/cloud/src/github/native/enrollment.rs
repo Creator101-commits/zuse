@@ -81,8 +81,8 @@ impl NativeGithub {
             return Ok(());
         };
         if snapshot.is_none() {
-            let schema: bool = crate::db::schema::present(
-                &self.pool,
+            let schema: bool = crate::db::schema::present_in(
+                &mut **tx,
                 "SELECT to_regclass('api_github_enrollments') IS NOT NULL",
             )
             .await?;

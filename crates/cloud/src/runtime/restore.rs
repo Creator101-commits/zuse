@@ -81,8 +81,8 @@ impl RuntimeControl {
         crate::images::deletion::snapshot_read_guard(tx, required(row, "account_id")?, None)
             .await?;
         lifecycle::require_resume_capacity(self.staging_candidate.as_deref(), tx, row, now).await?;
-        let ready: bool = crate::db::schema::present(
-            &self.pool,
+        let ready: bool = crate::db::schema::present_in(
+            &mut **tx,
             "SELECT to_regclass('zuse_rust_restores') IS NOT NULL",
         )
         .await?;
