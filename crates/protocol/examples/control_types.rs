@@ -35,6 +35,8 @@ fn main() {
         ZotDecision,
         ZotIssueStatus,
         ZotIssuePriority,
+        ZotIssueOwner,
+        ZotIssueOutcome,
         ZotIssueDetails,
         ZotIssuePullRequest,
         ZotIssueActivity,
