@@ -70,6 +70,7 @@ jobs:
       - run: python3 -m unittest discover -s scripts -p test_package.py -v
       - run: python3 -m unittest discover -s scripts -p test_release_prebuild.py -v
       - run: python3 -m unittest discover -s scripts -p test_distribution.py -v
+      - run: python3 -m unittest discover -s scripts -p test_install_cli.py -v
       - run: python3 -m unittest discover -s scripts -p test_release_notes.py -v
       - run: python3 -m unittest discover -s scripts -p test_cargo_dev.py -v
 
@@ -132,6 +133,7 @@ jobs:
       - run: cargo test -p zuse-engine -p zuse-mcp --lib plugin
       - run: cargo test -p zuse-engine --lib zots
       - run: cargo test -p zuse-update --lib control::tests
+      - run: cargo test -p zuse-update --lib cli::tests
       - run: cargo build -p zuse-cli -p zuse-control
       - run: npm ci && npm run test:engine
         working-directory: packages/sdk

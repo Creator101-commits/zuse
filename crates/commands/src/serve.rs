@@ -1,13 +1,15 @@
 //! `zuse serve`: the browser client and a local engine in one process.
 use crate::{cli::ServeArgs, remote};
 use anyhow::Context;
+use serde_json::json;
 use std::path::PathBuf;
-use zuse_engine::{Engine, EngineConfig, EngineProfile};
+use zuse_engine::{Engine, EngineConfig, EngineProfile, InstanceLock};
 use zuse_i18n::{Localizer, messages::cli as m};
 use zuse_protocol::HarnessId;
 use zuse_serve::{BrowserServer, TlsConfig};
 
-pub fn main(args: ServeArgs, ipc_port: u16, l10n: &Localizer) -> anyhow::Result<()> {
+pub fn main(args: ServeArgs, ipc_port: Option<u16>, l10n: &Localizer) -> anyhow::Result<()> {
+    let ipc_port = ipc_port.or_else(|| std::env::var("ZUSE_IPC_PORT").ok()?.parse().ok());
     tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(zuse_engine::RUNTIME_STACK_SIZE)
         .enable_all()
@@ -15,7 +17,11 @@ pub fn main(args: ServeArgs, ipc_port: u16, l10n: &Localizer) -> anyhow::Result<
         .block_on(serve(args, ipc_port, l10n))
 }
 
-async fn serve(args: ServeArgs, ipc_port: u16, l10n: &Localizer) -> anyhow::Result<()> {
+async fn serve(
+    args: ServeArgs,
+    requested_port: Option<u16>,
+    l10n: &Localizer,
+) -> anyhow::Result<()> {
     let relay = match (&args.relay_origin, &args.relay_host_token_file) {
         (Some(origin), Some(path)) => {
             Some((zuse_serve::relay::validate_origin(origin)?, path.clone()))
@@ -33,14 +39,23 @@ async fn serve(args: ServeArgs, ipc_port: u16, l10n: &Localizer) -> anyhow::Resu
         args.listen.ip().is_loopback() || tls.is_some() || args.public_origin.is_some(),
         m::https_required(l10n)
     );
-    let data_dir = match args.data_dir {
-        Some(path) => path,
+    let data_dir = match &args.data_dir {
+        Some(path) => path.clone(),
         None => crate::paths::default_data_dir().context(m::missing_home(l10n))?,
     };
     std::fs::create_dir_all(&data_dir).context(m::create_data_failed(l10n))?;
     let data_dir = std::fs::canonicalize(data_dir).context(m::resolve_data_failed(l10n))?;
+    // Decide profile ownership before ports, auth initialization or store opens.
+    let lock = match InstanceLock::acquire(&data_dir) {
+        Ok(lock) => lock,
+        Err(error) if InstanceLock::holder(&data_dir).is_some() => {
+            return reuse_engine(&args, &data_dir, requested_port.unwrap_or(crate::DEFAULT_IPC_PORT), l10n)
+                .await.with_context(|| format!("{error}. Could not enable browser access on that engine; use its --ipc-port, or choose a separate --data-dir"));
+        }
+        Err(error) => return Err(error.into()),
+    };
     // Bind before starting engine workers, so port conflicts leave no live runtime.
-    let ipc = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, ipc_port))
+    let ipc = bind_ipc(requested_port, crate::DEFAULT_IPC_PORT)
         .await
         .context(m::bind_failed(l10n))?;
     let ipc_port = ipc.local_addr()?.port();
@@ -68,7 +83,9 @@ async fn serve(args: ServeArgs, ipc_port: u16, l10n: &Localizer) -> anyhow::Resu
         workos_client_id: None,
     };
     let auth = Engine::build_auth(&config).await;
-    let runtime = Engine::assemble_runtime(&config, auth, EngineProfile::local(&data_dir)?).await?;
+    let runtime =
+        Engine::assemble_runtime_with_lock(&config, auth, EngineProfile::local(&data_dir)?, lock)
+            .await?;
     // Agent-origin attribution and plugin tools must dial this engine's real port.
     runtime.core().sessions.set_ipc_port(ipc_port);
     let browser = match BrowserServer::new(
@@ -209,4 +226,106 @@ async fn serve(args: ServeArgs, ipc_port: u16, l10n: &Localizer) -> anyhow::Resu
     ipc_task.abort();
     runtime.shutdown().await;
     result
+}
+
+async fn bind_ipc(
+    requested: Option<u16>,
+    default: u16,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let address = std::net::Ipv4Addr::LOCALHOST;
+    match tokio::net::TcpListener::bind((address, requested.unwrap_or(default))).await {
+        Err(error) if requested.is_none() && error.kind() == std::io::ErrorKind::AddrInUse => {
+            tokio::net::TcpListener::bind((address, 0)).await
+        }
+        result => result,
+    }
+}
+
+async fn reuse_engine(
+    args: &ServeArgs,
+    profile: &std::path::Path,
+    port: u16,
+    l10n: &Localizer,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !args.lan && !args.account && args.relay_origin.is_none() && args.token.is_none(),
+        "This profile is already running. Use `zuse serve` to open its browser, configure remote access in Settings, or stop it before supplying remote access/token flags"
+    );
+    let client = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let client = zuse_rpc::connect_ws(&format!("ws://127.0.0.1:{port}")).await?;
+        let info = client
+            .call(zuse_rpc::methods::ENGINE_INFO, json!({}))
+            .await?;
+        let expected = std::fs::read_to_string(profile.join("device-id"))?;
+        anyhow::ensure!(
+            !expected.trim().is_empty() && Some(expected.trim()) == info["deviceId"].as_str(),
+            "The engine on port {port} belongs to another profile"
+        );
+        Ok::<_, anyhow::Error>(client)
+    })
+    .await
+    .context("Timed out identifying the running engine")??;
+    let device = std::fs::read_to_string(profile.join("device-id"))?;
+    let target = json!({"targetDeviceId": device.trim()});
+    let status = client
+        .call(zuse_rpc::methods::BROWSER_ACCESS_STATUS, target.clone())
+        .await?;
+    if status["running"] != true {
+        let absolute = |path: &Option<PathBuf>| -> std::io::Result<Option<PathBuf>> {
+            path.as_ref().map(std::path::absolute).transpose()
+        };
+        let assets = args
+            .assets
+            .clone()
+            .or_else(zuse_engine::browser_access::discover_assets);
+        client
+            .call(
+                zuse_rpc::methods::START_BROWSER_ACCESS,
+                json!({
+                    "targetDeviceId": device.trim(), "listen": args.listen,
+                    "publicOrigin": args.public_origin, "tlsCert": absolute(&args.tls_cert)?,
+                    "tlsKey": absolute(&args.tls_key)?, "assets": absolute(&assets)?,
+                }),
+            )
+            .await?;
+    } else {
+        anyhow::ensure!(
+            args.assets.is_none()
+                && args.public_origin.is_none()
+                && args.tls_cert.is_none()
+                && (args.listen == "127.0.0.1:27656".parse::<std::net::SocketAddr>()?
+                    || status["listen"].as_str() == Some(args.listen.to_string().as_str())),
+            "Browser access is already running with different settings; open it with `zuse serve` or change its settings in the app"
+        );
+    }
+    eprintln!(
+        "Using the running Zuse engine on port {port}. Browser access stays available while that app or service is running."
+    );
+    remote::invite(&client, None, false, l10n).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_explicit_busy_rpc_port_is_not_silently_changed() {
+        let owner = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let busy = owner.local_addr().unwrap().port();
+        let error = bind_ipc(Some(busy), busy).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+        assert_ne!(
+            bind_ipc(Some(0), busy)
+                .await
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port(),
+            0
+        );
+        let automatic = bind_ipc(None, busy).await.unwrap();
+        assert_ne!(automatic.local_addr().unwrap().port(), busy);
+    }
 }

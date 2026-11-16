@@ -18,7 +18,7 @@ if old.startswith('Download the package for your computer below.') and '### Adde
     old = old[old.index('### Added'):]
 cli_section = f'''### Command line only
 
-For servers and other machines without a display, `zuse-cli-{version}-<platform>-<arch>.tar.gz` (`.zip` on Windows) holds just the `zuse` command and the browser app it serves, with no desktop libraries required. Extract it and run `bin/zuse serve --lan` or `bin/zuse serve --account`; `bin/zuse-server` keeps the previous command name working.
+For servers and other machines without a display, `zuse-cli-{version}-<platform>-<arch>.tar.gz` (`.zip` on Windows) holds just the `zuse` command and the browser app it serves, with no desktop libraries required. Extract it and run `bin/zuse serve`, `bin/zuse serve --lan` or `bin/zuse serve --account`; `bin/zuse-server` keeps the previous command name working. On Linux and macOS, `python3 install.py` in the archive or `sh install.sh --cli --version {version}` installs user launchers; `zuse update` upgrades the CLI and browser app together. Python 3.11+ is required. Restart a running server after upgrading.
 
 ''' if cli_archives else ''
 print(f'''{start}

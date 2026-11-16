@@ -24,6 +24,21 @@ pub async fn update(edge_url: &str, check_only: bool) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    if let Some(root) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| zuse_update::cli::install_root(&exe))
+    {
+        println!(
+            "downloading {}…",
+            zuse_update::cli::artifact(&manifest.version)
+        );
+        zuse_update::cli::update(edge_url, &manifest, &root).await?;
+        println!(
+            "installed {} — restart a running server to use the new version.",
+            manifest.version
+        );
+        return Ok(());
+    }
     let install = zuse_update::detect_install();
     if let Some(blocker) = install.desktop_update_blocker() {
         bail!("{blocker}");

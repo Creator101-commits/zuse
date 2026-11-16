@@ -337,6 +337,8 @@ def assemble_cli(destination, binary, assets, system, arch, version, provenance)
     share = destination / "share/zuse"
     copy_tree(assets, share / "web")
     copy_legal(share / "legal")
+    if system != "windows":
+        shutil.copyfile(ROOT / "scripts/install-cli.py", destination / "install.py")
     if system == "macos":
         sign_macos_binary(bin_dir / "zuse")
     readme = (ROOT / "internal-docs/packaging.md").read_text().replace(

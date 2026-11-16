@@ -58,6 +58,10 @@ impl Service {
 
 pub fn install(data_dir: &Path, service: &Service) -> anyhow::Result<()> {
     let exe = std::env::current_exe().context("resolving the zuse executable path")?;
+    // Services must follow CLI upgrades rather than pinning the resolved version.
+    let exe = zuse_update::cli::install_root(&exe)
+        .map(|root| root.join("current/bin/zuse"))
+        .unwrap_or(exe);
     let env = captured_env();
     if cfg!(target_os = "macos") {
         let plist = launchd_plist_path()?;
