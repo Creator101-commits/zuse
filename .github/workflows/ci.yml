@@ -132,8 +132,7 @@ jobs:
       - run: cargo test -p zuse-rpc --lib
       - run: cargo test -p zuse-engine -p zuse-mcp --lib plugin
       - run: cargo test -p zuse-engine --lib zots
-      - run: cargo test -p zuse-update --lib control::tests
-      - run: cargo test -p zuse-update --lib cli::tests
+      - run: cargo test --locked -p zuse-update --lib
       - run: cargo build -p zuse-cli -p zuse-control
       - run: npm ci && npm run test:engine
         working-directory: packages/sdk
@@ -203,6 +202,10 @@ jobs:
         run: cargo test -p zuse-ui --lib archive_
       - name: Native analytics transitions and preferences
         run: cargo test --locked -p zuse-ui --lib -- desktop_analytics::tests native_analytics
+      - name: Update footer, restart and agent notifications
+        env:
+          ZUSE_CLOUD: '1'
+        run: cargo test --locked -p zuse-ui --lib -- sidebar_footer sidebar_settings_trigger shell::update_restart::tests shell::harness_updates::tests toast::tests
       - name: Language persistence, drafts and offline font coverage
         run: |
           cargo test -p zuse-ui --lib localization::tests
