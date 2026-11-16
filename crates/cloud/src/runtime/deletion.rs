@@ -104,10 +104,11 @@ impl RuntimeControl {
         {
             return Err(ApiError::forbidden("workspace_access_denied"));
         }
-        let ready: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_deletions') IS NOT NULL")
-                .fetch_one(&mut *tx)
-                .await?;
+        let ready: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_deletions') IS NOT NULL",
+        )
+        .await?;
         if !ready {
             return Err(ApiError::unavailable("cloud_delete_schema_not_ready"));
         }
@@ -193,10 +194,11 @@ impl RuntimeControl {
         provider: &dyn DeletionProvider,
         now: i64,
     ) -> Result<bool, ApiError> {
-        let ready: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_deletions') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let ready: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_deletions') IS NOT NULL",
+        )
+        .await?;
         if !ready {
             return Ok(false);
         }
@@ -418,10 +420,11 @@ pub(super) async fn purge_metadata(
     }
     // Preserve unknown remote-write receipts and bring their next cleanup
     // forward after the final tombstone. Never delete them with FK metadata.
-    let intents: bool =
-        sqlx::query_scalar("SELECT to_regclass('zuse_rust_object_write_intents') IS NOT NULL")
-            .fetch_one(&mut **tx)
-            .await?;
+    let intents: bool = crate::db::schema::present_in(
+        &mut **tx,
+        "SELECT to_regclass('zuse_rust_object_write_intents') IS NOT NULL",
+    )
+    .await?;
     if intents {
         sqlx::query("UPDATE zuse_rust_object_write_intents SET next_reconcile_at=LEAST(next_reconcile_at,$2) WHERE workspace_id=$1").bind(id).bind(chrono::Utc::now().timestamp_millis()).execute(&mut **tx).await?;
     }

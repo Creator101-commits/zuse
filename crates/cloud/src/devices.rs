@@ -268,7 +268,10 @@ impl Authority {
         Ok(json!({"deviceId":id,"registered":true}))
     }
 
-    pub async fn from_env() -> anyhow::Result<Option<Arc<Self>>> {
+    /// The device authority writes through `ZUSE_CLOUD_DEVICE_DATABASE_URL`.
+    /// When that is the process database it shares `shared`; a different
+    /// database gets one dedicated connection.
+    pub async fn from_env(shared: &crate::db::ProcessDb) -> anyhow::Result<Option<Arc<Self>>> {
         let Some(path) = std::env::var_os("ZUSE_CLOUD_DEVICE_SIGNING_KEY_FILE") else {
             return Ok(None);
         };
@@ -286,11 +289,13 @@ impl Authority {
         let signer = TicketSigner::from_jwk(&secret, &issuer)
             .map_err(|_| anyhow::anyhow!("Invalid device signing configuration"))?;
         let url = std::env::var("ZUSE_CLOUD_DEVICE_DATABASE_URL")?;
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(4)
-            .connect(&url)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect device authority database"))?;
+        let pool = if shared.url() == url {
+            shared.pool.clone()
+        } else {
+            crate::db::dedicated_pool(&url, shared.budget.role, 1)
+                .await
+                .map_err(|_| anyhow::anyhow!("Cannot connect device authority database"))?
+        };
         let public: Value = serde_json::from_str(&secret)
             .map_err(|_| anyhow::anyhow!("Invalid device signing configuration"))?;
         Ok(Some(Arc::new(Self {

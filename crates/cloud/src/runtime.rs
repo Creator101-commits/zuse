@@ -10,11 +10,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{
-    Connection, PgPool, Postgres, Transaction,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use std::{env, str::FromStr, sync::Arc, time::Duration};
+use sqlx::{PgPool, Postgres, Transaction};
+// Runtime test modules build their own pools through `use super::*`.
+#[cfg(test)]
+use sqlx::postgres::PgPoolOptions;
+use std::{env, sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
 
 pub(crate) mod activity;
@@ -24,6 +24,7 @@ mod allocation_scope;
 pub mod assets;
 pub mod creation;
 pub mod deletion;
+pub mod due;
 mod effects;
 mod fast_start;
 pub mod github;
@@ -221,40 +222,11 @@ impl RuntimeControl {
         self.authority = Some(authority);
         self
     }
-    pub async fn connect(url: &str, config: RuntimeConfig) -> anyhow::Result<Arc<Self>> {
-        let options = PgConnectOptions::from_str(url)
-            .map_err(|_| anyhow::anyhow!("Invalid cloud PostgreSQL configuration"))?
-            .application_name("zuse-cloud-runtime-control");
+    /// Opens runtime control on the process's shared pool
+    /// ([`crate::db::ProcessDb`]); it never builds a pool of its own.
+    pub async fn open(pool: PgPool, config: RuntimeConfig) -> anyhow::Result<Arc<Self>> {
         let policy = crate::access_policy::AccessPolicy::from_env()?;
         let fast_start_accounts = policy.accounts_from_env("ZUSE_CLOUD_FAST_START_ACCOUNTS");
-        let fast_start = !fast_start_accounts.is_empty();
-        let pool = PgPoolOptions::new()
-            .max_connections(if fast_start { 8 } else { 4 })
-            .min_connections(if fast_start { 2 } else { 0 })
-            .test_before_acquire(!fast_start)
-            .before_acquire(move |connection, metadata| {
-                Box::pin(async move {
-                    // A recently used connection need not pay another network RTT
-                    // before every query. Idle connections still get a liveness test;
-                    // durable transaction/effect fencing handles failures during use.
-                    if fast_start && metadata.idle_for >= Duration::from_secs(15) {
-                        connection.ping().await?;
-                    }
-                    Ok(true)
-                })
-            })
-            .acquire_timeout(Duration::from_secs(5))
-            .after_connect(|c, _| {
-                Box::pin(async move {
-                    sqlx::query("SET statement_timeout = '10s'")
-                        .execute(c)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect_with(options)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect runtime-control database"))?;
         let mut control = Self::from_pool(pool, config.master, config.signer);
         control.transcript_objects = crate::objects::R2::from_env()?;
         control.runtime_releases = runtime_updates::RuntimeReleaseConfig::from_env()?;

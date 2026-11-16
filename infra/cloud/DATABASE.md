@@ -62,3 +62,55 @@ documented in [MIGRATION_REHEARSAL.md](MIGRATION_REHEARSAL.md). Its temporary-cl
 fixture proves row/ciphertext/reference preservation and writer/rollback mechanics;
 it does not migrate real retained customer data or authorize execution from legacy
 images.
+
+## Connection budget and wakeups
+
+Each long-running process opens one capped set of connections at startup and
+logs it (`Database connection budget`). Every subsystem in the process shares
+those pools; none opens its own.
+
+| Process | Pool connections | `LISTEN` connection | Total |
+| --- | ---: | ---: | ---: |
+| `serve` | 6 (4 shared, 2 read-only catalog) | 1 | 7 |
+| `worker` | 3 | 1 | 4 |
+| `billing-worker` | 2 (1 control, 1 delivery receipts) | 0 | 2 |
+| `auth-worker` | 1 | 0 | 1 |
+| **One environment** | | | **14** |
+
+Staging and production on one database server need twice that, plus headroom
+for migrations and operator commands (one connection each). Size the server's
+connection limit for that.
+
+Settings (per process environment):
+
+- `ZUSE_CLOUD_DB_MAX_CONNECTIONS`: pool connections for this process, replacing
+  the default above (1–64; `serve` and `billing-worker` need at least 2).
+- `ZUSE_CLOUD_DB_LISTEN=false`: drop the `LISTEN` connection. Workers then rely
+  on due-time scheduling and a shorter idle poll.
+- `ZUSE_CLOUD_DB_ACQUIRE_TIMEOUT_MS` (default 5000): how long a request waits
+  for a free connection before failing with `503 cloud_database_unavailable`
+  (logged as `database_pool_exhausted`). Background loops back off after such
+  failures instead of retrying right away.
+- `ZUSE_CLOUD_WORKER_IDLE_POLL_MS`: idle fallback for sleeping loops (default
+  20 s with `LISTEN`, 5 s without). `ZUSE_CLOUD_WORKER_POLL_MS` (default 1 s) is
+  the shortest wait while work stays due.
+- `ZUSE_CLOUD_AUTH_WORKER_POLL_MS` (default 2 s): how often the credential
+  worker checks for pending operations with one cheap query.
+
+Connections close after 60 s idle and are recycled after 30 minutes.
+
+**Connect directly, not through a transaction-pooling proxy.** A pooler in
+transaction mode (for example a managed PgBouncer) cannot deliver `LISTEN`
+notifications and breaks the prepared statements the app uses. Point
+`ZUSE_CLOUD_DATABASE_URL` at the server's direct endpoint. The small fixed pools
+above keep the connection count bounded.
+
+Migration `0043_work_wakeups.sql` adds triggers that send `NOTIFY` on channel
+`zuse_cloud_work:<schema>` when jobs, task drains, recreations, machine images,
+project cache work or account-event outbox rows are created or rescheduled.
+The schema in the channel name keeps staging and production from waking each
+other. `NOTIFY` only shortens waits: workers also sleep until the next known due
+time and poll on the idle timer, so a lost notification, a reconnecting
+listener or `ZUSE_CLOUD_DB_LISTEN=false` delays work but never loses it.
+Set `RUST_LOG=zuse_cloud_api=debug,zuse_cloud::events=debug` to see why each
+loop woke (`notify`, `due`, `idle` or `hint`).

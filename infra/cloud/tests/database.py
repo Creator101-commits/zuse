@@ -49,12 +49,42 @@ class DatabaseBootstrapTest(unittest.TestCase):
         self.url = f"postgresql://zuse_test@127.0.0.1:{self.port}/{name}?sslmode=disable"
 
     def test_release_manifest_contains_command_and_recreation_after_admission(self):
-        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql")
-        self.assertEqual(database.FILES[-7:],expected)
-        self.assertEqual(len(database.FILES),38)
+        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql")
+        self.assertEqual(database.FILES[-8:],expected)
+        self.assertEqual(len(database.FILES),39)
         self.assertIn("0026_task_command_admission.sql",database.FILES)
         self.assertNotIn("0022_computer_recreations.sql",database.FILES)
         self.assertNotIn("0022_recreation.sql",database.FILES)
+
+    def test_work_triggers_notify_only_their_schema_after_commit(self):
+        database.execute(self.url, database.render("production"))
+        database.execute(self.url, database.render("staging"))
+        sql = """SET search_path TO zuse_production;
+LISTEN "zuse_cloud_work:zuse_production";
+INSERT INTO zuse_rust_jobs(job_id,idempotency_key,kind,resource_id,resource_generation,payload,due_at,created_at,updated_at) VALUES('j1','k1','lifecycle','w1',1,'{}',1,1,1);
+UPDATE zuse_rust_jobs SET state='running',lease_token='t',lease_expires_at=5 WHERE job_id='j1';
+SELECT 'after-claim';
+UPDATE zuse_rust_jobs SET state='completed',lease_token=NULL,lease_expires_at=NULL WHERE job_id='j1';
+SELECT 'after-complete';
+INSERT INTO zuse_staging.zuse_rust_jobs(job_id,idempotency_key,kind,resource_id,resource_generation,payload,due_at,created_at,updated_at) VALUES('j2','k2','lifecycle','w1',1,'{}',1,1,1);
+SELECT 'after-other-schema';
+BEGIN;
+INSERT INTO zuse_rust_account_event_outbox(owner_id,kind,resource_id,created_at) VALUES('o','workspace','w1',1),('o','workspace','w2',1);
+SELECT 'inside-transaction';
+COMMIT;
+"""
+        result = subprocess.run(["psql", "-X", "--no-align", "--tuples-only", "-v", "ON_ERROR_STOP=1"], input=sql,
+                                env=database.connection_environment(self.url), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        notices = [line for line in lines if line.startswith("Asynchronous notification")]
+        self.assertEqual(len(notices), 2, result.stdout)
+        self.assertIn('payload "jobs"', notices[0])
+        self.assertIn('payload "account_events"', notices[1])
+        # Claims, completions and the other schema stay silent; the outbox
+        # notification arrives once, after commit.
+        self.assertLess(lines.index(notices[0]), lines.index("after-claim"))
+        self.assertLess(lines.index("inside-transaction"), lines.index(notices[1]))
 
     def test_fresh_staging_and_production_are_empty_isolated_and_idempotent(self):
         for environment in ("staging", "production"):

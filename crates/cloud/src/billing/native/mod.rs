@@ -155,7 +155,10 @@ impl NativeBilling {
             DatabaseConnection {
                 driver: Dialect::Postgres,
                 url: database_url.into(),
-                max_connections: Some(4),
+                // The embedded engine opens its own pool from the URL. It runs
+                // only for ZUSE_BROKEBOY_ACCOUNTS (staging), outside the
+                // process budget; keep it small.
+                max_connections: Some(2),
                 acquire_timeout_ms: Some(5000),
             },
             BillingOptions {

@@ -37,10 +37,10 @@ impl RuntimeControl {
         if limited.is_empty() {
             return Ok(0);
         }
-        let ready: bool = sqlx::query_scalar(
+        let ready: bool = crate::db::schema::present(
+            &self.pool,
             "SELECT to_regclass('zuse_rust_task_command_execution') IS NOT NULL",
         )
-        .fetch_one(&self.pool)
         .await?;
         if !ready {
             return Ok(0);

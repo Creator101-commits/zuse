@@ -72,10 +72,11 @@ impl RuntimeControl {
             .await
     }
     async fn credit_sleep_once(&self, now: i64) -> Result<bool, ApiError> {
-        let installed: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_brokeboy_compute_charges') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let installed: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_brokeboy_compute_charges') IS NOT NULL",
+        )
+        .await?;
         if !installed {
             return Ok(false);
         }

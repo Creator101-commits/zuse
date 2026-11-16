@@ -92,7 +92,7 @@ impl RuntimeControl {
             }
         }
         if applied && !page {
-            let hot: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='api_cloud_transcript_checkpoints' AND column_name='rust_hot_head')").fetch_one(&mut *tx).await?;
+            let hot: bool = crate::db::schema::present(&self.pool, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='api_cloud_transcript_checkpoints' AND column_name='rust_hot_head')").await?;
             if hot {
                 let head = (upload.ciphertext.len() <= crate::transcript::HOT_HEAD_LIMIT).then(||json!({"runtimeGeneration":generation,"epoch":upload.cursor.epoch,"version":upload.cursor.version,"sha256":upload.ciphertext_sha256,"ciphertext":upload.ciphertext}));
                 sqlx::query("UPDATE api_cloud_transcript_checkpoints SET rust_hot_head=$3 WHERE workspace_id=$1 AND session_id=$2")

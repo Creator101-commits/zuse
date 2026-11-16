@@ -32,6 +32,20 @@ impl Hub {
         key: MasterKey,
         issuer: String,
     ) -> Result<Arc<Self>, ApiError> {
+        Self::start_with_wakeups(pool, key, issuer, crate::db::wake::Wakeups::disabled()).await
+    }
+    /// The dispatcher drains the outbox when woken by a committed outbox row
+    /// (database `NOTIFY`, a same-host hint or [`Self::wake`]) and otherwise
+    /// only on the idle fallback timer, instead of every second.
+    pub async fn start_with_wakeups(
+        pool: sqlx::PgPool,
+        key: MasterKey,
+        issuer: String,
+        wakeups: Arc<crate::db::wake::Wakeups>,
+    ) -> Result<Arc<Self>, ApiError> {
+        use crate::db::wake::{Cadence, Reason, Work};
+        let cadence = Cadence::from_env(wakeups.enabled(), 1_000)
+            .map_err(|_| ApiError::unavailable("account_event_cadence_invalid"))?;
         let events = EventStore::new(pool);
         events.ready().await?;
         let hub = Arc::new(Self {
@@ -52,27 +66,41 @@ impl Hub {
             _ => None,
         };
         let weak = Arc::downgrade(&hub);
+        let mut notifications = wakeups.subscribe();
         tokio::spawn(async move {
-            let mut recovery = tokio::time::interval(Duration::from_secs(1));
-            recovery.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Keep the waker (and its LISTEN connection) alive with the dispatcher.
+            let _wakeups = wakeups;
             let mut last_prune = std::time::Instant::now();
+            let mut failures = 0u32;
+            // Drain once at startup: rows may have committed while no one listened.
+            let mut wait = Duration::ZERO;
             loop {
                 let Some(hub) = weak.upgrade() else { break };
-                tokio::select! {
-                    _ = hub.dispatch.notified() => {},
-                    _ = recovery.tick() => {},
+                let reason = tokio::select! {
+                    _ = hub.dispatch.notified() => Reason::Hint,
+                    reason = crate::db::wake::sleep_or_notify(
+                        &mut notifications, &[Work::AccountEvents], wait, Reason::Idle,
+                    ) => reason,
                     _ = async {
                         #[cfg(unix)]
                         if let Some(signal) = &signal { let _ = signal.receive().await; return; }
                         std::future::pending::<()>().await;
-                    } => {},
-                }
+                    } => Reason::Hint,
+                };
+                tracing::debug!(reason = reason.as_str(), "Account event dispatcher woke");
+                wait = cadence.idle;
+                let mut drained = false;
                 // A dispatch failure is uncertain, so wake current subscribers to
                 // replay the authoritative log even if the commit reply was lost.
                 for _ in 0..16 {
                     match hub.events.dispatch().await {
-                        Ok(changes) if changes.is_empty() => break,
+                        Ok(changes) if changes.is_empty() => {
+                            failures = 0;
+                            drained = true;
+                            break;
+                        }
                         Ok(changes) => {
+                            failures = 0;
                             let mut rooms = hub.rooms.lock().await;
                             rooms.retain(|_, room| room.strong_count() > 0);
                             for (owner, sequence) in changes {
@@ -82,14 +110,27 @@ impl Hub {
                             }
                         }
                         Err(error) => {
+                            // Retry sooner than the idle timer, but back off
+                            // (an exhausted pool must not become a retry storm).
+                            failures = failures.saturating_add(1);
+                            wait = crate::db::failure_backoff(
+                                failures,
+                                Duration::from_secs(1),
+                                cadence.idle,
+                            );
                             tracing::warn!(code = error.code, "Account event dispatch deferred");
                             for room in hub.rooms.lock().await.values().filter_map(Weak::upgrade) {
                                 room.changed.send_modify(|n| *n = n.wrapping_add(1));
                             }
+                            drained = true;
                             break;
                         }
                     }
                     tokio::task::yield_now().await;
+                }
+                if !drained {
+                    // A full burst left rows behind: continue right away.
+                    wait = Duration::ZERO;
                 }
                 if last_prune.elapsed() >= Duration::from_secs(3600) {
                     let _ = hub

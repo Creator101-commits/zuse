@@ -105,9 +105,10 @@ not load/capacity guarantees. Check memory/restarts under real traffic before
 relying on the small host for both environments. Keep builds off this server.
 
 `ZUSE_CLOUD_WORKER_POLL_MS=1000` is in `worker.env`; the CLI accepts 250–60,000 ms.
-The old loop slept 250 ms. This reduces idle scan frequency but remains polling;
-no database NOTIFY dependency was introduced. An event-driven wakeup path and
-further maintenance-scan separation remain future work.
+It is now the busy floor: the shortest wait while work stays due. An idle worker
+sleeps until a database `NOTIFY`, the next known due time, or the idle fallback
+(`ZUSE_CLOUD_WORKER_IDLE_POLL_MS`). See "Connection budget and wakeups" in
+[../DATABASE.md](../DATABASE.md).
 
 ## DNS and TLS
 

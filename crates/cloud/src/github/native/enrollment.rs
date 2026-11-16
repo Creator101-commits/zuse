@@ -9,7 +9,7 @@ impl NativeGithub {
         let Some(org) = access.owner_id.strip_prefix("organization:") else {
             return Ok(None);
         };
-        let schema:bool=sqlx::query_scalar("SELECT to_regclass('api_github_enrollments') IS NOT NULL AND to_regclass('api_github_join_policies') IS NOT NULL").fetch_one(&self.pool).await?;
+        let schema:bool=crate::db::schema::present(&self.pool, "SELECT to_regclass('api_github_enrollments') IS NOT NULL AND to_regclass('api_github_join_policies') IS NOT NULL").await?;
         if !schema {
             return Ok(None);
         }
@@ -81,10 +81,11 @@ impl NativeGithub {
             return Ok(());
         };
         if snapshot.is_none() {
-            let schema: bool =
-                sqlx::query_scalar("SELECT to_regclass('api_github_enrollments') IS NOT NULL")
-                    .fetch_one(&mut **tx)
-                    .await?;
+            let schema: bool = crate::db::schema::present(
+                &self.pool,
+                "SELECT to_regclass('api_github_enrollments') IS NOT NULL",
+            )
+            .await?;
             if schema {
                 let appeared:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_github_enrollments WHERE organization_id=$1 AND account_id=$2)").bind(org).bind(&access.actor.account_id).fetch_one(&mut **tx).await?;
                 if appeared {

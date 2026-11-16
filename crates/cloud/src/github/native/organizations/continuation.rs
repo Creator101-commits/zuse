@@ -110,10 +110,11 @@ impl NativeGithub {
         verification: &str,
         installation: &Value,
     ) -> Result<(), ApiError> {
-        let exists: bool =
-            sqlx::query_scalar("SELECT to_regclass('api_github_identities') IS NOT NULL")
-                .fetch_one(&mut **tx)
-                .await?;
+        let exists: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('api_github_identities') IS NOT NULL",
+        )
+        .await?;
         if !exists {
             return Ok(());
         }
@@ -146,10 +147,11 @@ impl NativeGithub {
             }
             Err(e) => Err(e.into()),
         }?;
-        let configured: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_github_join_jobs') IS NOT NULL")
-                .fetch_one(&mut **tx)
-                .await?;
+        let configured: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_github_join_jobs') IS NOT NULL",
+        )
+        .await?;
         if configured {
             let ids:Vec<i64>=sqlx::query_scalar("SELECT DISTINCT p.installation_id FROM api_github_join_policies p JOIN api_github_org_members r USING(installation_id) WHERE r.github_user_id=$1").bind(identity.github_user_id).fetch_all(&mut **tx).await?;
             for id in ids {

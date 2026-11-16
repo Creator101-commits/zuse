@@ -163,10 +163,11 @@ impl Joining {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         value: &Enrollment,
     ) -> Result<(), ApiError> {
-        let events: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_account_event_outbox') IS NOT NULL")
-                .fetch_one(&mut **tx)
-                .await?;
+        let events: bool = crate::db::schema::present_in(
+            &mut **tx,
+            "SELECT to_regclass('zuse_rust_account_event_outbox') IS NOT NULL",
+        )
+        .await?;
         let previous: Option<Value> = if events {
             sqlx::query_scalar("SELECT data FROM api_github_enrollments WHERE organization_id=$1 AND account_id=$2 FOR UPDATE").bind(&value.organization_id).bind(&value.account_id).fetch_optional(&mut **tx).await?
         } else {

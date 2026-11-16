@@ -19,7 +19,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::PgPool;
 use std::{sync::Arc, time::Duration};
 use zuse_protocol::slack::ConnectRequest;
 
@@ -71,11 +71,7 @@ pub struct Slack {
     retry_after: Arc<std::sync::atomic::AtomicI64>,
 }
 impl Slack {
-    pub async fn connect(
-        app: AppState,
-        config: Config,
-        database_url: &str,
-    ) -> anyhow::Result<Self> {
+    pub async fn connect(app: AppState, config: Config, pool: PgPool) -> anyhow::Result<Self> {
         anyhow::ensure!(
             app.store.transcripts_enabled(),
             "Slack result delivery requires encrypted transcript storage"
@@ -84,11 +80,6 @@ impl Slack {
             app.runtime.as_ref().is_some_and(|r| r.creation_enabled()),
             "Slack requires cloud creation and runtime control"
         );
-        let pool = PgPoolOptions::new()
-            .max_connections(3)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect(database_url)
-            .await?;
         let exists: bool =
             sqlx::query_scalar("SELECT to_regclass('zuse_rust_slack_jobs') IS NOT NULL AND to_regclass('zuse_rust_slack_installs') IS NOT NULL AND to_regclass('zuse_rust_slack_members') IS NOT NULL AND to_regclass('zuse_rust_slack_oauth') IS NOT NULL AND to_regclass('zuse_rust_slack_threads') IS NOT NULL")
                 .fetch_one(&pool)

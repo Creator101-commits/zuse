@@ -127,10 +127,11 @@ impl RuntimeControl {
         self.scope_admission(access).await?;
         self.scope_access(id, Some(&access.actor.account_id), true)
             .await?;
-        let available: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_runtime_repairs') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let available: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_runtime_repairs') IS NOT NULL",
+        )
+        .await?;
         if !available {
             return Err(ApiError::conflict("runtime_repair_migration_required"));
         }

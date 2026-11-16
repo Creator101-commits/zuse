@@ -53,10 +53,11 @@ impl NativeGithub {
         ) {
             return Ok(());
         }
-        let configured: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_github_join_jobs') IS NOT NULL")
-                .fetch_one(&mut **tx)
-                .await?;
+        let configured: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_github_join_jobs') IS NOT NULL",
+        )
+        .await?;
         if !configured {
             return Ok(());
         }

@@ -46,26 +46,6 @@ impl ConnectionControl {
             .await?;
         Ok(())
     }
-    pub async fn connect(
-        url: &str,
-        master: MasterKey,
-        accounts: impl Into<crate::access_policy::Accounts>,
-    ) -> anyhow::Result<Self> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::query("SET statement_timeout='10s'")
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect credential authority database"))?;
-        Ok(Self::from_pool(pool, master, accounts))
-    }
     pub fn from_pool(
         pool: PgPool,
         master: MasterKey,

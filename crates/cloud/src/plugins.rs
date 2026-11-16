@@ -366,25 +366,6 @@ impl PluginControl {
         lock.commit().await?;
         Ok(())
     }
-    pub async fn connect(url: &str, config: PluginConfig) -> anyhow::Result<Arc<Self>> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(8)
-            .after_connect(|conn, _| {
-                Box::pin(async move {
-                    sqlx::query("SET statement_timeout='10s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET lock_timeout='5s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect cloud plugin writer"))?;
-        Self::from_pool(pool, config)
-    }
 
     pub fn from_pool(pool: PgPool, config: PluginConfig) -> anyhow::Result<Arc<Self>> {
         Ok(Arc::new(Self {

@@ -15,28 +15,6 @@ pub struct ComputerControl {
     pub(crate) accounts: crate::access_policy::Accounts,
 }
 impl ComputerControl {
-    pub async fn connect(
-        url: &str,
-        accounts: impl Into<crate::access_policy::Accounts>,
-    ) -> anyhow::Result<Self> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::query("SET statement_timeout='10s'")
-                        .execute(&mut *connection)
-                        .await?;
-                    sqlx::query("SET lock_timeout='5s'")
-                        .execute(connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect computer setup database"))?;
-        Ok(Self::from_pool(pool, accounts))
-    }
     pub fn from_pool(pool: PgPool, accounts: impl Into<crate::access_policy::Accounts>) -> Self {
         Self {
             pool,
@@ -156,10 +134,11 @@ impl Store {
         owner: &str,
         now: i64,
     ) -> Result<CloudCapabilities, ApiError> {
-        let schema: bool =
-            sqlx::query_scalar("SELECT to_regclass('cloud_managed_bases') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let schema: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('cloud_managed_bases') IS NOT NULL",
+        )
+        .await?;
         let rows: Vec<(String, Value, Option<Value>)> = if schema {
             sqlx::query_as("SELECT DISTINCT ON(provider) provider,capabilities,to_jsonb(b)->'runtime_manifest' FROM cloud_managed_bases b WHERE state='verified' AND jsonb_typeof(to_jsonb(b)->'runtime_manifest')='object' AND (NOT $1 OR to_jsonb(b)->'runtime_manifest'->'manifest'->>'rustOrganizationExecutionVersion'='1') AND (provider<>'boxd' OR to_jsonb(b)->'runtime_manifest'->'manifest'->>'rustRuntimeSupervisorVersion'='1') ORDER BY provider,created_at DESC,release_id DESC").bind(owner.starts_with("organization:")).fetch_all(&self.pool).await?
         } else {
