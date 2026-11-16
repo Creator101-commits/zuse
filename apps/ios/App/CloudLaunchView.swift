@@ -6,6 +6,7 @@ struct CloudLaunchView: View {
   let prompt: Binding<String>
   let destination: AnyView?
   var busyChanged: (Bool) -> Void
+  @Environment(\.scenePhase) private var scenePhase
   private let client: CloudClient
   private let accountGeneration: UUID
   private let accountIdentity: String?
@@ -156,9 +157,16 @@ struct CloudLaunchView: View {
     .onChange(of: busy) { _, value in busyChanged(value) }
     .task { await load() }
     .task(id: launched) {
-      // Keep the lifecycle label fresh while the workspace boots.
-      while launched != nil && !Task.isCancelled {
-        do { try await Task.sleep(for: .seconds(4)) } catch { return }
+      // Keep the lifecycle label fresh while the workspace boots; stop once it is ready.
+      while let id = launched, !Task.isCancelled {
+        do { try await Task.sleep(for: .seconds(PollSchedule.cloudTransition)) } catch { return }
+        if let chat = workspace.cloudChats.first(where: { $0.workspaceId == id }),
+          chat.state == "ready", !chat.isTransitioning
+        {
+          return
+        }
+        // Returning to the foreground refreshes the catalog through the scene change.
+        guard scenePhase == .active else { continue }
         await workspace.refreshCloud(reportErrors: false)
       }
     }

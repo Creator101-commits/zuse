@@ -256,6 +256,15 @@ async fn request(
     let result = tokio::select! { result=&mut read=>result, _=executor.timer(std::time::Duration::from_secs(30))=>Err(RpcError::Failed("Cloud sidebar request timed out.".into())) };
     (part, provisional, result)
 }
+/// Account event kinds that can change the sidebar's projects or workspaces.
+/// Project rows change through `environment` events; there is no separate
+/// project or catalog kind.
+fn refreshes_catalog(kind: &str) -> bool {
+    matches!(
+        kind,
+        "workspace" | "environment" | "github" | "connection" | "authentication"
+    )
+}
 pub(super) fn spawn(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
     // Cloud computers are a beta; without it there is nothing to list.
     if !crate::cloud_beta() {
@@ -321,7 +330,7 @@ pub(super) fn spawn(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()
                                 let disconnected=matches!(data["type"].as_str(),Some("error"|"closed"));
                                 if this.update(cx,|state,cx|{if !scope.matches(state){return;}if let Some(revoked)=data["revokedWorkspaceIds"].as_array(){state.cloud_sidebar.workspaces.retain(|row|!revoked.iter().any(|id|row["workspaceId"]==*id));}if authority_denied{state.sidebar_error(&scope,Part::Projects,&RpcError::Capability("workspace_access_denied".into()));}else if disconnected{state.sidebar_error(&scope,Part::Projects,&RpcError::Transport("Cloud events disconnected".into()));}cx.notify();}).is_err(){return;}
                                 if disconnected&&!authority_denied{events=None;retry=true;retry_projects=true;continue;}
-                                let refresh=matches!(data["type"].as_str(),Some("connected"|"reset"|"revalidate"))||data["events"].as_array().into_iter().flatten().any(|e|matches!(e["kind"].as_str(),Some("workspace"|"project"|"image-catalog"|"project-catalog"|"github"|"environment"|"connection"|"authentication")));
+                                let refresh=matches!(data["type"].as_str(),Some("connected"|"reset"|"revalidate"))||data["events"].as_array().into_iter().flatten().any(|e|e["kind"].as_str().is_some_and(refreshes_catalog));
                                 if refresh{load_projects=true;break;}
                             }
                         }
@@ -335,6 +344,30 @@ pub(super) fn spawn(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sidebar_refreshes_only_on_kinds_the_server_sends() {
+        for kind in [
+            "workspace",
+            "environment",
+            "github",
+            "connection",
+            "authentication",
+        ] {
+            assert!(refreshes_catalog(kind), "{kind}");
+        }
+        // Hints for other views, and kinds no server has ever sent.
+        for kind in [
+            "billing",
+            "machine-image",
+            "conversation",
+            "task-command-progress",
+            "project",
+            "image-catalog",
+            "project-catalog",
+        ] {
+            assert!(!refreshes_catalog(kind), "{kind}");
+        }
+    }
     #[test]
     fn cloud_only_catalog_needs_no_local_chat_and_scope_changes_clear_it() {
         let mut state = AppState::new();

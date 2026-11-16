@@ -9,8 +9,11 @@ pub(super) struct MachineView {
     instructions: Entity<TextInput>,
     pub error: Option<String>,
     notice: Option<String>,
-    /// Refreshes the status while a build is waiting or running.
-    poll: Option<Task<()>>,
+    /// Refreshes the status while a build is waiting or running and the
+    /// account feed is disconnected.
+    pub(super) poll: Option<Task<()>>,
+    /// Fallback reads since the last change, for the backoff.
+    polls: u32,
 }
 
 impl MachineView {
@@ -40,13 +43,23 @@ impl MachineView {
             error: None,
             notice: None,
             poll: None,
+            polls: 0,
         }
+    }
+    pub(super) fn stop_polling(&mut self) {
+        self.poll = None;
+        self.polls = 0;
+    }
+    fn waiting(&self) -> bool {
+        self.version
+            .as_ref()
+            .is_some_and(|v| matches!(v.image_state.as_str(), "queued" | "building"))
     }
     pub fn reset(&mut self, cx: &mut Context<RepositoryPanel>) {
         self.version = None;
         self.error = None;
         self.notice = None;
-        self.poll = None;
+        self.stop_polling();
         for input in [&self.setup, &self.instructions] {
             input.update(cx, |input, cx| input.set_value(String::new(), cx));
         }
@@ -199,22 +212,16 @@ impl RepositoryPanel {
                 if saved {
                     self.machine.notice = Some(saved_notice(&version.recipe).into());
                 }
-                let waiting = matches!(version.image_state.as_str(), "queued" | "building");
+                let changed = self.machine.version.as_ref().is_none_or(|v| {
+                    v.image_state != version.image_state || v.revision != version.revision
+                });
+                if changed {
+                    self.machine.polls = 0;
+                }
                 self.machine.version = Some(version);
                 self.machine.error = None;
-                self.machine.poll = waiting.then(|| {
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_secs(10))
-                            .await;
-                        let _ = this.update(cx, |this, cx| {
-                            this.machine.poll = None;
-                            if !this.pending.values().any(|p| p.kind.starts_with("machine")) {
-                                this.load_machine(cx);
-                            }
-                        });
-                    })
-                });
+                self.machine.poll = None;
+                self.schedule_machine_poll(cx);
             }
             Err(_) => {
                 self.machine.error =
@@ -222,6 +229,27 @@ impl RepositoryPanel {
             }
         }
         cx.notify();
+    }
+    /// Polls a waiting build only while the account feed is disconnected.
+    pub(super) fn schedule_machine_poll(&mut self, cx: &mut Context<Self>) {
+        if self.account_feed_live || !self.machine.waiting() {
+            self.machine.stop_polling();
+            return;
+        }
+        if self.machine.poll.is_some() {
+            return;
+        }
+        let delay = fallback_delay(std::time::Duration::from_secs(10), self.machine.polls);
+        self.machine.polls = self.machine.polls.saturating_add(1);
+        self.machine.poll = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                this.machine.poll = None;
+                if !this.pending.values().any(|p| p.kind.starts_with("machine")) {
+                    this.load_machine(cx);
+                }
+            });
+        }));
     }
     fn save_machine(&mut self, cx: &mut Context<Self>) {
         let Some(version) = self.machine.version.as_ref() else {

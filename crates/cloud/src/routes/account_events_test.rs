@@ -322,3 +322,196 @@ async fn real_account_socket_replays_scoped_events_and_revokes_private_history_w
         .unwrap();
     admin.close().await;
 }
+async fn hinted_ticket(http: &reqwest::Client, origin: &str, hints: Value) -> String {
+    let response = http
+        .post(format!("{origin}/v1/cloud/events/ticket"))
+        .bearer_auth("test-actor-token")
+        .json(&json!({"deviceId":uuid::Uuid::new_v4(),"hintKinds":hints}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.json::<Value>().await.unwrap()["ticket"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+#[tokio::test]
+#[ignore = "requires explicit isolated localhost PostgreSQL"]
+async fn billing_and_machine_image_hints_reach_only_sockets_that_opted_in() {
+    let url = std::env::var("ZUSE_CLOUD_TEST_DATABASE_URL").expect("explicit isolated PostgreSQL");
+    let parsed = reqwest::Url::parse(&url).unwrap();
+    assert!(matches!(
+        parsed.host_str(),
+        Some("127.0.0.1" | "localhost" | "::1")
+    ));
+    let admin = PgPool::connect(&url).await.unwrap();
+    let schema = format!("account_hints_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let search = schema.clone();
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(move |connection, _| {
+            let search = search.clone();
+            Box::pin(async move {
+                sqlx::query(&format!("SET search_path={search}"))
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&url)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!("../../migrations/0000_application.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE TABLE cloud_agent_connections(owner_id text,connection_id text,state text,version bigint,account_label text,last_error_code text); CREATE TABLE cloud_auth_operations(owner_id text,actor_id text,operation_id text,state text,operation_ciphertext text,last_error_code text); CREATE TABLE cloud_environment_versions(owner_id text,project_id text,revision bigint); CREATE TABLE zuse_rust_github_operations(owner_id text,actor_id text,operation_id text,phase text); CREATE TABLE zuse_rust_github_users(actor_id text,state text,epoch bigint,version bigint); CREATE TABLE zuse_rust_github_installations(owner_id text,installation_id bigint,state text,revision bigint,allowed_repositories jsonb);").execute(&pool).await.unwrap();
+    for migration in [
+        crate::events::store::MIGRATION,
+        include_str!("../../migrations/0031_machine_images.sql"),
+        include_str!("../../migrations/0037_user_images.sql"),
+        include_str!("../../migrations/0044_change_hints.sql"),
+    ] {
+        sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+    }
+    // The outbox still refuses anything that is not a known invalidation.
+    assert!(
+        sqlx::query("INSERT INTO zuse_rust_account_event_outbox(owner_id,kind,resource_id,created_at) VALUES('actor','executeTool','x',1)")
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+    let hub = EventHub::start(
+        pool.clone(),
+        MasterKey::parse(&URL_SAFE_NO_PAD.encode([79; 32])).unwrap(),
+        "https://staging.example.test".into(),
+    )
+    .await
+    .unwrap();
+    let mut store = Store::from_pool(pool.clone());
+    store.events = Some(hub.clone());
+    let state = AppState {
+        store,
+        identity: Arc::new(Member {
+            active: AtomicBool::new(true),
+        }),
+        organizations_enabled: true,
+        organization_ids: Arc::new(vec!["team".into()]),
+        runtime: None,
+        gateway: Arc::new(crate::gateway::Hub::default()),
+    };
+    let app = router(
+        state,
+        vec![HeaderValue::from_static("https://app.example.test")],
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+    let current = hinted_ticket(&http, &origin, json!(["machine-image", "billing"])).await;
+    let legacy = hinted_ticket(&http, &origin, json!([])).await;
+    let (mut current, _) = tokio_tungstenite::connect_async(socket_request(&origin, &current))
+        .await
+        .unwrap();
+    let (mut legacy, _) = tokio_tungstenite::connect_async(socket_request(&origin, &legacy))
+        .await
+        .unwrap();
+    for socket in [&mut current, &mut legacy] {
+        let ready: Value =
+            serde_json::from_str(&socket.next().await.unwrap().unwrap().into_text().unwrap())
+                .unwrap();
+        assert_eq!(ready["type"], "ready");
+        socket
+            .send(ClientMessage::Text(
+                json!({"type":"ack","cursor":ready["cursor"]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+    }
+    // A settlement batch collapses to one hint per transaction.
+    let mut tx = pool.begin().await.unwrap();
+    for entry in ["l1", "l2", "l3"] {
+        sqlx::query("INSERT INTO api_cloud_billing_ledger(entry_id,period_id,account_id,kind,amount_micros,source_id,occurred_at,created_at) VALUES($1,'period','actor','provider-cost',1,$1,1,1)").bind(entry).execute(&mut *tx).await.unwrap();
+    }
+    tx.commit().await.unwrap();
+    let image = format!("uimg_{}", "a".repeat(32));
+    sqlx::query("INSERT INTO cloud_machine_images(image_id,owner_id,provider,reason,state,recipe_revision,recipe_digest,next_attempt_at,created_at,updated_at) VALUES($1,'actor','boxd','recipe','queued',1,$2,1,1,1)")
+        .bind(&image)
+        .bind("b".repeat(64))
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Lease renewals stay silent.
+    sqlx::query("UPDATE cloud_machine_images SET lease_expires_at=99")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO cloud_agent_connections(owner_id,connection_id,state,version) VALUES('actor','agent','connected',1)").execute(&pool).await.unwrap();
+    hub.wake();
+    let mut seen = Vec::new();
+    while seen.len() < 3 {
+        let batch = frame(&mut current).await;
+        for event in batch["events"].as_array().unwrap() {
+            seen.push((
+                event["kind"].as_str().unwrap().to_owned(),
+                event["resourceId"].as_str().unwrap().to_owned(),
+                event["payload"].clone(),
+            ));
+        }
+        current
+            .send(ClientMessage::Text(
+                json!({"type":"ack","cursor":batch["cursor"]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        seen,
+        vec![
+            ("billing".into(), "period".into(), json!({})),
+            ("machine-image".into(), image.clone(), json!({})),
+            (
+                "connection".into(),
+                "agent".into(),
+                json!({"state":"connected","version":1})
+            ),
+        ]
+    );
+    // An older client never sees a kind it would reject.
+    let mut kinds = Vec::new();
+    while kinds.is_empty() {
+        let batch = frame(&mut legacy).await;
+        for event in batch["events"].as_array().unwrap() {
+            kinds.push(event["kind"].as_str().unwrap().to_owned());
+        }
+        legacy
+            .send(ClientMessage::Text(
+                json!({"type":"ack","cursor":batch["cursor"]})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+    }
+    assert_eq!(kinds, vec!["connection"]);
+    let _ = current.close(None).await;
+    let _ = legacy.close(None).await;
+    server.abort();
+    let _ = server.await;
+    drop(hub);
+    pool.close().await;
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}

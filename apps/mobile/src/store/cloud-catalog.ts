@@ -187,9 +187,22 @@ export const setCloudCatalogAccount = (accountId: string | null): void => {
 	appAtomRegistry.set(cloudCatalogAtom, empty(accountId));
 };
 
-export const refreshCloudCatalog = (): Promise<void> => {
+const userRefreshListeners = new Set<() => void>();
+/** Notified when a screen or user action asks for fresh cloud state, so background polling can speed up again. */
+export const onCloudCatalogUserRefresh = (listener: () => void) => {
+	userRefreshListeners.add(listener);
+	return () => {
+		userRefreshListeners.delete(listener);
+	};
+};
+
+export const refreshCloudCatalog = (
+	options: { background?: boolean } = {},
+): Promise<void> => {
 	if (appAtomRegistry.get(cloudCatalogAtom).accountId === null)
 		return Promise.resolve();
+	if (options.background !== true)
+		for (const listener of userRefreshListeners) listener();
 	if (flight !== null) return flight;
 	const epoch = generation;
 	const mutation = catalogMutation;

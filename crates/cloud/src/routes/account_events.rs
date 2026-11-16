@@ -18,6 +18,14 @@ use tokio::sync::OwnedSemaphorePermit;
 pub(super) struct TicketRequest {
     device_id: uuid::Uuid,
     cursor: Option<String>,
+    /// Newer event kinds the client handles (see `tickets::OPT_IN_KINDS`).
+    #[serde(default)]
+    hint_kinds: Vec<String>,
+}
+/// Whether a socket receives an event of this kind. Kinds added after the
+/// original allow-list reach only sockets that opted in.
+fn delivered(kind: &str, hints: &[&str]) -> bool {
+    !crate::events::tickets::OPT_IN_KINDS.contains(&kind) || hints.contains(&kind)
 }
 pub(super) async fn ticket(
     State(state): State<AppState>,
@@ -46,13 +54,14 @@ pub(super) async fn ticket(
     };
     let ticket = hub
         .tickets
-        .issue(
+        .issue_with_hints(
             bearer.to_owned(),
             access.actor.account_id,
             access.owner_id,
             organization,
             body.device_id,
             body.cursor,
+            crate::events::tickets::opt_in(&body.hint_kinds),
         )
         .await?;
     Ok(Json(
@@ -342,6 +351,9 @@ async fn serve(
                     (&personal_replay.events, &p.actor),
                 ] {
                     for event in source {
+                        if !delivered(&event.kind, &p.hints) {
+                            continue;
+                        }
                         // Organization context may use an explicitly selected personal
                         // connection. Its private tasks/history never enter this feed.
                         if owner != &p.owner
@@ -418,4 +430,33 @@ async fn serve(
     }
     let _ = tokio::time::timeout(Duration::from_secs(1), socket.close()).await;
     drop(lease);
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn newer_hint_kinds_reach_only_sockets_that_asked_for_them() {
+        for kind in [
+            "workspace",
+            "conversation",
+            "environment",
+            "task-command-queue",
+        ] {
+            assert!(delivered(kind, &[]));
+        }
+        assert!(!delivered("billing", &[]));
+        assert!(!delivered("machine-image", &["billing"]));
+        assert!(delivered("machine-image", &["machine-image", "billing"]));
+        let legacy: TicketRequest =
+            serde_json::from_value(json!({"deviceId":uuid::Uuid::nil(),"cursor":null})).unwrap();
+        assert!(legacy.hint_kinds.is_empty());
+        let current: TicketRequest = serde_json::from_value(
+            json!({"deviceId":uuid::Uuid::nil(),"hintKinds":["billing","future-kind"]}),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::events::tickets::opt_in(&current.hint_kinds),
+            vec!["billing"]
+        );
+    }
 }

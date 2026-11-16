@@ -17,7 +17,21 @@ pub struct Pending {
     pub(crate) organization: Option<String>,
     pub(crate) device_id: uuid::Uuid,
     pub(crate) cursor: Option<String>,
+    /// Opt-in event kinds this socket understands beyond the original set.
+    pub(crate) hints: Vec<&'static str>,
     until: Instant,
+}
+/// Event kinds added after clients shipped with a fixed allow-list. Older
+/// clients drop a whole batch on an unknown kind, so these are only sent to
+/// sockets whose ticket names them.
+pub const OPT_IN_KINDS: [&str; 2] = ["machine-image", "billing"];
+/// Known opt-in kinds from a ticket request, deduplicated. Unknown names are
+/// ignored so a newer client still connects to an older server.
+pub fn opt_in(requested: &[String]) -> Vec<&'static str> {
+    OPT_IN_KINDS
+        .into_iter()
+        .filter(|kind| requested.iter().take(32).any(|r| r == kind))
+        .collect()
 }
 pub struct Tickets {
     pending: Mutex<HashMap<[u8; 32], Pending>>,
@@ -41,6 +55,28 @@ impl Tickets {
         organization: Option<String>,
         device_id: uuid::Uuid,
         cursor: Option<String>,
+    ) -> Result<String, ApiError> {
+        self.issue_with_hints(
+            bearer,
+            actor,
+            owner,
+            organization,
+            device_id,
+            cursor,
+            vec![],
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn issue_with_hints(
+        &self,
+        bearer: String,
+        actor: String,
+        owner: String,
+        organization: Option<String>,
+        device_id: uuid::Uuid,
+        cursor: Option<String>,
+        hints: Vec<&'static str>,
     ) -> Result<String, ApiError> {
         if bearer.is_empty()
             || bearer.len() > 16 * 1024
@@ -83,6 +119,7 @@ impl Tickets {
                 organization,
                 device_id,
                 cursor,
+                hints,
                 until: now + Duration::from_secs(20),
             },
         );
@@ -170,6 +207,43 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.status, StatusCode::TOO_MANY_REQUESTS);
+    }
+    #[tokio::test]
+    async fn opt_in_kinds_are_known_names_only_and_ride_the_ticket() {
+        assert_eq!(
+            opt_in(&["billing".into(), "executeTool".into(), "billing".into()]),
+            vec!["billing"]
+        );
+        assert!(opt_in(&[]).is_empty());
+        let store = Tickets::new(2, 2);
+        let ticket = store
+            .issue_with_hints(
+                "secret".into(),
+                "actor".into(),
+                "actor".into(),
+                None,
+                uuid::Uuid::new_v4(),
+                None,
+                opt_in(&["machine-image".into(), "billing".into()]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.take(&ticket).await.unwrap().hints,
+            vec!["machine-image", "billing"]
+        );
+        let legacy = store
+            .issue(
+                "secret".into(),
+                "actor".into(),
+                "actor".into(),
+                None,
+                uuid::Uuid::new_v4(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store.take(&legacy).await.unwrap().hints.is_empty());
     }
     #[tokio::test]
     async fn one_actor_cannot_exhaust_the_shared_ticket_pool() {

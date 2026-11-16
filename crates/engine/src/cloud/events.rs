@@ -3,12 +3,26 @@
 use super::*;
 use futures::{SinkExt, StreamExt};
 use std::{collections::HashSet, sync::Mutex};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, watch};
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tokio_util::sync::CancellationToken;
 use zuse_rpc::{RpcError, RpcReply};
 
 const PROTOCOL: &str = "zuse.account-events.v1";
+/// Event kinds every server sends. A batch with any other kind is rejected.
+const KINDS: [&str; 8] = [
+    "workspace",
+    "conversation",
+    "connection",
+    "authentication",
+    "github",
+    "environment",
+    "task-command-queue",
+    "task-command-progress",
+];
+/// Newer kinds the server only sends when the ticket asks for them, so older
+/// clients (which reject unknown kinds) never receive them.
+pub(crate) const HINT_KINDS: [&str; 2] = ["machine-image", "billing"];
 #[derive(Clone, PartialEq, Eq)]
 struct Scope {
     actor: String,
@@ -31,8 +45,16 @@ pub(super) struct Manager {
 }
 pub(super) struct Feed {
     frames: broadcast::Sender<Value>,
+    /// True while the socket is connected and delivering invalidations.
+    /// Background readers poll only while this is false.
+    live: watch::Sender<bool>,
     cancel: CancellationToken,
     retry: Notify,
+}
+impl Feed {
+    pub(super) fn live(&self) -> watch::Receiver<bool> {
+        self.live.subscribe()
+    }
 }
 impl Drop for Feed {
     fn drop(&mut self) {
@@ -64,6 +86,7 @@ impl Manager {
         }
         let feed = Arc::new(Feed {
             frames: broadcast::channel(256).0,
+            live: watch::channel(false).0,
             cancel: CancellationToken::new(),
             retry: Notify::new(),
         });
@@ -85,6 +108,24 @@ impl Drop for Manager {
             }
         }
     }
+}
+#[cfg(test)]
+impl Manager {
+    /// A connected-looking feed with no socket behind it, for readers' tests.
+    pub(super) fn install_for_test(&self, auth: &Auth) -> Arc<Feed> {
+        let feed = Arc::new(Feed {
+            frames: broadcast::channel(256).0,
+            live: watch::channel(false).0,
+            cancel: CancellationToken::new(),
+            retry: Notify::new(),
+        });
+        *self.active.lock().unwrap() = Some((Scope::current(auth).unwrap(), feed.clone()));
+        feed
+    }
+}
+#[cfg(test)]
+pub(super) fn publish_for_test(feed: &Arc<Feed>, auth: &Auth, value: Value) {
+    publish(&Arc::downgrade(feed), &Scope::current(auth).unwrap(), value);
 }
 fn envelope(scope: &Scope, value: Value) -> Value {
     json!({"accountId":scope.actor,"organizationId":scope.organization,"data":value})
@@ -113,7 +154,13 @@ pub(crate) async fn handle_with_api(
         .map_err(|e| RpcError::Failed(e.to_string()))?;
     let receiver = feed.frames.subscribe();
     feed.retry.notify_one();
-    let initial = envelope(&scope, json!({"type":"revalidate","cacheRevoked":false}));
+    // `live` tells a view that joins an already connected feed (which will
+    // not see another `connected`) that it can rely on invalidations.
+    let live = *feed.live.borrow();
+    let initial = envelope(
+        &scope,
+        json!({"type":"revalidate","cacheRevoked":false,"live":live}),
+    );
     let stream = futures::stream::unfold(
         (feed, receiver, Some(initial), scope),
         |(feed, mut receiver, initial, scope)| async move {
@@ -136,6 +183,17 @@ pub(crate) async fn handle_with_api(
 }
 fn publish(feed: &std::sync::Weak<Feed>, scope: &Scope, value: Value) {
     if let Some(feed) = feed.upgrade() {
+        // `connected` is published only after the socket's checkpoint; every
+        // other status frame means invalidations may be missed from here on.
+        let live = match value["type"].as_str() {
+            Some("connected" | "events") => Some(true),
+            Some("reconnecting" | "disabled" | "closed" | "error") => Some(false),
+            _ => None,
+        };
+        if let Some(live) = live {
+            feed.live
+                .send_if_modified(|current| std::mem::replace(current, live) != live);
+        }
         let _ = feed.frames.send(envelope(scope, value));
     }
 }
@@ -149,12 +207,23 @@ async fn run(
     let device = uuid::Uuid::new_v4();
     let mut cursor: Option<String> = None;
     let mut failures = 0u32;
+    // Ask for the newer hint kinds until a server rejects the field.
+    let mut hints = true;
     let mut changes = auth.watch_state();
     loop {
         if cancel.is_cancelled() || !scope.matches(&auth) {
             break;
         }
-        let attempt = connect(&api, &auth, &scope, device, &mut cursor, &feed, &cancel);
+        let attempt = connect(
+            &api,
+            &auth,
+            &scope,
+            device,
+            &mut cursor,
+            hints,
+            &feed,
+            &cancel,
+        );
         let result = tokio::select! {biased;
             _=cancel.cancelled()=>break,
             changed=changes.changed()=>{if changed.is_err(){break;} if !scope.matches(&auth){break;}continue;},
@@ -165,6 +234,11 @@ async fn run(
         }
         match result {
             Ok(()) => failures = 0,
+            Err(Failure::Legacy) if hints => {
+                // A server from before hint kinds refuses the unknown field.
+                hints = false;
+                continue;
+            }
             Err(Failure::Reset) => {
                 cursor = None;
                 apply_cache_effect(&api, CacheEffect::Catalog).await;
@@ -191,7 +265,7 @@ async fn run(
                 tokio::select! {_=cancel.cancelled()=>break,_=changes.changed()=>{},_=async{if let Some(f)=feed.upgrade(){f.retry.notified().await;}}=>{}};
                 continue;
             }
-            Err(Failure::Transient) => {
+            Err(Failure::Transient | Failure::Legacy) => {
                 failures = failures.saturating_add(1);
                 publish(&feed, &scope, json!({"type":"reconnecting"}));
             }
@@ -205,17 +279,21 @@ async fn run(
     publish(&feed, &scope, json!({"type":"closed","cacheRevoked":true}));
 }
 enum Failure {
+    /// The ticket request was malformed for this server (400/422).
+    Legacy,
     Reset,
     Denied,
     Disabled,
     Transient,
 }
+#[allow(clippy::too_many_arguments)]
 async fn connect(
     api: &CloudApi,
     auth: &Auth,
     scope: &Scope,
     device: uuid::Uuid,
     cursor: &mut Option<String>,
+    hints: bool,
     feed: &std::sync::Weak<Feed>,
     cancel: &CancellationToken,
 ) -> std::result::Result<(), Failure> {
@@ -247,12 +325,16 @@ async fn connect(
         .http
         .post(url)
         .bearer_auth(token.as_str())
-        .json(&json!({"deviceId":device,"cursor":cursor}));
+        .json(&ticket_body(device, cursor.as_deref(), hints));
     if let Some(org) = &scope.organization {
         request = request.header("x-zuse-workspace", format!("organization:{org}"));
     }
     let response = request.send().await.map_err(|_| Failure::Transient)?;
     let status = response.status().as_u16();
+    // Checked before the body: framework rejections are not JSON.
+    if matches!(status, 400 | 422) && hints {
+        return Err(Failure::Legacy);
+    }
     if response.content_length().is_some_and(|n| n > 8192) {
         return Err(Failure::Transient);
     }
@@ -394,6 +476,13 @@ async fn connect(
     }
     Err(Failure::Transient)
 }
+fn ticket_body(device: uuid::Uuid, cursor: Option<&str>, hints: bool) -> Value {
+    let mut body = json!({"deviceId":device,"cursor":cursor});
+    if hints {
+        body["hintKinds"] = json!(HINT_KINDS);
+    }
+    body
+}
 fn validate(frame: &Value) -> Result<()> {
     if frame["type"] == "ready" {
         ensure!(frame["revalidate"] == true, "Invalid cloud checkpoint");
@@ -411,18 +500,7 @@ fn validate(frame: &Value) -> Result<()> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("Invalid cloud revocation batch"))?;
     ensure!(revoked.len() <= 4096, "Cloud revocation batch too large");
-    let kinds: HashSet<_> = [
-        "workspace",
-        "conversation",
-        "connection",
-        "authentication",
-        "github",
-        "environment",
-        "task-command-queue",
-        "task-command-progress",
-    ]
-    .into_iter()
-    .collect();
+    let kinds: HashSet<_> = KINDS.into_iter().chain(HINT_KINDS).collect();
     for event in events {
         ensure!(
             event["kind"].as_str().is_some_and(|s| kinds.contains(s)),
@@ -552,5 +630,47 @@ mod tests {
         assert!(validate(&malformed).is_err());
         assert!(validate(&json!({"type":"reset","cacheRevoked":true})).is_ok());
         assert!(validate(&json!({"type":"reset","cacheRevoked":false})).is_err());
+    }
+    #[test]
+    fn hint_kinds_are_requested_accepted_and_dropped_for_older_servers() {
+        for kind in HINT_KINDS {
+            let frame = json!({"type":"events","events":[{"kind":kind,"resourceId":"r"}],"revokedWorkspaceIds":[]});
+            assert!(validate(&frame).is_ok(), "{kind}");
+        }
+        let device = uuid::Uuid::nil();
+        assert_eq!(
+            ticket_body(device, Some("c"), true),
+            json!({"deviceId":device,"cursor":"c","hintKinds":["machine-image","billing"]})
+        );
+        assert_eq!(
+            ticket_body(device, None, false),
+            json!({"deviceId":device,"cursor":null})
+        );
+    }
+    #[tokio::test]
+    async fn the_feed_reports_live_only_between_connect_and_disconnect() {
+        let feed = Arc::new(Feed {
+            frames: broadcast::channel(8).0,
+            live: watch::channel(false).0,
+            cancel: CancellationToken::new(),
+            retry: Notify::new(),
+        });
+        let weak = Arc::downgrade(&feed);
+        let scope = Scope {
+            actor: "a".into(),
+            organization: None,
+        };
+        let live = feed.live();
+        publish(&weak, &scope, json!({"type":"connected"}));
+        assert!(*live.borrow());
+        publish(&weak, &scope, json!({"type":"events","events":[]}));
+        assert!(*live.borrow());
+        publish(&weak, &scope, json!({"type":"reconnecting"}));
+        assert!(!*live.borrow());
+        publish(&weak, &scope, json!({"type":"revalidate"}));
+        assert!(
+            !*live.borrow(),
+            "a synthesized revalidate is not a connection"
+        );
     }
 }

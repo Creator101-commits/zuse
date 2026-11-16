@@ -320,13 +320,35 @@ async fn run(
         }
     });
     let mut retained = None;
+    // Workspace metadata is re-read when the account feed reports a change to
+    // this workspace, and polled (with backoff) only while the feed is down.
+    // The file mirror keeps its own cadence over the computer connection.
+    let (_feed, mut frames, mut live) =
+        match api.account_events.subscribe(api.clone(), auth.clone()) {
+            Ok((feed, frames)) => {
+                let live = feed.live();
+                (Some(feed), Some(frames), Some(live))
+            }
+            Err(_) => (None, None, None),
+        };
+    let mut metadata = Metadata::new(live.as_ref().is_some_and(|live| *live.borrow()));
+    let mut last: Option<std::result::Result<Value, String>> = None;
     loop {
         if cancel.is_cancelled() {
             break;
         }
-        let result = workspace(&api, &auth, &config.account_id, &config.workspace_id).await;
-        let mut interval = Duration::from_secs(5);
-        match result {
+        if metadata.due(tokio::time::Instant::now()) || last.is_none() {
+            let result = workspace(&api, &auth, &config.account_id, &config.workspace_id)
+                .await
+                .map_err(|error| error.to_string());
+            let changed = last.as_ref() != Some(&result);
+            metadata.fetched(result.is_ok(), changed, tokio::time::Instant::now());
+            last = Some(result);
+        }
+        // Local work (mirror sync, attaching to a ready computer) repeats on
+        // this cadence; `None` means only a hint or the fallback poll wakes us.
+        let mut interval = Some(Duration::from_secs(5));
+        match last.clone().expect("workspace metadata was read") {
             Ok(value) => {
                 let row = serde_json::from_value::<Workspace>(value.clone());
                 match row {
@@ -340,6 +362,7 @@ async fn run(
                     }
                     Ok(row) => {
                         if row.rpc_protocol.as_deref() != Some("zuse-rpc-v1") {
+                            interval = None;
                             api.syncs.update(
                                 &config.account_id,
                                 &config.workspace_id,
@@ -352,6 +375,7 @@ async fn run(
                                 },
                             );
                         } else if row.state != "ready" || row.desired_state != "ready" {
+                            interval = None;
                             retained = None;
                             api.syncs.update(
                                 &config.account_id,
@@ -420,7 +444,7 @@ async fn run(
                                         },
                                     ),
                                     Err(error) => {
-                                        interval = Duration::from_secs(15);
+                                        interval = Some(Duration::from_secs(15));
                                         api.syncs.update(
                                             &config.account_id,
                                             &config.workspace_id,
@@ -438,6 +462,7 @@ async fn run(
                         }
                     }
                     Err(error) => {
+                        interval = None;
                         api.syncs
                             .update(&config.account_id, &config.workspace_id, &cancel, |r| {
                                 r.status.state = "error".into();
@@ -448,15 +473,69 @@ async fn run(
                 }
             }
             Err(error) => {
-                interval = Duration::from_secs(15);
+                interval = None;
                 api.syncs
                     .update(&config.account_id, &config.workspace_id, &cancel, |r| {
                         r.status.state = "error".into();
-                        r.status.error = Some(error.to_string());
+                        r.status.error = Some(error);
                     });
             }
         }
-        tokio::select! {biased;_=cancel.cancelled()=>break,_=wake.notified()=>{},_=tokio::time::sleep(interval)=>{}}
+        let now = tokio::time::Instant::now();
+        let deadline = [interval.map(|i| now + i), metadata.next()]
+            .into_iter()
+            .flatten()
+            .min();
+        // Unrelated feed frames keep waiting; they neither poll nor re-sync.
+        let woke = loop {
+            let frame = async {
+                match &mut frames {
+                    Some(frames) => frames.recv().await,
+                    None => std::future::pending().await,
+                }
+            };
+            let connection = async {
+                match &mut live {
+                    Some(live) => live.changed().await.map(|_| *live.borrow_and_update()),
+                    None => std::future::pending().await,
+                }
+            };
+            let sleep = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            };
+            let woke = tokio::select! {biased;
+                _=cancel.cancelled()=>Woke::Stop,
+                _=wake.notified()=>Woke::Hint,
+                frame=frame=>match frame {
+                    Ok(frame)=>if workspace_hint(&frame,&config.account_id,&config.workspace_id){Woke::Hint}else{Woke::Ignored},
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>Woke::Hint,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed)=>Woke::FeedClosed,
+                },
+                connected=connection=>match connected {
+                    Ok(connected)=>Woke::Live(connected),
+                    Err(_)=>Woke::FeedClosed,
+                },
+                _=sleep=>Woke::Timer,
+            };
+            if !matches!(woke, Woke::Ignored) {
+                break woke;
+            }
+        };
+        match woke {
+            Woke::Stop => break,
+            Woke::Ignored => {}
+            Woke::Hint => metadata.hint(),
+            Woke::Live(connected) => metadata.set_live(connected, tokio::time::Instant::now()),
+            Woke::FeedClosed => {
+                frames = None;
+                live = None;
+                metadata.set_live(false, tokio::time::Instant::now());
+            }
+            Woke::Timer => {}
+        }
     }
     watcher.abort();
     api.syncs
@@ -465,6 +544,99 @@ async fn run(
             r.status.enabled = r.config.enabled;
             r.task = None;
         });
+}
+enum Woke {
+    Stop,
+    Ignored,
+    Hint,
+    Live(bool),
+    FeedClosed,
+    Timer,
+}
+/// First and last fallback poll interval while the account feed is down.
+const FALLBACK_MIN: Duration = Duration::from_secs(5);
+const FALLBACK_MAX: Duration = Duration::from_secs(60);
+/// When a synced workspace's metadata is read from the cloud API.
+struct Metadata {
+    /// A hint, reconnect or local wake asked for a fresh read.
+    stale: bool,
+    /// The account feed is connected and delivers workspace changes.
+    live: bool,
+    backoff: Duration,
+    next: Option<tokio::time::Instant>,
+}
+impl Metadata {
+    fn new(live: bool) -> Self {
+        Self {
+            stale: true,
+            live,
+            backoff: FALLBACK_MIN,
+            next: None,
+        }
+    }
+    fn hint(&mut self) {
+        self.stale = true;
+    }
+    fn set_live(&mut self, live: bool, now: tokio::time::Instant) {
+        if live == self.live {
+            return;
+        }
+        self.live = live;
+        if live {
+            // Changes made while disconnected were never hinted.
+            self.stale = true;
+        } else {
+            self.backoff = FALLBACK_MIN;
+            self.next = Some(now + FALLBACK_MIN);
+        }
+    }
+    fn fetched(&mut self, ok: bool, changed: bool, now: tokio::time::Instant) {
+        self.stale = false;
+        if self.live && ok {
+            self.backoff = FALLBACK_MIN;
+            self.next = None;
+            return;
+        }
+        if changed && ok {
+            self.backoff = FALLBACK_MIN;
+        }
+        self.next = Some(now + self.backoff);
+        self.backoff = (self.backoff * 2).min(FALLBACK_MAX);
+    }
+    fn due(&self, now: tokio::time::Instant) -> bool {
+        self.stale || self.next.is_some_and(|next| now >= next)
+    }
+    fn next(&self) -> Option<tokio::time::Instant> {
+        if self.stale {
+            return Some(tokio::time::Instant::now());
+        }
+        self.next
+    }
+}
+/// Whether an account feed frame may change this workspace's metadata.
+fn workspace_hint(frame: &Value, account: &str, workspace: &str) -> bool {
+    if frame["accountId"].as_str() != Some(account) {
+        return false;
+    }
+    let data = &frame["data"];
+    match data["type"].as_str() {
+        // Invalidations were missed. (Reconnecting is seen through the
+        // feed's live state, which also refetches.)
+        Some("reset") => true,
+        Some("events") => {
+            data["revokedWorkspaceIds"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id == workspace))
+                || data["events"].as_array().is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["kind"] == "workspace"
+                            && (event["workspaceId"] == workspace
+                                || event["resourceId"] == workspace)
+                    })
+                })
+        }
+        _ => false,
+    }
 }
 fn default_path(base: &Path, repository: &str, branch: &str) -> Result<PathBuf> {
     let name = repository
@@ -797,7 +969,8 @@ mod tests {
         let writes = Arc::new(AtomicUsize::new(0));
         let observed = reads.clone();
         let mutations = writes.clone();
-        let app=Router::new().route("/v1/cloud/workspaces/controller-workspace",get(move||{let reads=observed.clone();async move{reads.fetch_add(1,Ordering::SeqCst);Json(json!({"workspaceId":"controller-workspace","chatId":"thread","initialSessionId":"original-session","branch":"feature/work","state":"paused","desiredState":"paused","statusCode":"paused","revision":1,"rpcProtocol":"zuse-rpc-v1"}))}})).fallback(move||{let writes=mutations.clone();async move{writes.fetch_add(1,Ordering::SeqCst);axum::http::StatusCode::METHOD_NOT_ALLOWED}});
+        // Account events are off on this server: metadata falls back to polling.
+        let app=Router::new().route("/v1/cloud/workspaces/controller-workspace",get(move||{let reads=observed.clone();async move{reads.fetch_add(1,Ordering::SeqCst);Json(json!({"workspaceId":"controller-workspace","chatId":"thread","initialSessionId":"original-session","branch":"feature/work","state":"paused","desiredState":"paused","statusCode":"paused","revision":1,"rpcProtocol":"zuse-rpc-v1"}))}})).route("/v1/cloud/events/ticket",axum::routing::post(||async{(axum::http::StatusCode::NOT_FOUND,Json(json!({"error":"not_found"})))})).fallback(move||{let writes=mutations.clone();async move{writes.fetch_add(1,Ordering::SeqCst);axum::http::StatusCode::METHOD_NOT_ALLOWED}});
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -850,6 +1023,145 @@ mod tests {
         reconcile(api.clone(), auth).await.unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
         assert_eq!(before, reads.load(Ordering::SeqCst));
+        server.abort();
+    }
+    #[test]
+    fn metadata_polls_only_while_the_feed_is_down_with_capped_backoff() {
+        let now = tokio::time::Instant::now();
+        let mut live = Metadata::new(true);
+        assert!(live.due(now), "the first read always happens");
+        live.fetched(true, true, now);
+        assert!(
+            !live.due(now + Duration::from_secs(3600)),
+            "connected: no polling"
+        );
+        assert_eq!(live.next(), None);
+        live.hint();
+        assert!(live.due(now));
+        live.fetched(true, false, now);
+        // A failed read retries even while connected; errors are never hinted.
+        live.fetched(false, true, now);
+        assert!(live.due(now + FALLBACK_MIN));
+        live.fetched(true, true, now);
+        live.set_live(false, now);
+        assert!(!live.due(now));
+        assert!(live.due(now + FALLBACK_MIN));
+        let mut at = now;
+        let mut waits = Vec::new();
+        for _ in 0..6 {
+            at = live.next().unwrap();
+            live.fetched(true, false, at);
+            waits.push((live.next().unwrap() - at).as_secs());
+        }
+        assert_eq!(waits, vec![5, 10, 20, 40, 60, 60]);
+        // A change seen while polling resets the backoff.
+        live.fetched(true, true, at);
+        assert_eq!((live.next().unwrap() - at).as_secs(), 5);
+        live.set_live(true, at);
+        assert!(live.due(at), "reconnect refetches immediately");
+    }
+    #[test]
+    fn only_this_workspace_or_a_replay_gap_triggers_a_metadata_read() {
+        let frame = |data: Value| json!({"accountId":"a","organizationId":null,"data":data});
+        let event = |kind: &str, id: &str| {
+            frame(
+                json!({"type":"events","events":[{"kind":kind,"resourceId":id,"workspaceId":id}],"revokedWorkspaceIds":[]}),
+            )
+        };
+        assert!(workspace_hint(&event("workspace", "w"), "a", "w"));
+        assert!(!workspace_hint(&event("workspace", "other"), "a", "w"));
+        assert!(!workspace_hint(&event("conversation", "w"), "a", "w"));
+        assert!(!workspace_hint(&event("workspace", "w"), "b", "w"));
+        assert!(workspace_hint(
+            &frame(json!({"type":"events","events":[],"revokedWorkspaceIds":["w"]})),
+            "a",
+            "w"
+        ));
+        assert!(!workspace_hint(
+            &frame(json!({"type":"connected"})),
+            "a",
+            "w"
+        ));
+        assert!(workspace_hint(
+            &frame(json!({"type":"reset","cacheRevoked":true})),
+            "a",
+            "w"
+        ));
+        assert!(!workspace_hint(
+            &frame(json!({"type":"revalidate"})),
+            "a",
+            "w"
+        ));
+    }
+    #[tokio::test]
+    async fn a_connected_feed_replaces_metadata_polling_with_hinted_reads() {
+        use axum::{Json, Router, routing::get};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let app=Router::new().route("/v1/cloud/workspaces/controller-workspace",get(move||{let reads=observed.clone();async move{reads.fetch_add(1,Ordering::SeqCst);Json(json!({"workspaceId":"controller-workspace","chatId":"thread","initialSessionId":"original-session","branch":"feature/work","state":"paused","desiredState":"paused","statusCode":"paused","revision":1,"rpcProtocol":"zuse-rpc-v1"}))}}));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        let auth = auth(&root.path().join("profile"), &origin);
+        let account = auth.user_id().unwrap();
+        let config = config(root.path(), &account);
+        store(&auth, &config);
+        let api = api(root.path(), &origin);
+        let feed = api.account_events.install_for_test(&auth);
+        events::publish_for_test(&feed, &auth, json!({"type":"connected","revalidate":true}));
+        api.syncs.hydrate(&api, &auth, &account).unwrap();
+        Manager::start(
+            api.clone(),
+            auth.clone(),
+            account.clone(),
+            config.workspace_id.clone(),
+        );
+        let wait_for = |count: usize| {
+            let reads = reads.clone();
+            async move {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while reads.load(Ordering::SeqCst) < count {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+        };
+        wait_for(1).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "no polling while connected"
+        );
+        // Other workspaces' changes do not cost a read.
+        events::publish_for_test(
+            &feed,
+            &auth,
+            json!({"type":"events","events":[{"kind":"workspace","resourceId":"other","workspaceId":"other"}],"revokedWorkspaceIds":[]}),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        events::publish_for_test(
+            &feed,
+            &auth,
+            json!({"type":"events","events":[{"kind":"workspace","resourceId":"controller-workspace","workspaceId":"controller-workspace"}],"revokedWorkspaceIds":[]}),
+        );
+        wait_for(2).await;
+        // Dropping the socket schedules a fallback read (not an immediate one);
+        // reconnecting reads at once, since hints may have been missed.
+        events::publish_for_test(&feed, &auth, json!({"type":"reconnecting"}));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        events::publish_for_test(&feed, &auth, json!({"type":"connected","revalidate":true}));
+        wait_for(3).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(reads.load(Ordering::SeqCst), 3);
+        auth.sign_out();
         server.abort();
     }
     #[tokio::test]
