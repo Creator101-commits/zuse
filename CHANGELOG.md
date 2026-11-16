@@ -6,6 +6,10 @@
 
 - Add opt-in Slack cloud tasks with threaded status/results, sender/channel attribution, and a workspace/repository connection flow in Cloud settings. Server credentials stay encrypted; enablement requires the Slack migration and a rebuilt compatible runtime image.
 
+### Changed
+
+- Render Markdown tables with compact rows, rounded borders, clearer headers, and better wrapping.
+
 ## 0.26.1 - 2026-11-15
 
 ### Added
