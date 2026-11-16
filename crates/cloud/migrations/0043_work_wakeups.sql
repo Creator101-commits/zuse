@@ -41,6 +41,12 @@ CREATE TRIGGER zuse_cloud_account_events_wake
 AFTER INSERT ON zuse_rust_account_event_outbox
 FOR EACH ROW EXECUTE FUNCTION zuse_cloud_notify_work('account_events');
 
+-- Every command mailbox change bumps its revision. The API process holding a
+-- guest's command long-poll learns of commands committed by the worker.
+CREATE TRIGGER zuse_cloud_mailboxes_wake
+AFTER UPDATE OF revision ON zuse_rust_mailboxes
+FOR EACH ROW EXECUTE FUNCTION zuse_cloud_notify_work('mailbox');
+
 -- Project environment caches are an optional migration (0028). When it is
 -- installed later, those workers still run on due time and the idle timer.
 DO $optional$

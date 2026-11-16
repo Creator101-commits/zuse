@@ -27,6 +27,8 @@ pub enum Work {
     MachineImages,
     ProjectCache,
     AccountEvents,
+    /// A command mailbox revision changed.
+    Mailbox,
     /// Notifications may have been missed (listener reconnected or lagged).
     All,
 }
@@ -40,6 +42,7 @@ impl Work {
             "machine_images" => Self::MachineImages,
             "project_cache" => Self::ProjectCache,
             "account_events" => Self::AccountEvents,
+            "mailbox" => Self::Mailbox,
             _ => return None,
         })
     }
@@ -51,6 +54,7 @@ impl Work {
             Self::MachineImages => "machine_images",
             Self::ProjectCache => "project_cache",
             Self::AccountEvents => "account_events",
+            Self::Mailbox => "mailbox",
             Self::All => "all",
         }
     }
@@ -384,6 +388,7 @@ mod tests {
             Work::MachineImages,
             Work::ProjectCache,
             Work::AccountEvents,
+            Work::Mailbox,
         ] {
             assert_eq!(Work::parse(kind.as_str()), Some(kind));
         }

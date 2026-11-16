@@ -1373,6 +1373,9 @@ async fn main() -> Result<()> {
             };
             let runtime_enabled = runtime.is_some();
             let wakeups = db.wakeups().await;
+            if let Some(runtime) = &runtime {
+                runtime.attach_wakeups(wakeups.clone());
+            }
             let mut store = Store::from_pool(db.read_only_pool())
                 .configure_transcripts()?
                 .with_staging_base_pin(runtime.as_ref().and_then(|r| r.staging_base_pin()));

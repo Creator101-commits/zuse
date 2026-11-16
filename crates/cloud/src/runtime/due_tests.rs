@@ -16,6 +16,7 @@ const STUB_TABLES: &str = "
 CREATE TABLE zuse_rust_task_command_drains(workspace_id text, session_id text, revision bigint, next_attempt_at bigint NOT NULL, PRIMARY KEY(workspace_id, session_id));
 CREATE TABLE zuse_rust_computer_recreations(operation_id text PRIMARY KEY, phase text NOT NULL, due_at bigint NOT NULL);
 CREATE TABLE cloud_machine_images(image_id text PRIMARY KEY, state text NOT NULL, next_attempt_at bigint NOT NULL, lease_id text, lease_expires_at bigint);
+CREATE TABLE zuse_rust_mailboxes(workspace_id text PRIMARY KEY, sequence bigint NOT NULL DEFAULT 0, revision bigint NOT NULL DEFAULT 0);
 CREATE TABLE zuse_rust_account_event_outbox(outbox_id bigserial PRIMARY KEY, owner_id text NOT NULL, kind text NOT NULL, resource_id text NOT NULL, created_at bigint NOT NULL);
 ";
 
@@ -175,6 +176,17 @@ async fn work_triggers_notify_listeners_and_due_query_tracks_next_work() {
     .await
     .unwrap();
     assert_eq!(next(&mut receiver).await, Some(Work::MachineImages));
+    // Mailbox revisions wake command long-polls in the API process.
+    sqlx::query("INSERT INTO zuse_rust_mailboxes(workspace_id) VALUES('ws')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    quiet(&mut receiver).await;
+    sqlx::query("UPDATE zuse_rust_mailboxes SET revision=revision+1 WHERE workspace_id='ws'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(next(&mut receiver).await, Some(Work::Mailbox));
 
     // The due query: the retried job's backoff, the drain and the image.
     let key = URL_SAFE_NO_PAD.encode([48; 32]);

@@ -120,6 +120,10 @@ impl RuntimeConfig {
     }
 }
 
+/// Database gateway lease length. The gateway renews every 5s and trusts a
+/// renewal for 20s locally, always inside this window.
+pub(crate) const GATEWAY_LEASE_MS: i64 = 25_000;
+
 pub struct RuntimeControl {
     pub(crate) staging_candidate: Option<Arc<crate::managed_bases::candidate::StagingBasePin>>,
     scope_authority: std::sync::OnceLock<Arc<scope::ScopeAuthority>>,
@@ -147,6 +151,8 @@ pub struct RuntimeControl {
     recovery_workspaces: Vec<String>,
     object_writes: Arc<tokio::sync::Semaphore>,
     pub(crate) mailbox_changes: tokio::sync::broadcast::Sender<()>,
+    /// Set once database NOTIFY forwards mailbox changes from other processes.
+    mailbox_push: std::sync::atomic::AtomicBool,
     runtime_releases: runtime_updates::RuntimeReleaseConfig,
     harness_bundles: harness_updates::HarnessBundleConfig,
 }
@@ -306,6 +312,7 @@ impl RuntimeControl {
             transcript_objects: None,
             object_writes: Arc::new(tokio::sync::Semaphore::new(1)),
             mailbox_changes: tokio::sync::broadcast::channel(128).0,
+            mailbox_push: std::sync::atomic::AtomicBool::new(false),
             runtime_releases: runtime_updates::RuntimeReleaseConfig::default(),
             harness_bundles: harness_updates::HarnessBundleConfig::default(),
         }
@@ -369,6 +376,47 @@ impl RuntimeControl {
     }
     pub fn shared_pool(&self) -> PgPool {
         self.pool.clone()
+    }
+    /// Forwards mailbox changes committed by other processes (database
+    /// `NOTIFY`) to command long-polls waiting in this process.
+    pub fn attach_wakeups(self: &Arc<Self>, wakeups: Arc<crate::db::wake::Wakeups>) {
+        if !wakeups.enabled() {
+            return;
+        }
+        let mut notifications = wakeups.subscribe();
+        let weak = Arc::downgrade(self);
+        self.mailbox_push
+            .store(true, std::sync::atomic::Ordering::Release);
+        tokio::spawn(async move {
+            let _wakeups = wakeups;
+            use crate::db::wake::Work;
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                let work = notifications.recv().await;
+                let Some(control) = weak.upgrade() else { break };
+                match work {
+                    Ok(Work::Mailbox | Work::All) | Err(RecvError::Lagged(_)) => {
+                        let _ = control.mailbox_changes.send(());
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Closed) => {
+                        control
+                            .mailbox_push
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    /// How often a mailbox long-poll re-reads while waiting. With pushed
+    /// changes it waits for a change or its deadline; otherwise every second.
+    pub(crate) fn mailbox_recheck(&self) -> Duration {
+        if self.mailbox_push.load(std::sync::atomic::Ordering::Acquire) {
+            Duration::from_secs(zuse_protocol::cloud_commands::WATCH_MAX_WAIT_MS as u64 / 1000 + 1)
+        } else {
+            Duration::from_secs(1)
+        }
     }
 
     #[tracing::instrument(name="cloud_runtime_request", skip_all, fields(workspace=%id, operation="bootstrap"))]
@@ -1269,8 +1317,8 @@ impl RuntimeControl {
         if blocked(&row) || row["desired_state"] != "ready" || (generation, epoch) != fence {
             return Err(ApiError::unauthorized("workspace_runtime_fenced"));
         }
-        let leased:Option<String>=sqlx::query_scalar("INSERT INTO zuse_rust_gateway_leases (workspace_id,owner_token,expires_at) VALUES ($1,$2,(extract(epoch from clock_timestamp())*1000)::bigint+10000) ON CONFLICT (workspace_id) DO UPDATE SET owner_token=EXCLUDED.owner_token,expires_at=EXCLUDED.expires_at WHERE zuse_rust_gateway_leases.expires_at<=(extract(epoch from clock_timestamp())*1000)::bigint OR zuse_rust_gateway_leases.owner_token=$2 RETURNING owner_token")
-            .bind(id).bind(token).fetch_optional(&mut *tx).await?;
+        let leased:Option<String>=sqlx::query_scalar("INSERT INTO zuse_rust_gateway_leases (workspace_id,owner_token,expires_at) VALUES ($1,$2,(extract(epoch from clock_timestamp())*1000)::bigint+$3) ON CONFLICT (workspace_id) DO UPDATE SET owner_token=EXCLUDED.owner_token,expires_at=EXCLUDED.expires_at WHERE zuse_rust_gateway_leases.expires_at<=(extract(epoch from clock_timestamp())*1000)::bigint OR zuse_rust_gateway_leases.owner_token=$2 RETURNING owner_token")
+            .bind(id).bind(token).bind(GATEWAY_LEASE_MS).fetch_optional(&mut *tx).await?;
         if leased.is_none() {
             return Err(ApiError::unavailable("workspace_gateway_owned_elsewhere"));
         }
