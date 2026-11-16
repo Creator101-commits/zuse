@@ -216,6 +216,16 @@ impl RuntimeControl {
             json!({"workspaceId":id,"encodedKey":key.as_str(),"keyVersion":1,"destructionFence":destruction_fence(&row),"mailboxEnabled":enabled,"sessionCommandVersion":if native_commands_accepted(&row){Some(1)}else{None}}),
         )
     }
+    /// Every mailbox change bumps this. The gateway compares it to tell the
+    /// attached runtime "you have a command" without reading any command.
+    pub(crate) async fn mailbox_revision(&self, id: &str) -> Result<i64, ApiError> {
+        let revision: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM zuse_rust_mailboxes WHERE workspace_id=$1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(revision.unwrap_or(0))
+    }
     #[tracing::instrument(name="cloud_runtime_request", skip_all, fields(workspace=%id, operation="command_lease"))]
     pub async fn command_lease(
         &self,

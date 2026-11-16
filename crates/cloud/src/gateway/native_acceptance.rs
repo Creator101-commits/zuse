@@ -36,6 +36,7 @@ async fn android_client_through_real_gateway_and_guest() {
         bytes: Arc::new(Semaphore::new(32 * 1024 * 1024)),
         control: None,
         activity: tokio::sync::Mutex::new(None),
+        command_hints: false,
     })));
     let expires = now() + 120_000;
     let app = Router::new().route(
