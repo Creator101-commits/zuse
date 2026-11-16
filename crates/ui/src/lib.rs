@@ -183,6 +183,8 @@ pub fn run_app(config: UiConfig) {
     // The embedded engine runs here too, so it needs the engine's stacks.
     let runtime = zuse_engine::runtime().expect("desktop Tokio runtime");
     let runtime_handle = runtime.handle().clone();
+    let shutdown = zuse_engine::desktop_shutdown::DesktopShutdown::default();
+    let quit_shutdown = shutdown.clone();
     let app = gpui_platform::application()
         .with_assets(icons::Assets)
         .with_http_client(asset_http::AssetHttpClient::new(runtime_handle.clone()));
@@ -208,6 +210,7 @@ pub fn run_app(config: UiConfig) {
         }
     });
     app.run(move |cx: &mut App| {
+        let quit_runtime = runtime_handle.clone();
         gpui_tokio::init_from_handle(cx, runtime_handle);
         gpui_base::init(cx);
         let data_dir = config.boot().data_dir.clone();
@@ -297,7 +300,9 @@ pub fn run_app(config: UiConfig) {
             // Quit means stop: agents come back only from a restart the user
             // asked for, however long until Zuse is next opened.
             app_update::install_on_quit(cx);
-            let shutdown = gpui_tokio::Tokio::spawn(cx, async move {
+            // GPUI drops quit-hook futures after 200 ms. Keep the engine drain
+            // on the runtime so a cancelled UI observer cannot cancel it too.
+            let completion = quit_shutdown.start(&quit_runtime, async move {
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(3),
                     futures::future::join_all(drains),
@@ -308,7 +313,7 @@ pub fn run_app(config: UiConfig) {
                 }
             });
             async move {
-                let _ = shutdown.await;
+                let _ = completion.await;
                 drop(analytics_states);
             }
         })
@@ -331,6 +336,11 @@ pub fn run_app(config: UiConfig) {
         cx.set_menus(app_menus::app_menus(cx));
         cx.activate(true);
     });
+    shutdown.finish(
+        runtime,
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(2),
+    );
 }
 
 /// A paired workspace gets its own state and connection; the current engine

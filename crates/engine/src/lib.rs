@@ -46,6 +46,7 @@ pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
 pub mod desktop_import;
+pub mod desktop_shutdown;
 pub mod diff_sync;
 pub mod direct_access;
 pub mod doc_host;

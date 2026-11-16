@@ -111,6 +111,7 @@ jobs:
       - run: cargo test --locked -p zuse-analytics
       - run: node --test scripts/analytics-dashboards.test.mjs
       - run: cargo test -p zuse-cli --test startup
+      - run: cargo test --locked -p zuse-engine --test desktop_shutdown
       - run: cargo test -p zuse-commands
       - run: cargo test -p zuse-relay --test startup
       - run: cargo test -p zuse-remote
