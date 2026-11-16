@@ -348,6 +348,6 @@ pub struct ZotIssue {
 }
 impl ZotIssue {
     pub fn code(&self) -> String {
-        format!("ZOT-{}", self.number)
+        format!("ZAP-{}", self.number)
     }
 }

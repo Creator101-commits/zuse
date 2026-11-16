@@ -1,16 +1,36 @@
-//! Pixel mad scientists for Zots, shared by every client.
+//! Zapper avatars, shared by every client: a round, flat-coloured face.
 //!
-//! One character per pixel: `.` empty, `b` hair (the picked colour), `s` its shade,
-//! `k` ink, `w` lab coat, `c` coat seam, `g` goggle glass, `t` potion, `p` skin.
-//! Mascot ids are saved with each Zot, so art and names can change but ids cannot.
+//! Each mascot picks a [`Face`]; each colour fills the disc. Mascot and colour
+//! ids are saved with each Zapper, so art and names can change but ids cannot.
 use crate::zots::ZotAvatar;
 
-pub const SPRITE_SIZE: usize = 16;
+/// The features drawn on an avatar's disc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Face {
+    /// Round eyes and a small smile.
+    Smile,
+    /// Tall pill eyes, no mouth.
+    Tall,
+    /// One wide visor with two glints.
+    Visor,
+    /// A single large eye.
+    Cyclops,
+    /// Closed, smiling eyes.
+    Happy,
+    /// Square shades and a flat mouth.
+    Shades,
+    /// One open eye, one closed, a sideways smirk.
+    Wink,
+    /// Closed, resting eyes and a small round mouth.
+    Sleepy,
+    /// Round eyes, rosy cheeks and a button mouth.
+    Blush,
+}
 
 pub struct Mascot {
     pub id: &'static str,
     pub name: &'static str,
-    pub sprite: [&'static str; SPRITE_SIZE],
+    pub face: Face,
 }
 
 pub struct MascotColor {
@@ -22,201 +42,48 @@ pub struct MascotColor {
 pub const MASCOTS: &[Mascot] = &[
     Mascot {
         id: "bolt",
-        name: "Dr. Volt",
-        sprite: [
-            "..b..b.bb.b..b..",
-            ".b.bbbbbbbbbb.b.",
-            "bbbbbbbbbbbbbbbb",
-            ".bbbsssssssssbb.",
-            ".bbppppppppppbb.",
-            "..kkkkkkkkkkkk..",
-            "..kggkppppkggk..",
-            "..kkkkppppkkkk..",
-            "...pppppppppp...",
-            "...ppkwwwwkpp...",
-            "....pppppppp....",
-            ".....pppppp.....",
-            "..wwwcwkkwcwww..",
-            ".wwwwcwkkwcwwww.",
-            ".wwwwcwwwwcwwww.",
-            ".wwwwcwwwwcwwww.",
-        ],
+        name: "Sunny",
+        face: Face::Smile,
     },
     Mascot {
         id: "ace",
-        name: "Dr. Flask",
-        sprite: [
-            "....bbbbbbbbb...",
-            "..bbbbbbbbbbbbb.",
-            ".bbbbbbbbbbsssbb",
-            ".bbspppppppppsbb",
-            "..bppppppppppb..",
-            "..pkkkppppkkkp..",
-            "..pkgkppppkgkp..",
-            "..pkkkppppkkkp..",
-            "..pppppppppppp..",
-            "...pppkkkkppp...",
-            "....pppppppp.t..",
-            "...wwwwwwww.ttt.",
-            "..wwwcwwcwwwtgt.",
-            ".wwwwcwwcwwwttt.",
-            ".wwwwcwwcwwww...",
-            ".wwwwcwwcwwww...",
-        ],
+        name: "Pip",
+        face: Face::Tall,
     },
     Mascot {
         id: "brawler",
-        name: "Dr. Frizz",
-        sprite: [
-            "....bbbbbbbb....",
-            "..bbbbbbbbbbbb..",
-            ".bbbbbbbbbbbbbb.",
-            "bbbbbbsbbsbbbbbb",
-            "bbbbsssssssbbbbb",
-            "bbbppppppppppbbb",
-            "bbkkkkkppkkkkkbb",
-            "bbkggkkkkkkggkbb",
-            "bbkkkkppppkkkkbb",
-            ".bbppppppppppbb.",
-            "..bpppkkkkppb...",
-            "....pppwwppp....",
-            ".....pppppp.....",
-            "..wwwcwkkwcwww..",
-            ".wwwwcwkkwcwwww.",
-            ".wwwwcwwwwcwwww.",
-        ],
+        name: "Visor",
+        face: Face::Visor,
     },
     Mascot {
         id: "hex",
-        name: "Dr. Hex",
-        sprite: [
-            "......kggk......",
-            ".....kkkkkk.....",
-            "....pppppppp....",
-            "...pppppppppp...",
-            "b.pppppppppppp.b",
-            "bbppppppppppppbb",
-            "bbpkkkppppkkkpbb",
-            "bbpkgkkkkkkgkpbb",
-            "bbpkkkppppkkkpbb",
-            "b.pppppkkppppp.b",
-            "...pppppppppp...",
-            "...ppkkkkkkpp...",
-            "....pppppppp....",
-            "..wwwcwwwwcwww..",
-            ".wwwwcwkkwcwwww.",
-            ".wwwwcwwwwcwwww.",
-        ],
+        name: "Cyclo",
+        face: Face::Cyclops,
     },
     Mascot {
         id: "squire",
-        name: "Igor",
-        sprite: [
-            "...b...bb...b...",
-            "..bbb.bbbb.bbb..",
-            "..bbbbbbbbbbbb..",
-            "..kkkkkkkkkkkk..",
-            "..kggkbbbbkggk..",
-            "..kkkkkkkkkkkk..",
-            "..pppppppppppp..",
-            "..ppkkppppkkpp..",
-            "..ppwkppppwkpp..",
-            "..pppppppppppp..",
-            "..pkpkpkpkpkpp..",
-            "...pppwwpppp....",
-            "....pppppp......",
-            "..wwwcwwwwcwww..",
-            ".wwwwcwkkwcwwww.",
-            ".wwwwcwwwwcwwww.",
-        ],
+        name: "Beam",
+        face: Face::Happy,
     },
     Mascot {
         id: "shade",
-        name: "Dr. Shade",
-        sprite: [
-            "................",
-            ".....ssssss.....",
-            "...ssbbbbbbss...",
-            "..sbbbbbbbbbbs..",
-            "..bbbbbbbbbbbb..",
-            "..bkkkkkkkkkkb..",
-            "..bkggggggggkb..",
-            "..bkggggggggkb..",
-            "..bkkkkkkkkkkb..",
-            "..bbbbbbbbbbbb..",
-            "..sbbkbkkbkbbs..",
-            "...sbbbbbbbbs...",
-            ".....ssssss.....",
-            "..wwwcwkkwcwww..",
-            ".wwwwcwkkwcwwww.",
-            ".wwwwcwwwwcwwww.",
-        ],
+        name: "Shades",
+        face: Face::Shades,
     },
     Mascot {
         id: "rogue",
-        name: "Dr. Patch",
-        sprite: [
-            ".......bb.......",
-            "......bbbb......",
-            ".....bbbbbb.....",
-            "......bbbb......",
-            "...pppppppppp...",
-            "..pppppppppppp..",
-            "..kkkkkkkkkkkk..",
-            "..kkkkkpppkggk..",
-            "..kkkkkpppkkkk..",
-            "..pkkppppppppp..",
-            "...ppppppkkkpp..",
-            "...pppppppppp...",
-            "....pppppppp....",
-            "..wwwcwwwwcwww..",
-            ".wwwwcwkkwcwwww.",
-            ".wwwwcwwwwcwwww.",
-        ],
+        name: "Wink",
+        face: Face::Wink,
     },
     Mascot {
         id: "viking",
-        name: "Dr. Whisk",
-        sprite: [
-            "..b.b.bbbb.b.b..",
-            "..bbbbbbbbbbbb..",
-            ".bbbbbbbbbbbbbb.",
-            ".bbppppppppppbb.",
-            "..pppppppppppp..",
-            "..pkkkkkkkkkkp..",
-            "..pkggkppkggkp..",
-            "..pkkkkppkkkkp..",
-            "..pppppppppppp..",
-            ".bbbbbbppbbbbbb.",
-            "bbbbbbbbbbbbbbbb",
-            "bb.ppkkkkkkpp.bb",
-            "....pppppppp....",
-            "..wwwcwwwwcwww..",
-            ".wwwwcwkkwcwwww.",
-            ".wwwwcwwwwcwwww.",
-        ],
+        name: "Doze",
+        face: Face::Sleepy,
     },
     Mascot {
         id: "bones",
-        name: "Dr. Bones",
-        sprite: [
-            "..b.b.bbbb.b.b..",
-            ".bbbbbbbbbbbbbb.",
-            ".bbswwwwwwwwsbb.",
-            "..wwwwwwwwwwww..",
-            "..wwwwwwwwwwww..",
-            "..kkkkkkkkkkkk..",
-            "..kggkwwwwkggk..",
-            "..kkkkwwwwkkkk..",
-            "..wwwwwkkwwwww..",
-            "...wwwwwwwwww...",
-            "...wkwkwkwkww...",
-            "....wkwkwkw.....",
-            ".....ccccc......",
-            "..wwwcwkkwcwww..",
-            ".wwwwcwkkwcwwww.",
-            ".wwwwcwwwwcwwww.",
-        ],
+        name: "Rosy",
+        face: Face::Blush,
     },
 ];
 
@@ -263,18 +130,6 @@ pub const COLORS: &[MascotColor] = &[
     },
 ];
 
-fn fixed_color(pixel: u8) -> Option<u32> {
-    match pixel {
-        b'k' => Some(0x1d1418),
-        b'w' => Some(0xffffff),
-        b'c' => Some(0xb9c3d1),
-        b'g' => Some(0x7fe9ff),
-        b't' => Some(0xff7aa8),
-        b'p' => Some(0xf2c199),
-        _ => None,
-    }
-}
-
 fn hash(text: &str) -> u32 {
     text.bytes().fold(0x811c_9dc5, |hash, byte| {
         (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
@@ -290,9 +145,9 @@ pub fn default_avatar(seed: &str) -> ZotAvatar {
     }
 }
 
-/// Horizontal runs of `(x, y, width, rgb)` for one avatar, unknown ids falling
-/// back to the first character and colour.
-pub fn sprite_runs(avatar: &ZotAvatar) -> Vec<(u8, u8, u8, u32)> {
+/// The mascot and colour an avatar draws, unknown ids falling back to the
+/// first of each so a Zapper saved by a newer client still has a face.
+pub fn resolve(avatar: &ZotAvatar) -> (&'static Mascot, &'static MascotColor) {
     let mascot = MASCOTS
         .iter()
         .find(|m| m.id == avatar.mascot)
@@ -301,28 +156,7 @@ pub fn sprite_runs(avatar: &ZotAvatar) -> Vec<(u8, u8, u8, u32)> {
         .iter()
         .find(|c| c.id == avatar.color)
         .unwrap_or(&COLORS[0]);
-    let mut runs = Vec::new();
-    for (y, row) in mascot.sprite.iter().enumerate() {
-        let row = row.as_bytes();
-        let mut x = 0;
-        while x < row.len() {
-            let pixel = row[x];
-            let mut end = x + 1;
-            while end < row.len() && row[end] == pixel {
-                end += 1;
-            }
-            let rgb = match pixel {
-                b'b' => Some(color.body),
-                b's' => Some(color.shade),
-                other => fixed_color(other),
-            };
-            if let Some(rgb) = rgb {
-                runs.push((x as u8, y as u8, (end - x) as u8, rgb));
-            }
-            x = end;
-        }
-    }
-    runs
+    (mascot, color)
 }
 
 #[cfg(test)]
@@ -330,17 +164,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sprites_are_square_and_only_use_known_pixels() {
-        for mascot in MASCOTS {
-            for row in mascot.sprite {
-                assert_eq!(row.len(), SPRITE_SIZE, "{}", mascot.id);
-                assert!(
-                    row.bytes().all(|p| b".bskwcgtp".contains(&p)),
-                    "{}",
-                    mascot.id
-                );
-            }
-        }
+    fn mascot_ids_are_unique() {
+        let mut ids: Vec<_> = MASCOTS.iter().map(|m| m.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), MASCOTS.len());
     }
 
     #[test]
@@ -350,6 +178,7 @@ mod tests {
             mascot: "gone".into(),
             color: "gone".into(),
         };
-        assert!(!sprite_runs(&unknown).is_empty());
+        let (mascot, color) = resolve(&unknown);
+        assert_eq!((mascot.id, color.id), (MASCOTS[0].id, COLORS[0].id));
     }
 }

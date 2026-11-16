@@ -30,7 +30,7 @@ impl ZotSupervisor {
                 tokio::select! { _ = tick.tick() => {}, value = changed.changed() => { if value.is_err() { break; } }, value = statuses.changed() => { if value.is_err() { break; } } }
                 let bindings=match zots.sync_worker_bindings().await {Ok(bindings)=>bindings,Err(error)=>{tracing::warn!(%error,"worker binding reconciliation failed");continue;}};
                 if let Err(error) = reconcile(&zots, &sessions, &workspace, &docs, &bindings) {
-                    tracing::warn!(%error, "Zot supervision needs reconciliation");
+                    tracing::warn!(%error, "Zapper supervision needs reconciliation");
                 }
             }
         })))
@@ -71,7 +71,7 @@ fn reconcile(
         .inner
         .admission
         .lock()
-        .map_err(|_| anyhow::anyhow!("Zot admission unavailable"))?;
+        .map_err(|_| anyhow::anyhow!("Zapper admission unavailable"))?;
     let all = zots.list()?;
     let mut statuses = workspace.read_sessions()?;
     let local = sessions.watch_sessions().borrow().clone();
@@ -122,7 +122,7 @@ fn reconcile(
                 .inner
                 .db
                 .lock()
-                .map_err(|_| anyhow::anyhow!("Zot storage unavailable"))?;
+                .map_err(|_| anyhow::anyhow!("Zapper storage unavailable"))?;
             let tx = db.transaction()?;
             let mut stmt = tx.prepare("SELECT o.id,d.baseline,d.sent_at FROM zot_outbox o JOIN zot_delivery d ON d.id=o.id WHERE o.zot=?1 AND o.chat=?2 AND o.phase='sent'")?;
             let deliveries = stmt
@@ -236,7 +236,7 @@ fn reconcile(
                     .inner
                     .db
                     .lock()
-                    .map_err(|_| anyhow::anyhow!("Zot storage unavailable"))?
+                    .map_err(|_| anyhow::anyhow!("Zapper storage unavailable"))?
                     .query_row("SELECT 1 FROM zot_notifications WHERE id=?1", [&id], |_| {
                         Ok(())
                     })
@@ -288,7 +288,7 @@ fn reconcile(
                     zots.inner
                         .db
                         .lock()
-                        .map_err(|_| anyhow::anyhow!("Zot storage unavailable"))?
+                        .map_err(|_| anyhow::anyhow!("Zapper storage unavailable"))?
                         .execute("INSERT OR IGNORE INTO zot_notifications VALUES(?1)", [id])?;
                 }
             }
@@ -359,7 +359,7 @@ fn reconcile(
                 .inner
                 .db
                 .lock()
-                .map_err(|_| anyhow::anyhow!("Zot storage unavailable"))?;
+                .map_err(|_| anyhow::anyhow!("Zapper storage unavailable"))?;
             let tx = db.transaction()?;
             tx.execute(
                 "INSERT OR IGNORE INTO zot_delivery VALUES(?1,?2,?3)",
@@ -433,7 +433,7 @@ fn reconcile(
                 ZotAction::StopWorker { .. } | ZotAction::ArchiveWorker { .. } => {
                     SessionCommandPayload::Interrupt {}
                 }
-                _ => bail!("unsupported Zot delivery"),
+                _ => bail!("unsupported Zapper delivery"),
             };
             docs.queue_identified_command(&chat, payload, vec![], id.clone())?;
             if matches!(action, ZotAction::ArchiveWorker { .. }) {

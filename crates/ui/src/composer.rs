@@ -13837,6 +13837,7 @@ impl Render for Composer {
         let permission = self
             .render_permission_control(&theme, narrow, cx)
             .opacity(beneath_voice);
+        let zapper_coordinator = self.state.read(cx).selected_chat_is_zot_coordinator();
         let plan_chip = self
             .render_plan_chip(&theme, cx)
             .map(|chip| chip.opacity(beneath_voice));
@@ -13975,7 +13976,9 @@ impl Render for Composer {
                             .items_center()
                             .gap(px(ACTION_UTILITY_GAP))
                             .child(attach)
-                            .child(permission)
+                            // A Zapper's coordinator always runs at the access
+                            // level the engine pins, so there's nothing to pick.
+                            .when(!zapper_coordinator, |el| el.child(permission))
                             .children(plan_chip)
                             .when(
                                 !self.side_chat && zuse_viewport::cloud_gate::enabled(),

@@ -361,7 +361,7 @@ pub(super) fn report(tx: &rusqlite::Transaction<'_>, event: &ZotEvent) -> Result
         zot.revision = zot
             .revision
             .checked_add(1)
-            .context("Zot revision exhausted")?;
+            .context("Zapper revision exhausted")?;
         tx.execute(
             "UPDATE zots SET state=?2 WHERE id=?1",
             params![zot.id, serde_json::to_string(&zot)?],
@@ -801,7 +801,7 @@ mod attribution_tests {
             visible,
             "Activity update\nVerification passed; ready for review."
         );
-        assert!(request.prompt.contains("acknowledge handled events"));
+        assert!(request.prompt.contains("zapper_acknowledge"));
         assert!(request.prompt.contains("untrusted evidence"));
     }
     #[test]
@@ -823,7 +823,12 @@ mod attribution_tests {
             zuse_protocol::presentation::zot_message::parse(&request.prompt).unwrap();
         assert_eq!(sender.name, "Release");
         assert_eq!(display, "Implement the issue");
-        assert!(request.prompt.contains("You are a worker for Zot release"));
+        assert!(
+            request
+                .prompt
+                .contains("You are a thread working for the Zapper \"Release\" (zotId release")
+        );
+        assert!(!request.prompt.contains("Zot "));
         let once = request.prompt.clone();
         store.prepare_request("worker", &mut request).unwrap();
         assert_eq!(request.prompt, once);

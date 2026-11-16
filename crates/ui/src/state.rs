@@ -920,6 +920,8 @@ struct PendingChatArchive {
 pub struct AppState {
     pub zots: Vec<zuse_protocol::zots::Zot>,
     zot_watches: HashMap<String, Task<()>>,
+    /// Devices whose Zapper list has arrived since the runtime started.
+    zots_loaded: HashSet<String>,
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
     /// in place, but changing this scope requires assembling a new runtime.
@@ -1141,6 +1143,7 @@ impl AppState {
         Self {
             zots: Vec::new(),
             zot_watches: HashMap::new(),
+            zots_loaded: HashSet::new(),
             connection: ConnectionStatus::Connecting,
             workspace_scope: None,
             auth: None,
@@ -1687,6 +1690,28 @@ impl AppState {
         })
     }
 
+    /// Whether a chat belongs under the Zappers section rather than its
+    /// project: a Zapper's coordinator or thread, a side chat of one, or a
+    /// conversation with a Zapper id the Zapper list hasn't reported yet
+    /// (just delegated, or the list still loading after a reconnect).
+    pub fn zot_hides_chat(&self, chat: &Chat) -> bool {
+        use zuse_protocol::presentation::zot_panel::{zapper_chat_id, zot_owns_chat};
+        let owned = |id: &str| zot_owns_chat(&self.zots, id);
+        if owned(&chat.id)
+            || chat.parent_chat_id.as_deref().is_some_and(owned)
+            || chat.thread_id.as_deref().is_some_and(owned)
+        {
+            return true;
+        }
+        if !zapper_chat_id(&chat.id) {
+            return false;
+        }
+        // A released thread keeps its id but rejoins its project once the
+        // Zapper list is in and the delegation race has long passed.
+        let fresh = (Utc::now() - chat.created_at).num_minutes() < 5;
+        fresh || self.zots_loaded.is_empty()
+    }
+
     pub fn apply_zots(&mut self, zots: Vec<zuse_protocol::zots::Zot>) -> bool {
         if self.zots == zots {
             return false;
@@ -1745,6 +1770,7 @@ impl AppState {
                             .update(cx, |state, cx| {
                                 state.zots.retain(|z| z.config.home_device_id != target);
                                 state.zots.extend(zots);
+                                state.zots_loaded.insert(target.clone());
                                 state.zots.sort_by(|a, b| a.config.name.cmp(&b.config.name));
                                 cx.notify();
                             })
@@ -2671,7 +2697,7 @@ impl AppState {
         let mut chats: Vec<&Chat> = self
             .visible_chats()
             .filter(|c| c.space_id.as_deref() == Some(space_id))
-            .filter(|c| !zuse_protocol::presentation::zot_panel::zot_owns_chat(&self.zots, &c.id))
+            .filter(|c| !self.zot_hides_chat(c))
             .collect();
         sort_tabs(&mut chats);
         chats
@@ -2766,9 +2792,7 @@ impl AppState {
         rows.into_iter()
             .filter(|(_, chat)| chat.thread_id.is_none() && in_filter(chat))
             // Zots list their own threads; projects don't repeat them.
-            .filter(|(_, chat)| {
-                !zuse_protocol::presentation::zot_panel::zot_owns_chat(&self.zots, &chat.id)
-            })
+            .filter(|(_, chat)| !self.zot_hides_chat(chat))
             .map(|(status, chat)| {
                 (
                     thread_status
@@ -3293,6 +3317,7 @@ impl AppState {
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
         self.zots.clear();
         self.zot_watches.clear();
+        self.zots_loaded.clear();
         self.engine = None;
         *self.desktop_epoch.lock().unwrap() = None;
         self.desktop_events = None;

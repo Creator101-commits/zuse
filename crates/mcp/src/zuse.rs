@@ -163,7 +163,7 @@ impl Zuse {
         let token = self
             .control_token
             .as_ref()
-            .context("Zot tools require an engine-issued session credential")?;
+            .context("Zapper tools require an engine-issued session credential")?;
         self.call_once(
             zuse_protocol::control::CALL,
             json!({"token":token,"method":method,"params":params}),

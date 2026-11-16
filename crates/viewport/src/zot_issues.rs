@@ -1,4 +1,6 @@
 //! The same issue surface is embedded by the browser and native Zot inspectors.
+use crate::tooltip::TooltipExt as _;
+use crate::zapper_avatar::{person_avatar, unassigned_avatar, zapper_avatar};
 use crate::{assets::icon, input::TextInput, palette::rgb};
 use gpui::{prelude::*, *};
 use std::collections::{HashMap, HashSet};
@@ -6,14 +8,29 @@ use zuse_protocol::zots::*;
 
 const TEXT: u32 = 0xe5e5e5;
 const MUTED: u32 = 0x777777;
-const SURFACE: u32 = 0x191919;
 const BORDER: u32 = 0x343434;
+const FAINT: u32 = 0x5c5c5c;
+const HOVER: u32 = 0x1f1f1f;
+const MENU: u32 = 0x1c1c1c;
 #[derive(Clone)]
 pub enum IssueEvent {
     Command(ZotAction, u32),
     OpenThread(String),
     OpenDocument(ZotFile),
     OpenPullRequest(String),
+    /// The overview asks the host to start a thread for this Zapper.
+    NewThread,
+    /// The overview's "View all" asks the host to switch to the Issues page.
+    ShowIssues,
+}
+/// How a Zapper thread is doing, as the host sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadState {
+    Working,
+    NeedsYou,
+    Idle,
+    /// Archived threads leave the overview.
+    Archived,
 }
 pub struct IssuePanel {
     zot: Zot,
@@ -21,8 +38,10 @@ pub struct IssuePanel {
     overview: bool,
     selected: Option<String>,
     assigned_only: bool,
-    mentioned_only: bool,
     collapsed: HashSet<String>,
+    thread_states: HashMap<String, ThreadState>,
+    /// The signed-in person's name, for their avatar on comments.
+    user_name: Option<String>,
     menu: Option<&'static str>,
     editor: Option<Editor>,
     search: Option<Entity<TextInput>>,
@@ -74,7 +93,8 @@ impl IssuePanel {
             overview,
             selected: None,
             assigned_only: false,
-            mentioned_only: false,
+            thread_states: HashMap::new(),
+            user_name: None,
             collapsed: ["Done".to_owned(), "Canceled".to_owned()]
                 .into_iter()
                 .collect(),
@@ -135,6 +155,37 @@ impl IssuePanel {
             self.thread_titles = titles;
             cx.notify();
         }
+    }
+    pub fn thread_states(&mut self, states: HashMap<String, ThreadState>, cx: &mut Context<Self>) {
+        if self.thread_states != states {
+            self.thread_states = states;
+            cx.notify();
+        }
+    }
+    pub fn user_name(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        if self.user_name != name {
+            self.user_name = name;
+            cx.notify();
+        }
+    }
+    fn thread_state(&self, id: &str) -> ThreadState {
+        self.thread_states
+            .get(id)
+            .copied()
+            .unwrap_or(ThreadState::Idle)
+    }
+    /// The assignee's picture: this Zapper's face, or an empty ring.
+    fn assignee_avatar(&self, assigned: bool, size: f32) -> Div {
+        if assigned {
+            zapper_avatar(&self.avatar(), size)
+        } else {
+            unassigned_avatar(size)
+        }
+    }
+    fn avatar(&self) -> ZotAvatar {
+        self.zot.config.avatar.clone().unwrap_or_else(|| {
+            zuse_protocol::presentation::zot_mascots::default_avatar(&self.zot.id)
+        })
     }
     fn thread_title(&self, id: &str) -> String {
         self.thread_titles
@@ -401,6 +452,11 @@ impl IssuePanel {
     }
     fn issue_row(&self, issue: &ZotIssue, cx: &mut Context<Self>) -> AnyElement {
         let id = issue.id.clone();
+        let assignee = if issue.details.assigned {
+            self.zot.config.name.clone()
+        } else {
+            "No assignee".to_owned()
+        };
         row()
             .id(SharedString::from(format!("issue-row-{id}")))
             .role(Role::Button)
@@ -410,53 +466,38 @@ impl IssuePanel {
                 issue.details.title
             )))
             .w_full()
+            .h(px(34.))
             .gap(px(10.))
             .px(px(10.))
-            .py(px(if self.overview { 6. } else { 8. }))
-            .line_height(px(20.))
-            .rounded(px(7.))
+            .rounded(px(6.))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0x232323)))
+            .hover(|s| s.bg(rgb(HOVER)))
+            .child(priority_icon(issue.details.priority))
             .child(status_icon(issue.details.status))
             .child(
-                column()
+                div()
                     .flex_1()
                     .min_w_0()
-                    .gap(px(3.))
-                    .child(div().truncate().child(issue.details.title.clone()))
-                    .when(self.overview, |d| {
-                        d.child(
-                            div()
-                                .truncate()
-                                .text_color(rgb(MUTED))
-                                .text_size(px(12.))
-                                .child(format!(
-                                    "{}{}",
-                                    issue.code(),
-                                    if issue.threads.is_empty() {
-                                        String::new()
-                                    } else {
-                                        format!(
-                                            "  with {} thread{}",
-                                            issue.threads.len(),
-                                            if issue.threads.len() == 1 { "" } else { "s" }
-                                        )
-                                    }
-                                )),
-                        )
-                    }),
+                    .truncate()
+                    .child(issue.details.title.clone()),
             )
             .when_some(issue.pull_requests.first(), |d, pr| d.child(pr_badge(pr)))
-            .child(priority_icon(issue.details.priority))
-            .child(icon("chat-round-line").size(px(12.)).text_color(rgb(MUTED)))
-            .when(!self.overview, |d| {
-                d.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED))
-                        .child(relative_time(issue.updated_at)),
-                )
-            })
+            .child(
+                div()
+                    .id(SharedString::from(format!("issue-row-assignee-{id}")))
+                    .tip(assignee)
+                    .child(self.assignee_avatar(issue.details.assigned, 16.)),
+            )
+            .child(
+                div()
+                    .w(px(30.))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .text_size(px(11.5))
+                    .text_color(rgb(FAINT))
+                    .child(short_time(issue.updated_at)),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected = Some(id.clone());
                 this.editor = None;
@@ -465,67 +506,105 @@ impl IssuePanel {
             }))
             .into_any_element()
     }
+    fn matches_query(&self, issue: &ZotIssue, query: &str) -> bool {
+        query.is_empty()
+            || format!(
+                "{} {} {}",
+                issue.code(),
+                issue.details.title,
+                issue.details.description
+            )
+            .to_lowercase()
+            .contains(query)
+    }
+    /// The Issues page: filter tabs, then issues grouped by status.
     fn list(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut body = column()
-            .gap(px(12.))
-            .when(!self.overview, |d| d.mt(px(-12.)));
-        if !self.overview {
-            let mut toolbar = row().gap(px(6.));
-            for (index, label) in [(0, "All"), (1, "Assigned to Zapper"), (2, "Mentioned")] {
-                let selected = match index {
-                    1 => self.assigned_only,
-                    2 => self.mentioned_only,
-                    _ => !self.assigned_only && !self.mentioned_only,
-                };
-                toolbar = toolbar.child(
-                    button(format!("issues-filter-{index}"), label)
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .py(px(6.))
-                        .text_size(px(12.))
-                        .when(selected, |d| d.bg(rgb(0x232323)))
-                        .when(!selected, |d| d.text_color(rgb(MUTED)))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.assigned_only = index == 1;
-                            this.mentioned_only = index == 2;
-                            cx.notify();
-                        })),
-                );
-            }
-            body = body.child(
-                toolbar
+        if self.overview {
+            return self.overview_page(cx);
+        }
+        let mut body = column().gap(px(2.));
+        let assigned = self
+            .zot
+            .issues
+            .iter()
+            .filter(|i| i.details.assigned)
+            .count();
+        let mut tabs = row().gap(px(2.));
+        for (index, label, count) in [(0, "All", self.zot.issues.len()), (1, "Assigned", assigned)]
+        {
+            let selected = (index == 1) == self.assigned_only;
+            tabs = tabs.child(
+                button(format!("issues-filter-{index}"), "")
+                    .aria_label(label)
+                    .h(px(28.))
+                    .py(px(0.))
+                    .px(px(10.))
+                    .gap(px(6.))
+                    .text_size(px(12.5))
+                    .when(selected, |d| d.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                    .when(!selected, |d| d.text_color(rgb(MUTED)))
+                    .when(index == 1, |d| d.child(self.assignee_avatar(true, 14.)))
+                    .child(label)
+                    .child(
+                        div()
+                            .text_color(rgb(FAINT))
+                            .text_size(px(11.5))
+                            .child(count.to_string()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.assigned_only = index == 1;
+                        cx.notify();
+                    })),
+            );
+        }
+        let icon_button = |id: &'static str, label: &'static str, glyph: &'static str| {
+            plain_button(id, "")
+                .aria_label(label)
+                .tip(label)
+                .size(px(28.))
+                .p(px(0.))
+                .justify_center()
+                .text_color(rgb(MUTED))
+                .hover(|d| d.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                .child(icon(glyph).size(px(14.)))
+        };
+        body =
+            body.child(
+                row()
+                    .pb(px(8.))
+                    .child(tabs)
                     .child(div().flex_1())
                     .child(
-                        button("issues-search", "")
-                            .aria_label("Search issues")
-                            .child(icon("magnifer").size(px(12.)))
-                            .on_click(cx.listener(|this, _, w, cx| {
+                        icon_button("issues-search", "Search issues", "magnifer")
+                            .when(self.searching, |d| d.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                            .on_click(cx.listener(|this, _, _, cx| {
                                 this.searching = !this.searching;
                                 if this.searching {
                                     if let Some(input) = &this.search {
                                         input.update(cx, |i, cx| i.focus(cx));
                                     }
                                 }
-                                let _ = w;
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        button("issues-create", "")
-                            .aria_label("New issue")
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .child(icon("plus").size(px(12.)))
-                            .on_click(
-                                cx.listener(|this, _, w, cx| this.open(EditorKind::Create, w, cx)),
-                            ),
-                    ),
+                    .child(icon_button("issues-create", "New issue", "plus").on_click(
+                        cx.listener(|this, _, w, cx| this.open(EditorKind::Create, w, cx)),
+                    )),
             );
-            if self.searching {
-                if let Some(search) = &self.search {
-                    body = body.child(input_box(search.clone(), 36.));
-                }
+        if self.searching {
+            if let Some(search) = &self.search {
+                body = body.child(div().pb(px(8.)).child(input_box(search.clone(), 34.)));
             }
+        }
+        if self.zot.issues.is_empty() {
+            return body
+                .child(self.empty_state(
+                    "No issues yet",
+                    "Write down what needs doing and assign it to this Zapper. It starts a thread for each issue and reports back here.",
+                    false,
+                    cx,
+                ))
+                .into_any_element();
         }
         let query = self
             .search
@@ -540,161 +619,349 @@ impl IssuePanel {
                 .iter()
                 .filter(|i| {
                     i.details.status == status
-                        && (self.overview || !self.assigned_only || i.details.assigned)
-                        && (self.overview
-                            || !self.mentioned_only
-                            || format!(
-                                "{} {} {}",
-                                i.details.title,
-                                i.details.description,
-                                i.activity
-                                    .iter()
-                                    .map(|a| a.text.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(" ")
-                            )
-                            .to_lowercase()
-                            .contains(&format!("@{}", self.zot.config.name.to_lowercase())))
-                        && (query.is_empty()
-                            || format!(
-                                "{} {} {}",
-                                i.code(),
-                                i.details.title,
-                                i.details.description
-                            )
-                            .to_lowercase()
-                            .contains(&query))
+                        && (!self.assigned_only || i.details.assigned)
+                        && self.matches_query(i, &query)
                 })
                 .collect();
-            if issues.is_empty()
-                && !matches!(status, ZotIssueStatus::Done | ZotIssueStatus::Canceled)
-            {
-                continue;
-            }
-            if self.overview && issues.is_empty() {
+            // Done and Canceled keep a header so finished work stays findable.
+            if issues.is_empty() && !status.terminal() {
                 continue;
             }
             let key = status.label().to_owned();
             let closed = self.collapsed.contains(&key);
-            body = body.child(section(
-                if closed && issues.is_empty() {
-                    status.label().to_owned()
-                } else {
-                    format!("{}  {}", status.label(), issues.len())
-                },
-                &key,
-                closed,
-                cx,
-            ));
+            body = body.child(section(status, issues.len(), &key, closed, cx));
             if !closed {
                 for i in issues {
                     body = body.child(self.issue_row(i, cx));
                 }
             }
         }
-        if self.zot.issues.is_empty() {
-            body=body.child(div().px(px(10.)).py(px(24.)).text_color(rgb(MUTED)).child("Create an issue, assign it to this Zapper, and track its threads and pull requests here."));
+        body.into_any_element()
+    }
+    /// A calm placeholder with the next step as a button.
+    fn empty_state(
+        &self,
+        title: &'static str,
+        body: &'static str,
+        with_thread: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        column()
+            .items_center()
+            .gap(px(6.))
+            .px(px(24.))
+            .py(px(36.))
+            .rounded(px(10.))
+            .border_1()
+            .border_dashed()
+            .border_color(rgb(0x2a2a2a))
+            .child(zapper_avatar(&self.avatar(), 36.).mb(px(6.)))
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(TEXT))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .max_w(px(320.))
+                    .text_center()
+                    .text_size(px(12.5))
+                    .line_height(px(18.))
+                    .text_color(rgb(MUTED))
+                    .child(body),
+            )
+            .child(
+                row()
+                    .gap(px(8.))
+                    .pt(px(10.))
+                    .child(
+                        plain_button("empty-new-issue", "")
+                            .aria_label("New issue")
+                            .h(px(28.))
+                            .px(px(12.))
+                            .py(px(0.))
+                            .gap(px(6.))
+                            .bg(rgb(0xe8e8e8))
+                            .text_color(rgb(0x111111))
+                            .hover(|d| d.bg(rgb(0xffffff)))
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(icon("plus").size(px(12.)).text_color(rgb(0x111111)))
+                            .child("New issue")
+                            .on_click(
+                                cx.listener(|this, _, w, cx| this.open(EditorKind::Create, w, cx)),
+                            ),
+                    )
+                    .when(with_thread, |d| {
+                        d.child(
+                            button("empty-new-thread", "")
+                                .aria_label("New thread")
+                                .h(px(28.))
+                                .px(px(12.))
+                                .py(px(0.))
+                                .gap(px(6.))
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .text_size(px(12.5))
+                                .child(icon("chat-round-line").size(px(12.)))
+                                .child("New thread")
+                                .on_click(
+                                    cx.listener(|_, _, _, cx| cx.emit(IssueEvent::NewThread)),
+                                ),
+                        )
+                    }),
+            )
+    }
+    /// A titled block of the overview, with an optional trailing action.
+    fn block(&self, title: &str, count: usize, action: Option<AnyElement>) -> Div {
+        column().gap(px(2.)).child(
+            row()
+                .h(px(26.))
+                .px(px(10.))
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .child(title.to_owned())
+                .child(div().text_color(rgb(FAINT)).child(count.to_string()))
+                .child(div().flex_1())
+                .children(action),
+        )
+    }
+    fn link(&self, id: &'static str, label: &'static str) -> Stateful<Div> {
+        plain_button(id, label)
+            .h(px(22.))
+            .py(px(0.))
+            .px(px(6.))
+            .text_size(px(12.))
+            .text_color(rgb(MUTED))
+            .hover(|d| d.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+    }
+    /// The overview: open work first, then live threads, pull requests and
+    /// documents. Empty blocks are left out instead of showing a zero.
+    fn overview_page(&self, cx: &mut Context<Self>) -> AnyElement {
+        let open: Vec<&ZotIssue> = ZotIssueStatus::ALL
+            .iter()
+            .filter(|s| !s.terminal())
+            .flat_map(|s| {
+                self.zot
+                    .issues
+                    .iter()
+                    .filter(move |i| i.details.status == *s)
+            })
+            .collect();
+        let finished = self.zot.issues.len() - open.len();
+        let threads: Vec<&ZotWorker> = self
+            .zot
+            .workers
+            .iter()
+            .filter(|w| self.thread_state(&w.chat_id) != ThreadState::Archived)
+            .collect();
+        let prs: Vec<_> = self
+            .zot
+            .issues
+            .iter()
+            .filter(|i| !i.details.status.terminal())
+            .flat_map(|i| i.pull_requests.iter())
+            .collect();
+        let files: Vec<_> = self
+            .files
+            .iter()
+            .filter(|f| f.path != "INSTRUCTIONS.md" && !f.content.trim().is_empty())
+            .collect();
+        let mut body = column().gap(px(18.));
+        if open.is_empty() && threads.is_empty() {
+            body = body.child(self.empty_state(
+                if finished > 0 { "All caught up" } else { "Nothing on the board yet" },
+                if finished > 0 {
+                    "Every issue is done. Add the next one, or start a thread for something quick."
+                } else {
+                    "Add an issue for this Zapper to pick up, or start a thread for something quick."
+                },
+                true,
+                cx,
+            ));
         }
-        if self.overview {
-            body = body.child(group_header(format!("Threads  {}", self.zot.workers.len())));
-            for worker in &self.zot.workers {
+        if !open.is_empty() {
+            const SHOWN: usize = 8;
+            let more = open.len() > SHOWN;
+            let mut issues = self.block(
+                "Open issues",
+                open.len(),
+                Some(
+                    row()
+                        .gap(px(2.))
+                        .when(more || finished > 0, |d| {
+                            d.child(self.link("overview-all-issues", "View all").on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(IssueEvent::ShowIssues)),
+                            ))
+                        })
+                        .child(
+                            plain_button("overview-new-issue", "")
+                                .aria_label("New issue")
+                                .tip("New issue")
+                                .size(px(22.))
+                                .p(px(0.))
+                                .justify_center()
+                                .text_color(rgb(MUTED))
+                                .hover(|d| d.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                .child(icon("plus").size(px(12.)))
+                                .on_click(cx.listener(|this, _, w, cx| {
+                                    this.open(EditorKind::Create, w, cx)
+                                })),
+                        )
+                        .into_any_element(),
+                ),
+            );
+            for issue in open.into_iter().take(SHOWN) {
+                issues = issues.child(self.issue_row(issue, cx));
+            }
+            body = body.child(issues);
+        }
+        if !threads.is_empty() {
+            let mut list = self.block("Threads", threads.len(), None);
+            for worker in threads {
                 let id = worker.chat_id.clone();
-                body = body.child(
+                let state = self.thread_state(&id);
+                let codes = self
+                    .zot
+                    .issues
+                    .iter()
+                    .filter(|i| i.threads.contains(&id))
+                    .map(ZotIssue::code)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let (dot, label) = match state {
+                    ThreadState::Working => (0x00b80a, "Working"),
+                    ThreadState::NeedsYou => (0xd9bf60, "Needs you"),
+                    _ => (0x4a4a4a, "Idle"),
+                };
+                list = list.child(
                     row()
                         .id(SharedString::from(format!("overview-thread-{id}")))
+                        .h(px(34.))
                         .gap(px(10.))
                         .px(px(10.))
-                        .py(px(8.))
-                        .rounded(px(7.))
+                        .rounded(px(6.))
                         .cursor_pointer()
-                        .hover(|d| d.bg(rgb(0x232323)))
-                        .child(icon("chat-round-line").size(px(16.)))
+                        .hover(|d| d.bg(rgb(HOVER)))
                         .child(
-                            column()
+                            div()
+                                .size(px(12.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(div().size(px(7.)).rounded_full().bg(rgb(dot))),
+                        )
+                        .child(
+                            div()
                                 .flex_1()
                                 .min_w_0()
-                                .child(div().truncate().child(worker.objective.clone()))
-                                .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child({
-                                    let codes = self
-                                        .zot
-                                        .issues
-                                        .iter()
-                                        .filter(|i| i.threads.contains(&id))
-                                        .map(ZotIssue::code)
-                                        .collect::<Vec<_>>()
-                                        .join(" · ");
-                                    if codes.is_empty() {
-                                        "Zapper thread".to_owned()
-                                    } else {
-                                        codes
-                                    }
-                                })),
+                                .truncate()
+                                .child(self.thread_title(&id)),
+                        )
+                        .when(!codes.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(FAINT))
+                                    .child(codes),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.5))
+                                .text_color(rgb(if state == ThreadState::Idle {
+                                    FAINT
+                                } else {
+                                    MUTED
+                                }))
+                                .child(label),
                         )
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(IssueEvent::OpenThread(id.clone()))
                         })),
                 );
             }
-            let prs: Vec<_> = self
-                .zot
-                .issues
-                .iter()
-                .flat_map(|i| i.pull_requests.iter())
-                .collect();
-            body = body.child(group_header(format!("Pull requests  {}", prs.len())));
+            body = body.child(list);
+        }
+        if !prs.is_empty() {
+            let mut list = self.block("Pull requests", prs.len(), None);
             for pr in prs {
                 let url = pr.url.clone();
-                body = body.child(
-                    row()
-                        .id(SharedString::from(format!("overview-pr-{url}")))
-                        .gap(px(10.))
-                        .px(px(10.))
-                        .py(px(8.))
-                        .cursor_pointer()
-                        .child(pr_badge(pr))
-                        .child(div().truncate().child(pr.title.clone()))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(IssueEvent::OpenPullRequest(url.clone()))
-                        })),
-                );
+                list =
+                    list.child(
+                        row()
+                            .id(SharedString::from(format!("overview-pr-{url}")))
+                            .h(px(34.))
+                            .gap(px(10.))
+                            .px(px(10.))
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgb(HOVER)))
+                            .child(icon("git-branch").size(px(13.)).text_color(rgb(0xd9bf60)))
+                            .child(div().flex_1().min_w_0().truncate().child(
+                                if pr.title.is_empty() {
+                                    "Pull request".to_owned()
+                                } else {
+                                    pr.title.clone()
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(FAINT))
+                                    .child(pr_label(pr)),
+                            )
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(IssueEvent::OpenPullRequest(url.clone()))
+                            })),
+                    );
             }
+            body = body.child(list);
         }
-        if self.overview {
-            let files: Vec<_> = self
-                .files
-                .iter()
-                .filter(|f| f.path != "INSTRUCTIONS.md" && !f.content.trim().is_empty())
-                .collect();
-            body = body.child(group_header(format!("Drive  {}", files.len())));
-            let mut cards = row().items_start().flex_wrap().gap(px(10.));
+        if !files.is_empty() {
+            let mut list = self.block("Drive", files.len(), None);
             for file in files {
                 let f = file.clone();
-                cards = cards.child(
-                    column()
+                let preview = file
+                    .content
+                    .lines()
+                    .map(|l| l.trim_start_matches('#').trim())
+                    .find(|l| !l.is_empty())
+                    .unwrap_or_default()
+                    .to_owned();
+                list = list.child(
+                    row()
                         .id(SharedString::from(format!("issue-document-{}", file.path)))
-                        .w(px(160.))
-                        .gap(px(8.))
+                        .h(px(34.))
+                        .gap(px(10.))
+                        .px(px(10.))
+                        .rounded(px(6.))
                         .cursor_pointer()
+                        .hover(|d| d.bg(rgb(HOVER)))
+                        .child(icon("document").size(px(13.)).text_color(rgb(MUTED)))
+                        .child(div().flex_none().child(file.path.clone()))
                         .child(
                             div()
-                                .h(px(180.))
-                                .p(px(12.))
-                                .overflow_hidden()
-                                .rounded(px(8.))
-                                .border_1()
-                                .border_color(rgb(BORDER))
-                                .bg(rgb(SURFACE))
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
                                 .text_size(px(12.))
-                                .line_height(px(17.))
-                                .child(file.content.chars().take(220).collect::<String>()),
+                                .text_color(rgb(FAINT))
+                                .child(preview),
                         )
-                        .child(div().truncate().child(file.path.clone()))
                         .on_click(cx.listener(move |_, _, _, cx| {
                             cx.emit(IssueEvent::OpenDocument(f.clone()))
                         })),
                 );
             }
-            body = body.child(cards);
+            body = body.child(list);
         }
         body.into_any_element()
     }
@@ -793,8 +1060,8 @@ impl IssuePanel {
             if menu == "priority" {
                 content = content.child(priority_icon(issue.details.priority));
             }
-            if menu == "assignee" && issue.details.assigned {
-                content = content.child(icon("bot").size(px(12.)));
+            if menu == "assignee" {
+                content = content.child(self.assignee_avatar(issue.details.assigned, 16.));
             }
             content = content
                 .child(
@@ -852,40 +1119,58 @@ impl IssuePanel {
                         .into_any_element(),
                 });
             if self.menu == Some(menu) && field.is_none() {
-                let mut options = column()
-                    .id(SharedString::from(format!("issue-menu-{menu}")))
-                    .absolute()
-                    .left(px(106.))
-                    .top(px(28.))
-                    .w(px(250.))
-                    .occlude()
-                    .p(px(6.))
-                    .rounded(px(8.))
-                    .bg(rgb(0x232323))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                let mut options = menu_card(format!("issue-menu-{menu}"), 220.).on_mouse_down_out(
+                    cx.listener(|this, _, _, cx| {
                         this.menu = None;
                         cx.notify();
-                    }));
-                let labels: Vec<_> = match menu {
-                    "status" => ZotIssueStatus::ALL.iter().map(|s| s.label()).collect(),
-                    "priority" => ZotIssuePriority::ALL.iter().map(|s| s.label()).collect(),
-                    _ => vec!["No assignee", self.zot.config.name.as_str()],
+                    }),
+                );
+                let count = match menu {
+                    "status" => ZotIssueStatus::ALL.len(),
+                    "priority" => ZotIssuePriority::ALL.len(),
+                    _ => 2,
                 };
-                for (index, label) in labels.into_iter().enumerate() {
+                for index in 0..count {
                     let mut details = issue.details.clone();
-                    match menu {
-                        "status" => details.status = ZotIssueStatus::ALL[index],
-                        "priority" => details.priority = ZotIssuePriority::ALL[index],
-                        _ => details.assigned = index == 1,
+                    let (lead, label): (AnyElement, String) = match menu {
+                        "status" => {
+                            let status = ZotIssueStatus::ALL[index];
+                            details.status = status;
+                            (
+                                status_icon(status).into_any_element(),
+                                status.label().into(),
+                            )
+                        }
+                        "priority" => {
+                            let priority = ZotIssuePriority::ALL[index];
+                            details.priority = priority;
+                            (
+                                priority_icon(priority).into_any_element(),
+                                priority.label().into(),
+                            )
+                        }
+                        _ => {
+                            details.assigned = index == 1;
+                            (
+                                self.assignee_avatar(index == 1, 18.).into_any_element(),
+                                if index == 1 {
+                                    self.zot.config.name.clone()
+                                } else {
+                                    "No assignee".into()
+                                },
+                            )
+                        }
                     };
+                    let current = details == issue.details;
                     let id = issue.id.clone();
                     options = options.child(
-                        button(format!("issue-option-{menu}-{index}"), label.to_owned())
-                            .w_full()
+                        menu_option(format!("issue-option-{menu}-{index}"), lead, label, current)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.menu = None;
+                                if current {
+                                    cx.notify();
+                                    return;
+                                }
                                 this.emit(
                                     ZotAction::EditIssue {
                                         issue_id: id.clone(),
@@ -1087,20 +1372,9 @@ impl IssuePanel {
             if (kind == 1 && self.menu == Some("threads"))
                 || (kind == 2 && self.menu == Some("relations"))
             {
-                let mut options = column()
-                    .id(SharedString::from(format!("issue-links-{kind}")))
-                    .absolute()
-                    .left(px(106.))
-                    .top(px(28.))
-                    .w(px(310.))
+                let mut options = menu_card(format!("issue-links-{kind}"), 310.)
                     .max_h(px(300.))
                     .overflow_y_scroll()
-                    .occlude()
-                    .p(px(6.))
-                    .rounded(px(8.))
-                    .bg(rgb(0x232323))
-                    .border_1()
-                    .border_color(rgb(BORDER))
                     .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                         this.menu = None;
                         cx.notify();
@@ -1113,9 +1387,17 @@ impl IssuePanel {
                             continue;
                         }
                         options = options.child(
-                            button(format!("link-thread-{chat}"), worker.objective.clone())
-                                .truncate()
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                            menu_option(
+                                format!("link-thread-{chat}"),
+                                icon("chat-round-line")
+                                    .size(px(13.))
+                                    .text_color(rgb(MUTED))
+                                    .into_any_element(),
+                                self.thread_title(&chat),
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
                                     this.menu = None;
                                     this.emit(
                                         ZotAction::LinkIssueThread {
@@ -1124,16 +1406,24 @@ impl IssuePanel {
                                         },
                                         cx,
                                     );
-                                })),
+                                },
+                            )),
                         )
                     }
                     let id = issue.id.clone();
                     options = options.child(
-                        button("issue-start-thread", "+ Start a new thread").on_click(cx.listener(
-                            move |this, _, w, cx| {
-                                this.open(EditorKind::Delegate(id.clone()), w, cx)
-                            },
-                        )),
+                        menu_option(
+                            "issue-start-thread",
+                            icon("plus")
+                                .size(px(13.))
+                                .text_color(rgb(MUTED))
+                                .into_any_element(),
+                            "Start a new thread".into(),
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, w, cx| {
+                            this.open(EditorKind::Delegate(id.clone()), w, cx)
+                        })),
                     );
                 } else {
                     for other in &self.zot.issues {
@@ -1144,11 +1434,12 @@ impl IssuePanel {
                         details.relations.push(other.id.clone());
                         let id = issue.id.clone();
                         options = options.child(
-                            button(
+                            menu_option(
                                 format!("link-relation-{}", other.id),
-                                format!("{} {}", other.code(), other.details.title),
+                                status_icon(other.details.status).into_any_element(),
+                                format!("{}  {}", other.code(), other.details.title),
+                                false,
                             )
-                            .truncate()
                             .on_click(cx.listener(
                                 move |this, _, _, cx| {
                                     this.menu = None;
@@ -1313,6 +1604,24 @@ impl IssuePanel {
         )
         .into_any_element()
     }
+    /// A face for comments: this Zapper's, or the signed-in person's initial.
+    /// Worker threads keep their activity glyph.
+    fn actor_avatar(&self, event: &ZotIssueActivity, size: f32) -> Option<Div> {
+        match &event.actor {
+            None => Some(person_avatar(
+                self.user_name.as_deref().unwrap_or("You"),
+                size,
+            )),
+            Some(id)
+                if *id == self.zot.coordinator_chat_id
+                    || self.zot.previous_coordinator_chats.contains(id)
+                    || *id == self.zot.config.name =>
+            {
+                Some(zapper_avatar(&self.avatar(), size))
+            }
+            Some(_) => None,
+        }
+    }
     /// Who did it and what, with chat IDs and PR URLs swapped for readable names.
     fn activity_text(&self, issue: &ZotIssue, event: &ZotIssueActivity) -> (String, String) {
         let actor = event
@@ -1397,11 +1706,15 @@ impl IssuePanel {
         let replying = self.inline_input(
             |k| matches!(k, EditorKind::Reply(i, p) if *i == issue.id && *p == event.id),
         );
+        let lead = match self.actor_avatar(event, 18.) {
+            Some(avatar) => avatar.into_any_element(),
+            None => pixel_glyph(glyph, color).into_any_element(),
+        };
         let header = row()
             .gap(px(8.))
             .text_size(px(12.))
             .line_height(px(16.))
-            .child(pixel_glyph(glyph, color))
+            .child(lead)
             .child(
                 div()
                     .min_w_0()
@@ -1507,7 +1820,10 @@ impl IssuePanel {
                             .gap(px(8.))
                             .text_size(px(12.))
                             .line_height(px(16.))
-                            .child(pixel_glyph(GLYPH_REPLY, 0x6f7a8a))
+                            .child(match self.actor_avatar(reply, 16.) {
+                                Some(avatar) => avatar.into_any_element(),
+                                None => pixel_glyph(GLYPH_REPLY, 0x6f7a8a).into_any_element(),
+                            })
                             .child(
                                 div()
                                     .min_w_0()
@@ -1676,6 +1992,22 @@ fn row() -> Div {
 fn column() -> Div {
     div().flex().flex_col()
 }
+/// A clickable control with no hover style, for callers that set their own.
+fn plain_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
+    let label = label.into();
+    div()
+        .id(id.into())
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .flex()
+        .items_center()
+        .line_height(px(18.))
+        .px(px(8.))
+        .py(px(6.))
+        .rounded(px(6.))
+        .cursor_pointer()
+        .child(label)
+}
 fn button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
     let label = label.into();
     div()
@@ -1692,23 +2024,32 @@ fn button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Statef
         .hover(|d| d.bg(rgb(0x232323)))
         .child(label)
 }
-fn group_header(label: String) -> Div {
-    row()
-        .w_full()
-        .px(px(10.))
-        .py(px(5.))
-        .line_height(px(18.))
-        .rounded(px(7.))
-        .text_color(rgb(MUTED))
-        .text_size(px(12.))
-        .child(label)
-}
-fn section(label: String, key: &str, closed: bool, cx: &Context<IssuePanel>) -> Stateful<Div> {
+/// A status group's header: its icon, name and count, folding on click.
+fn section(
+    status: ZotIssueStatus,
+    count: usize,
+    key: &str,
+    closed: bool,
+    cx: &Context<IssuePanel>,
+) -> Stateful<Div> {
     let key = key.to_owned();
-    group_header(label)
+    row()
         .id(SharedString::from(format!("issue-group-{key}")))
         .role(Role::Button)
+        .aria_label(SharedString::from(format!("{} {count}", status.label())))
+        .aria_expanded(!closed)
+        .w_full()
+        .h(px(30.))
+        .mt(px(6.))
+        .px(px(10.))
+        .gap(px(8.))
+        .rounded(px(6.))
+        .bg(rgb(0x161616))
         .cursor_pointer()
+        .text_size(px(12.))
+        .child(status_icon(status))
+        .child(div().text_color(rgb(0xbdbdbd)).child(status.label()))
+        .child(div().text_color(rgb(FAINT)).child(count.to_string()))
         .child(div().flex_1())
         .child(
             icon(if closed {
@@ -1716,8 +2057,8 @@ fn section(label: String, key: &str, closed: bool, cx: &Context<IssuePanel>) -> 
             } else {
                 "alt-arrow-down"
             })
-            .size(px(12.))
-            .text_color(rgb(MUTED)),
+            .size(px(11.))
+            .text_color(rgb(FAINT)),
         )
         .on_click(cx.listener(move |this, _, _, cx| {
             if !this.collapsed.remove(&key) {
@@ -1725,6 +2066,56 @@ fn section(label: String, key: &str, closed: bool, cx: &Context<IssuePanel>) -> 
             }
             cx.notify();
         }))
+}
+/// A dropdown under a property: dark card, small radius, soft shadow.
+fn menu_card(id: impl Into<SharedString>, width: f32) -> Stateful<Div> {
+    column()
+        .id(id.into())
+        .absolute()
+        .left(px(100.))
+        .top(px(30.))
+        .w(px(width))
+        .occlude()
+        .p(px(4.))
+        .gap(px(1.))
+        .rounded(px(8.))
+        .bg(rgb(MENU))
+        .border_1()
+        .border_color(rgb(0x2c2c2c))
+        .shadow_lg()
+}
+/// One menu choice: its picture, label and a check on the current one.
+fn menu_option(
+    id: impl Into<SharedString>,
+    lead: AnyElement,
+    label: String,
+    current: bool,
+) -> Stateful<Div> {
+    row()
+        .id(id.into())
+        .role(Role::MenuItem)
+        .aria_label(SharedString::from(label.clone()))
+        .w_full()
+        .h(px(30.))
+        .px(px(8.))
+        .gap(px(8.))
+        .rounded(px(5.))
+        .cursor_pointer()
+        .text_size(px(12.5))
+        .hover(|d| d.bg(rgb(0x2a2a2a)))
+        .child(
+            div()
+                .size(px(18.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(lead),
+        )
+        .child(div().flex_1().min_w_0().truncate().child(label))
+        .when(current, |d| {
+            d.child(icon("check").size(px(12.)).text_color(rgb(TEXT)))
+        })
 }
 fn input_box(input: Entity<TextInput>, height: f32) -> Div {
     div()
@@ -1761,14 +2152,14 @@ pub fn status_icon(status: ZotIssueStatus) -> Div {
 fn pr_badge(pr: &ZotIssuePullRequest) -> Div {
     row()
         .flex_none()
-        .gap(px(5.))
-        .px(px(7.))
-        .py(px(2.))
-        .border_1()
-        .border_color(rgb(BORDER))
-        .rounded_full()
-        .text_size(px(12.))
-        .child(icon("git-branch").size(px(12.)).text_color(rgb(0xd9bf60)))
+        .gap(px(4.))
+        .h(px(20.))
+        .px(px(6.))
+        .rounded(px(5.))
+        .bg(rgb(0x1c1a12))
+        .text_size(px(11.5))
+        .text_color(rgb(0xcfcfcf))
+        .child(icon("git-branch").size(px(11.)).text_color(rgb(0xd9bf60)))
         .child(format!("#{}", pr.url.rsplit('/').next().unwrap_or("")))
 }
 /// A report sent back to the Zot, shown like a chat-to-chat reply: a quiet
@@ -1823,12 +2214,18 @@ pub fn sender_header(
     timestamp: i64,
 ) -> Div {
     let _ = timestamp;
+    // The Zapper's own messages carry its face; relayed thread activity
+    // keeps the terminal mark so the two never read as the same author.
+    let lead = match sender.avatar.as_ref().filter(|_| !sender.activity) {
+        Some(avatar) => zapper_avatar(avatar, 14.).into_any_element(),
+        None => icon("terminal").size(px(12.)).into_any_element(),
+    };
     row()
         .gap(px(6.))
         .pb(px(5.))
         .text_size(px(12.))
         .text_color(rgb(0x959595))
-        .child(icon("terminal").size(px(12.)))
+        .child(lead)
         .child(format!("Sent by {}", sender.name))
 }
 
@@ -2058,6 +2455,17 @@ fn priority_icon(priority: ZotIssuePriority) -> Div {
         );
     }
     bars
+}
+/// "now", "5m", "3h", "2d": the row's narrow time column.
+fn short_time(millis: i64) -> String {
+    let seconds = (chrono::Utc::now().timestamp_millis() - millis).max(0) / 1000;
+    match seconds {
+        s if s < 60 => "now".into(),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86400 => format!("{}h", s / 3600),
+        s if s < 86400 * 7 => format!("{}d", s / 86400),
+        s => format!("{}w", s / (86400 * 7)),
+    }
 }
 fn relative_time(millis: i64) -> String {
     let seconds = (chrono::Utc::now().timestamp_millis() - millis).max(0) / 1000;

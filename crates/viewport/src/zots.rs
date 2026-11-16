@@ -1323,6 +1323,17 @@ impl WorkspaceView {
                     this.zots.pull_request = Some(url.clone());
                     this.open_pr_url(url.clone(), String::new(), cx);
                 }
+                // The browser starts threads from the Threads page's own button.
+                IssueEvent::NewThread => {
+                    if this.zots.tabs.select(ZotTab::Threads) {
+                        cx.notify();
+                    }
+                }
+                IssueEvent::ShowIssues => {
+                    if this.zots.tabs.select(ZotTab::Issues) {
+                        cx.notify();
+                    }
+                }
             })
             .detach();
             cx.observe(&panel, |_, _, cx| cx.notify()).detach();

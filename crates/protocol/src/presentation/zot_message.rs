@@ -13,7 +13,12 @@ pub struct ZotSender {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub activity: bool,
 }
-pub const EXECUTION_CONTEXT: &str = "\n\n[Zot execution context]\n";
+/// Opens a Zapper-attributed message. Models read this, so it names the
+/// product; [`LEGACY_PREFIX`] still parses in transcripts saved before.
+pub const PREFIX: &str = "[Message from Zapper ";
+const LEGACY_PREFIX: &str = "[Message from Zot ";
+pub const EXECUTION_CONTEXT: &str = "\n\n[Zapper execution context]\n";
+const LEGACY_EXECUTION_CONTEXT: &str = "\n\n[Zot execution context]\n";
 
 pub fn envelope(zot: &Zot, body: &str) -> String {
     attributed(zot, &zot.config.name, body, false)
@@ -48,7 +53,7 @@ fn attributed(zot: &Zot, name: &str, body: &str, activity: bool) -> String {
         activity,
     };
     format!(
-        "[Message from Zot {}]\n\n{body}",
+        "{PREFIX}{}]\n\n{body}",
         serde_json::to_string(&sender).expect("sender serializes")
     )
 }
@@ -83,7 +88,9 @@ pub fn parse_display(text: &str) -> Option<(ZotSender, &str)> {
 }
 
 pub fn parse(text: &str) -> Option<(ZotSender, &str)> {
-    let rest = text.strip_prefix("[Message from Zot ")?;
+    let rest = text
+        .strip_prefix(PREFIX)
+        .or_else(|| text.strip_prefix(LEGACY_PREFIX))?;
     let (json, body) = rest.split_once("]\n\n")?;
     let sender: ZotSender = serde_json::from_str(json).ok()?;
     if sender.name.trim().is_empty() || sender.zot_id.is_empty() || sender.chat_id.is_empty() {
@@ -92,6 +99,7 @@ pub fn parse(text: &str) -> Option<(ZotSender, &str)> {
     Some((
         sender,
         body.split_once(EXECUTION_CONTEXT)
+            .or_else(|| body.split_once(LEGACY_EXECUTION_CONTEXT))
             .map(|(visible, _)| visible)
             .unwrap_or(body),
     ))
@@ -137,5 +145,24 @@ mod tests {
         assert!(parse("ordinary user message").is_none());
         let enriched = format!("{input}{EXECUTION_CONTEXT}Private engine instructions");
         assert_eq!(parse(&enriched).unwrap().1, "Body\n\nReply");
+        let legacy = format!("{input}{LEGACY_EXECUTION_CONTEXT}Private engine instructions");
+        assert_eq!(parse(&legacy).unwrap().1, "Body\n\nReply");
+    }
+    #[test]
+    fn new_messages_name_the_zapper() {
+        let sender = ZotSender {
+            zot_id: "z".into(),
+            chat_id: "chat".into(),
+            name: "Release".into(),
+            avatar: None,
+            activity: false,
+        };
+        let text = format!(
+            "{PREFIX}{}]\n\nShip it",
+            serde_json::to_string(&sender).unwrap()
+        );
+        assert!(text.starts_with("[Message from Zapper "));
+        assert!(!text.contains("Zot"));
+        assert_eq!(parse(&text).unwrap().1, "Ship it");
     }
 }
