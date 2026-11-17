@@ -274,6 +274,10 @@ pub const PR_CHECKS: &str = "icons/pr-checks.svg";
 pub const PR_CONFLICTS: &str = "icons/pr-conflicts.svg";
 pub const PR_ADD_TO_CHAT: &str = "icons/pr-add-to-chat.svg";
 pub const PR_GITHUB: &str = "icons/pr-github.svg";
+/// The cloud computer card's machine rows.
+pub const CLOUD_CPU: &str = "icons/cloud-cpu.svg";
+pub const CLOUD_MEMORY: &str = "icons/cloud-memory.svg";
+pub const CLOUD_ACTIVITY: &str = "icons/cloud-activity.svg";
 
 /// Serves both the compact control-icon set and the complete file-identity
 /// icon theme through the single asset source registered at app startup.

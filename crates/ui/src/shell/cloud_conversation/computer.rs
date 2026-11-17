@@ -1,4 +1,5 @@
 //! Native Computer actions use the account API; execution availability is not authority.
+use super::environment_card::{self, StatusAction};
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,7 +200,7 @@ impl State {
             .is_some_and(|pending| pending.action == Action::Delete)
     }
 }
-fn preparation_steps(row: &Value) -> Vec<zuse_viewport::CloudPreparationStep> {
+pub(super) fn preparation_steps(row: &Value) -> Vec<zuse_viewport::CloudPreparationStep> {
     zuse_viewport::cloud_preparation_progress(row, false)
         .steps
         .into_iter()
@@ -350,6 +351,55 @@ fn request(mut scope: Value, action: Action, key: &str, row: &Value, check: bool
         }
     }
     Some(scope)
+}
+/// A bordered, monospace field with a main action and a chevron for more,
+/// like the previous Zuse summary card's SSH and synced-folder controls.
+fn split_field(theme: &Theme) -> gpui::Div {
+    div()
+        .mx(px(8.))
+        .my(px(6.))
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.text.opacity(0.15))
+        .bg(theme.muted_fill().opacity(0.4))
+        .overflow_hidden()
+        .font_family("Geist Mono")
+}
+fn split_main(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .px(px(8.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+}
+fn split_chevron(theme: &Theme, id: &'static str) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .w(px(28.))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .border_l_1()
+        .border_color(theme.text.opacity(0.15))
+        .cursor_pointer()
+        .hover(|el| el.bg(theme.element_hover))
+        .role(gpui::Role::Button)
+        .child(
+            icon(icons::ALT_ARROW_DOWN)
+                .size(px(13.))
+                .text_color(theme.text_muted),
+        )
 }
 impl CloudConversation {
     pub(super) fn close_computer(&mut self, cx: &mut Context<Self>) {
@@ -937,6 +987,7 @@ impl CloudConversation {
     fn render_open_in_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let path = self.synced_folder();
+        let sync_busy = self.computer.sync_change.is_some() || self.computer.sync_folder.is_some();
         let mut page = div()
             .id("native-computer-open-in")
             .flex()
@@ -1015,6 +1066,22 @@ impl CloudConversation {
                         this.close_computer(cx);
                     })),
             )
+            .child(
+                popover::menu_row(&theme, false, "cloud-sync-folder")
+                    .id("cloud-sync-folder")
+                    .opacity(if sync_busy { 0.5 } else { 1. })
+                    .child(
+                        icon(icons::FOLDER)
+                            .size(px(14.))
+                            .text_color(theme.text_muted),
+                    )
+                    .child("Change folder…")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !sync_busy {
+                            this.choose_sync_folder(cx);
+                        }
+                    })),
+            )
             .into_any_element()
     }
     pub(super) fn render_computer(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1023,116 +1090,237 @@ impl CloudConversation {
         let row = self.computer.metadata.clone();
         let busy = self.operation.is_some();
         let summary = self.computer_summary();
-        let detail = |label: &'static str, glyph: &'static str, value: AnyElement| {
+        let running = matches!(summary.tone, Tone::Running);
+        if running && self.computer.page == Page::Summary {
+            self.want_resources(cx);
+        }
+        let card = environment_card::card(environment_card::Inputs {
+            summary: &summary,
+            row: &row,
+            config: &self.config,
+            resources: &self.computer.resources,
+            now: chrono::Utc::now(),
+            restart_allowed: !busy
+                && self.computer.pending.is_none()
+                && allowed(&row, Action::Restart),
+        });
+        // One summary row: icon, label, then the value pushed to the end.
+        let detail = |id: &'static str, label: &'static str, glyph: &'static str| {
             div()
+                .id(id)
                 .px(px(8.))
                 .h(px(28.))
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(icon(glyph).size(px(13.)).text_color(theme.text_muted))
-                .child(div().flex_none().child(label))
                 .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .justify_end()
-                        .text_color(theme.text_muted)
-                        .child(value),
+                    icon(glyph)
+                        .size(px(14.))
+                        .flex_none()
+                        .text_color(theme.text_muted),
                 )
+                .child(div().flex_none().child(label))
         };
-        let text = |value: String| div().truncate().child(value).into_any_element();
-        let status = div()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .child(
-                div()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(summary.tone.color(&theme)),
-            )
-            .child(summary.label)
-            .into_any_element();
+        let value = || {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(6.))
+                .text_color(theme.text_muted)
+        };
+        let text = |value: String| div().min_w_0().truncate().child(value);
+        let dot = |tone: Tone| {
+            div()
+                .flex_none()
+                .size(px(6.))
+                .rounded_full()
+                .bg(tone.color(&theme))
+        };
+
+        // Title, and every other action behind the overflow button.
         let mut menu = div()
             .id("native-computer-panel")
             .flex()
             .flex_col()
             .text_size(crate::typography::text_xs())
-            .child(detail(
-                "Repository",
-                icons::FOLDER,
-                text(summary.repository.clone().unwrap_or_else(|| "—".into())),
-            ))
-            .when_some(summary.branch.clone(), |menu, branch| {
-                menu.child(detail("Branch", icons::GIT_BRANCH, text(branch)))
-            })
-            .child(detail(
-                "Environment",
-                icons::DITHER_CLOUD,
-                text(summary.provider.clone().unwrap_or_else(|| "Cloud".into())),
-            ))
-            .child(detail("Status", icons::MONITOR, status))
-            .when_some(summary.last_wake.clone(), |menu, wake| {
-                menu.child(detail("Last wake", icons::CLOCK_CIRCLE, text(wake)))
-            })
-            .when_some(summary.created.clone(), |menu, created| {
-                menu.child(detail("Created", icons::CALENDAR, text(created)))
-            });
-
-        // Setup progress, only while a stage is still open.
-        let steps = preparation_steps(&row);
-        if steps
-            .iter()
-            .any(|step| step.state != zuse_viewport::CloudPreparationStepState::Completed)
-        {
-            menu = menu.child(popover::menu_separator());
-            for step in steps {
-                use zuse_viewport::CloudPreparationStepState as Step;
-                let glyph: AnyElement = match step.state {
-                    Step::Running => crate::loaders::mini_mono_spinner(
-                        format!("native-preparation-{}", step.key),
-                        2.,
-                        theme.text_muted,
-                        cx.entity_id(),
-                        cx,
+            .child(
+                div()
+                    .pl(px(8.))
+                    .pr(px(2.))
+                    .pt(px(2.))
+                    .pb(px(4.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(crate::typography::text_sm())
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(self.title.clone()),
                     )
-                    .into_any_element(),
-                    Step::Completed => icon(icons::CHECK)
-                        .size(px(12.))
-                        .text_color(theme.success)
-                        .into_any_element(),
-                    Step::Failed => icon(icons::CLOSE)
-                        .size(px(12.))
-                        .text_color(theme.danger)
-                        .into_any_element(),
-                    _ => div()
-                        .size(px(5.))
-                        .rounded_full()
-                        .bg(theme.text_muted.opacity(0.5))
-                        .into_any_element(),
-                };
-                menu = menu.child(
+                    .child(
+                        div()
+                            .id("computer-more")
+                            .flex_none()
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(|el| el.bg(theme.element_hover))
+                            .role(gpui::Role::Button)
+                            .aria_label("More computer actions")
+                            .tip("More")
+                            .child(
+                                icon(icons::MORE_HORIZONTAL)
+                                    .size(px(14.))
+                                    .text_color(theme.text_muted),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.computer.page = Page::More;
+                                cx.notify();
+                            })),
+                    ),
+            );
+
+        // Who and what: repository, created, setup.
+        if let Some(repository) = card.repository.clone() {
+            let mut name = value().child(text(repository.name));
+            if let Some(url) = repository.url {
+                name = name.child(
                     div()
-                        .px(px(8.))
-                        .h(px(26.))
+                        .id("computer-repository-link")
+                        .flex_none()
+                        .size(px(18.))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
+                        .justify_center()
+                        .rounded(px(4.))
+                        .cursor_pointer()
+                        .hover(|el| el.bg(theme.element_hover))
+                        .tip("Open repository")
                         .child(
-                            div()
-                                .size(px(13.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .child(glyph),
+                            icon(icons::ARROW_UP_RIGHT)
+                                .size(px(12.))
+                                .text_color(theme.text_muted),
                         )
-                        .child(div().flex_1().child(step.title))
-                        .child(div().text_color(theme.text_muted).child(step.state.label())),
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
                 );
             }
+            menu =
+                menu.child(detail("computer-repository", "Repository", icons::FOLDER).child(name));
         }
+        if let Some(created) = card.created.clone() {
+            let mut created_row = detail("computer-created", "Created", icons::CLOCK_CIRCLE)
+                .child(value().child(text(created.relative)));
+            if let Some(exact) = created.exact {
+                created_row = created_row.tip(exact);
+            }
+            menu = menu.child(created_row);
+        }
+        if let Some((label, tone)) = card.setup {
+            menu = menu.child(
+                detail("computer-setup", "Setup", icons::PR_REPAIR).child(
+                    value()
+                        .when(tone == Tone::Failed, |el| el.text_color(theme.danger))
+                        .child(text(label.to_owned())),
+                ),
+            );
+        }
+
+        // The machine: where it runs, its state, and what it is using.
+        let mut status = value();
+        if let Some(action) = card.action {
+            let enabled = action == StatusAction::Wake
+                || (!busy && self.computer.execution_controls_enabled());
+            status = status.child(
+                div()
+                    .id("computer-status-action")
+                    .flex_none()
+                    .h(px(20.))
+                    .px(px(4.))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .opacity(if enabled { 1. } else { 0.45 })
+                    .hover(|el| el.bg(theme.element_hover).text_color(theme.text))
+                    .role(gpui::Role::Button)
+                    .child(
+                        icon(match action {
+                            StatusAction::Restart => icons::RESTART,
+                            StatusAction::Wake => icons::ACTION_PLAY,
+                        })
+                        .size(px(12.))
+                        .text_color(theme.text_muted),
+                    )
+                    .child(action.label())
+                    .on_click(cx.listener(move |this, _, _, cx| match action {
+                        StatusAction::Restart => {
+                            this.computer.confirm = Some(Action::Restart);
+                            cx.notify();
+                        }
+                        StatusAction::Wake => this.toggle_sleep(cx),
+                    })),
+            );
+        }
+        status = status.child(dot(card.tone)).child(card.status);
+        let mut status_row =
+            detail("computer-status", "Status", icons::CLOUD_ACTIVITY).child(status);
+        if let Some(wake) = card.last_wake.clone() {
+            status_row = status_row.tip(wake);
+        }
+        menu = menu
+            .child(popover::menu_separator())
+            .child(
+                detail("computer-environment", "Environment", icons::CLOUD)
+                    .child(value().child(text(card.environment.clone()))),
+            )
+            .child(status_row);
+        if let Some(startup) = card.startup.clone() {
+            menu = menu.child(
+                detail("computer-startup", "Startup", icons::CLOCK_CIRCLE).child(
+                    value()
+                        .child(crate::loaders::mini_mono_spinner(
+                            "computer-startup-spinner",
+                            2.,
+                            theme.text_muted,
+                            cx.entity_id(),
+                            cx,
+                        ))
+                        .child(text(startup)),
+                ),
+            );
+        }
+        for (id, label, glyph, reading) in [
+            ("computer-cpu", "CPU", icons::CLOUD_CPU, card.cpu.clone()),
+            (
+                "computer-memory",
+                "Memory",
+                icons::CLOUD_MEMORY,
+                card.memory.clone(),
+            ),
+            (
+                "computer-disk",
+                "Disk",
+                icons::HARD_DRIVE,
+                card.disk.clone(),
+            ),
+            ("computer-size", "Size", icons::MONITOR, card.size.clone()),
+        ] {
+            if let Some(reading) = reading {
+                menu = menu.child(detail(id, label, glyph).child(value().child(text(reading))));
+            }
+        }
+
         if let Some((title, detail)) = issue(&row) {
             menu = menu.child(popover::menu_separator()).child(
                 div()
@@ -1204,38 +1392,60 @@ impl CloudConversation {
             );
         }
 
-        // SSH, while the computer runs.
-        let running = matches!(summary.tone, Tone::Running);
-        menu = menu.child(popover::menu_separator()).child(
-            popover::menu_row(&theme, false, "computer-ssh")
-                .id("computer-ssh")
+        // SSH, while the computer runs: the main part opens a terminal, the
+        // chevron lists every way in.
+        let ssh_busy = self.computer.ssh_task.is_some();
+        menu = menu.child(
+            split_field(&theme)
                 .opacity(if running { 1. } else { 0.45 })
                 .child(
-                    icon(icons::TERMINAL)
-                        .size(px(14.))
-                        .text_color(theme.text_muted),
+                    split_main(&theme, "computer-ssh")
+                        .role(gpui::Role::Button)
+                        .child(
+                            icon(icons::TERMINAL)
+                                .size(px(14.))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                        .child(div().min_w_0().truncate().child(if ssh_busy {
+                            "Setting up SSH…"
+                        } else {
+                            "Open via SSH"
+                        }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if running {
+                                this.open_ssh(SshAction::Terminal, cx);
+                            }
+                        })),
                 )
-                .child(div().flex_1().child("Open via SSH"))
                 .child(
-                    icon(icons::ALT_ARROW_RIGHT)
-                        .size(px(12.))
-                        .text_color(theme.text_muted),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if running {
-                        this.computer.page = Page::Ssh;
-                        cx.notify();
-                    }
-                })),
+                    split_chevron(&theme, "computer-ssh-more")
+                        .aria_label("Other ways to open via SSH")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if running {
+                                this.computer.page = Page::Ssh;
+                                cx.notify();
+                            }
+                        })),
+                ),
         );
+        if let Some(error) = self.computer.ssh_error.clone() {
+            menu = menu.child(
+                div()
+                    .px(px(8.))
+                    .pb(px(4.))
+                    .text_color(theme.danger)
+                    .child(error),
+            );
+        }
 
-        // Local sync.
+        // Local sync: the switch, its state, then the folder.
         let sync = &self.computer.sync;
         let loaded = sync["enabled"].is_boolean();
         let enabled = sync["enabled"] == true;
         let sync_busy = self.computer.sync_change.is_some() || self.computer.sync_folder.is_some();
         let phase = match sync["state"].as_str() {
-            Some("synced") => ("Up to date", Tone::Running),
+            Some("synced") => ("In sync", Tone::Running),
             Some("syncing") => ("Syncing…", Tone::Busy),
             Some("waiting") => ("Waiting for the computer", Tone::Idle),
             Some("error") => ("Sync failed", Tone::Failed),
@@ -1244,10 +1454,17 @@ impl CloudConversation {
             _ => ("Sync off", Tone::Idle),
         };
         menu = menu.child(popover::menu_separator()).child(
-            popover::menu_row(&theme, false, "cloud-sync-toggle")
+            div()
                 .id("cloud-sync-toggle")
+                .mt(px(4.))
+                .px(px(8.))
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .cursor_pointer()
                 .role(gpui::Role::Switch)
-                .aria_label("Sync to a local folder")
+                .aria_label("Sync to a local directory")
                 .aria_toggled(if enabled {
                     gpui::Toggled::True
                 } else {
@@ -1255,11 +1472,12 @@ impl CloudConversation {
                 })
                 .opacity(if sync_busy || !loaded { 0.5 } else { 1. })
                 .child(
-                    icon(icons::REFRESH)
-                        .size(px(14.))
-                        .text_color(theme.text_muted),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child("Sync to a local directory"),
                 )
-                .child(div().flex_1().child("Sync to a local folder"))
                 .child(crate::settings::widgets::toggle_switch(
                     &theme,
                     enabled,
@@ -1280,7 +1498,7 @@ impl CloudConversation {
                     .items_center()
                     .gap(px(6.))
                     .text_color(theme.text_muted)
-                    .child(div().size(px(6.)).rounded_full().bg(phase.1.color(&theme)))
+                    .child(dot(phase.1))
                     .child(if sync_busy {
                         "Updating sync…"
                     } else {
@@ -1289,35 +1507,15 @@ impl CloudConversation {
             );
             if let Some(path) = sync["localPath"].as_str().map(str::to_owned) {
                 let reveal = path.clone();
-                let copy = path.clone();
                 menu = menu.child(
-                    div()
-                        .mx(px(8.))
-                        .my(px(4.))
-                        .h(px(28.))
-                        .flex()
-                        .items_center()
-                        .rounded(px(6.))
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.muted_fill().opacity(0.4))
-                        .font_family("Geist Mono")
+                    split_field(&theme)
                         .child(
-                            div()
-                                .id("cloud-sync-reveal")
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .px(px(8.))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .cursor_pointer()
-                                .hover(|el| el.bg(theme.element_hover))
+                            split_main(&theme, "cloud-sync-reveal")
                                 .tip("Open folder")
                                 .child(
-                                    icon(icons::FOLDER_OPEN)
-                                        .size(px(13.))
+                                    icon(icons::FOLDER)
+                                        .size(px(14.))
+                                        .flex_none()
                                         .text_color(theme.text_muted),
                                 )
                                 .child(div().min_w_0().truncate().child(path))
@@ -1326,67 +1524,38 @@ impl CloudConversation {
                                 })),
                         )
                         .child(
-                            div()
-                                .id("cloud-sync-copy")
-                                .h_full()
-                                .w(px(28.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .border_l_1()
-                                .border_color(theme.border)
-                                .cursor_pointer()
-                                .hover(|el| el.bg(theme.element_hover))
-                                .tip("Copy path")
-                                .child(icon(icons::COPY).size(px(13.)).text_color(theme.text_muted))
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()))
+                            split_chevron(&theme, "cloud-sync-open-in")
+                                .aria_label("Open synced folder in")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.computer.page = Page::OpenIn;
+                                    cx.notify();
                                 })),
                         ),
                 );
-            }
-            if self.synced_folder().is_some() {
+            } else {
                 menu = menu.child(
-                    popover::menu_row(&theme, false, "cloud-sync-open-in")
-                        .id("cloud-sync-open-in")
+                    popover::menu_row(&theme, false, "cloud-sync-folder")
+                        .id("cloud-sync-folder")
+                        .opacity(if sync_busy { 0.5 } else { 1. })
+                        .text_size(crate::typography::text_xs())
                         .child(
-                            icon(icons::FOLDER_OPEN)
+                            icon(icons::FOLDER)
                                 .size(px(14.))
                                 .text_color(theme.text_muted),
                         )
-                        .child(div().flex_1().child("Open synced folder in…"))
-                        .child(
-                            icon(icons::ALT_ARROW_RIGHT)
-                                .size(px(12.))
-                                .text_color(theme.text_muted),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.computer.page = Page::OpenIn;
-                            cx.notify();
+                        .child("Choose folder…")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if !sync_busy {
+                                this.choose_sync_folder(cx);
+                            }
                         })),
                 );
             }
-            menu = menu.child(
-                popover::menu_row(&theme, false, "cloud-sync-folder")
-                    .id("cloud-sync-folder")
-                    .opacity(if sync_busy { 0.5 } else { 1. })
-                    .child(
-                        icon(icons::FOLDER)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
-                    )
-                    .child("Change folder…")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !sync_busy {
-                            this.choose_sync_folder(cx);
-                        }
-                    })),
-            );
             if sync["state"] == "error" {
                 menu = menu.child(
                     popover::menu_row(&theme, false, "cloud-sync-retry")
                         .id("cloud-sync-retry")
+                        .text_size(crate::typography::text_xs())
                         .child(
                             icon(icons::REFRESH)
                                 .size(px(14.))
@@ -1546,26 +1715,6 @@ impl CloudConversation {
                 .children(more_rows)
                 .child(popover::menu_separator())
                 .children(repair);
-        } else {
-            menu = menu.child(popover::menu_separator()).child(
-                popover::menu_row(&theme, false, "computer-more")
-                    .id("computer-more")
-                    .child(
-                        icon(icons::MORE_HORIZONTAL)
-                            .size(px(14.))
-                            .text_color(theme.text_muted),
-                    )
-                    .child(div().flex_1().child("More"))
-                    .child(
-                        icon(icons::ALT_ARROW_RIGHT)
-                            .size(px(12.))
-                            .text_color(theme.text_muted),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.computer.page = Page::More;
-                        cx.notify();
-                    })),
-            );
         }
         if busy {
             menu = menu.child(
