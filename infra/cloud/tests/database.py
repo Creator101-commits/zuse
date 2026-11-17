@@ -49,9 +49,9 @@ class DatabaseBootstrapTest(unittest.TestCase):
         self.url = f"postgresql://zuse_test@127.0.0.1:{self.port}/{name}?sslmode=disable"
 
     def test_release_manifest_contains_command_and_recreation_after_admission(self):
-        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql")
-        self.assertEqual(database.FILES[-8:],expected)
-        self.assertEqual(len(database.FILES),39)
+        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql","0045_auth_wakeups.sql")
+        self.assertEqual(database.FILES[-9:],expected)
+        self.assertEqual(len(database.FILES),40)
         self.assertIn("0026_task_command_admission.sql",database.FILES)
         self.assertNotIn("0022_computer_recreations.sql",database.FILES)
         self.assertNotIn("0022_recreation.sql",database.FILES)
@@ -72,15 +72,28 @@ BEGIN;
 INSERT INTO zuse_rust_account_event_outbox(owner_id,kind,resource_id,created_at) VALUES('o','workspace','w1',1),('o','workspace','w2',1);
 SELECT 'inside-transaction';
 COMMIT;
+INSERT INTO cloud_agent_connections(connection_id,owner_id,idempotency_key,request_digest,agent,method,state,created_at,updated_at) VALUES('c1','o','k','d','codex','device-code','pending',1,1);
+INSERT INTO cloud_auth_operations(operation_id,owner_id,actor_id,connection_id,idempotency_key,state,expires_at,created_at,updated_at) VALUES('a1','o','o','c1','k','queued',9,1,1);
+SELECT 'after-signin';
+UPDATE cloud_auth_operations SET state='authorizing',lease_id='l',lease_expires_at=5 WHERE operation_id='a1';
+SELECT 'after-auth-claim';
 """
         result = subprocess.run(["psql", "-X", "--no-align", "--tuples-only", "-v", "ON_ERROR_STOP=1"], input=sql,
                                 env=database.connection_environment(self.url), capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = [line for line in result.stdout.splitlines() if line.strip()]
         notices = [line for line in lines if line.startswith("Asynchronous notification")]
+        # Connection changes also feed the account-event outbox; look at the
+        # job and outbox section first, then at the credential worker's.
+        section = lines.index("COMMIT") + 2
+        auth = [line for line in notices if 'payload "auth"' in line]
+        notices = [line for line in lines[:section] if line in notices]
         self.assertEqual(len(notices), 2, result.stdout)
         self.assertIn('payload "jobs"', notices[0])
         self.assertIn('payload "account_events"', notices[1])
+        # A new sign-in wakes the credential worker once; its claim does not.
+        self.assertEqual(len(auth), 1, result.stdout)
+        self.assertLess(lines.index(auth[0]), lines.index("after-signin"))
         # Claims, completions and the other schema stay silent; the outbox
         # notification arrives once, after commit.
         self.assertLess(lines.index(notices[0]), lines.index("after-claim"))

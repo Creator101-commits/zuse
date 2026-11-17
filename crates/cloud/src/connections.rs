@@ -7,6 +7,7 @@ use zeroize::Zeroizing;
 use zuse_protocol::cloud_connections::*;
 pub mod credentials;
 pub mod discovery;
+pub mod due;
 mod reconfiguration;
 mod refresh_journal;
 pub mod renewal;

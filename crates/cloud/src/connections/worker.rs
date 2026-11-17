@@ -267,14 +267,6 @@ impl AuthDriver for CommandDriver {
     }
 }
 impl ConnectionControl {
-    /// One statement: is there anything [`Self::work_once`] could act on now?
-    /// Conservative (ignores the account filter and due times); the worker
-    /// also runs a full round on a slow timer for time-based cleanup.
-    pub async fn auth_work_pending(&self) -> Result<bool, ApiError> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cloud_auth_operations WHERE state IN ('queued','authorizing')) OR EXISTS(SELECT 1 FROM cloud_agent_connections WHERE state='pending') OR EXISTS(SELECT 1 FROM zuse_rust_credential_rotations WHERE phase IN ('result','dispatching'))")
-            .fetch_one(&self.pool)
-            .await?)
-    }
     pub async fn work_once(&self, driver: &dyn AuthDriver) -> Result<bool, ApiError> {
         let now = chrono::Utc::now().timestamp_millis();
         self.cleanup_rotations(now).await?;

@@ -74,7 +74,7 @@ those pools; none opens its own.
 | `serve` | 6 (3 shared, 2 read-only catalog, 1 billing receipts) | 1 | 7 |
 | `worker` | 3 | 1 | 4 |
 | `billing-worker` | 2 (1 control, 1 delivery receipts) | 0 | 2 |
-| `auth-worker` | 1 | 0 | 1 |
+| `auth-worker` | 1 | 1 | 2 |
 | **One environment** | | | **14** |
 
 Staging and production on one database server need twice that, plus headroom
@@ -95,8 +95,13 @@ Settings (per process environment):
 - `ZUSE_CLOUD_WORKER_IDLE_POLL_MS`: idle fallback for sleeping loops (default
   20 s with `LISTEN`, 5 s without). `ZUSE_CLOUD_WORKER_POLL_MS` (default 1 s) is
   the shortest wait while work stays due.
-- `ZUSE_CLOUD_AUTH_WORKER_POLL_MS` (default 2 s): how often the credential
-  worker checks for pending operations with one cheap query.
+- `ZUSE_CLOUD_AUTH_WORKER_POLL_MS` (default 2 s): only without `LISTEN`
+  (`ZUSE_CLOUD_DB_LISTEN=false`, the listener failed to start, or migration
+  `0045_auth_wakeups.sql` is not installed yet), how often
+  the credential worker checks for due work with one query. With `LISTEN` it
+  sleeps until a notification or its next deadline (operation expiry, lease
+  end, refresh dispatch deadline, journal retention), with a 5-minute safety
+  check, and runs no statements while idle.
 
 Connections close after 60 s idle and are recycled after 30 minutes.
 
@@ -109,6 +114,12 @@ above keep the connection count bounded.
 Migration `0043_work_wakeups.sql` adds triggers that send `NOTIFY` on channel
 `zuse_cloud_work:<schema>` when jobs, task drains, recreations, machine images,
 project cache work or account-event outbox rows are created or rescheduled.
+Migration `0045_auth_wakeups.sql` adds payload `auth` for the credential worker:
+a sign-in or credential proposal becomes claimable, a refresh starts, or a
+connection holding a refresh lease is disconnected or needs reconnecting. The
+worker's own claims and heartbeats stay silent. Payloads: `jobs`, `task_drain`,
+`recreation`, `machine_images`, `project_cache`, `account_events`, `mailbox`,
+`auth`.
 The schema in the channel name keeps staging and production from waking each
 other. `NOTIFY` only shortens waits: workers also sleep until the next known due
 time and poll on the idle timer, so a lost notification, a reconnecting

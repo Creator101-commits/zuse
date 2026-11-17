@@ -616,8 +616,11 @@ async fn main() -> Result<()> {
             let master = zuse_cloud::crypto::MasterKey::parse(&encryption)
                 .map_err(|_| anyhow::anyhow!("Invalid credential authority encryption key"))?;
             let db = process_db(&url, Role::AuthWorker).await?;
-            let control =
-                zuse_cloud::connections::ConnectionControl::from_pool(db.pool, master, accounts);
+            let control = zuse_cloud::connections::ConnectionControl::from_pool(
+                db.pool.clone(),
+                master,
+                accounts,
+            );
             zuse_cloud::connections::worker::CommandDriver::deployment_ready(&driver)?;
             let driver = zuse_cloud::connections::worker::CommandDriver::new(&driver)?;
             control
@@ -627,42 +630,79 @@ async fn main() -> Result<()> {
             if check {
                 return Ok(());
             }
-            // While nothing is pending, one cheap probe per poll replaces the
-            // full maintenance round; the full round still runs every sweep.
+            if once {
+                let result = control.work_once(&driver).await;
+                if matches!(result, Ok(true)) {
+                    zuse_cloud::events::hint::send();
+                }
+                println!("{}", result.map_err(|e| anyhow::anyhow!("{}", e.code))?);
+                return Ok(());
+            }
+            // Sleeps until NOTIFY (a sign-in or proposal became claimable, a
+            // refresh started or went stale), the next known deadline, or the
+            // idle safety net. NOTIFY only shortens waits; without `LISTEN`
+            // the short `ZUSE_CLOUD_AUTH_WORKER_POLL_MS` fallback applies.
+            let wakeups = db.wakeups().await;
             let poll = std::time::Duration::from_millis(env_ms(
                 "ZUSE_CLOUD_AUTH_WORKER_POLL_MS",
                 2_000,
                 250..=60_000,
             )?);
-            const SWEEP: std::time::Duration = std::time::Duration::from_secs(60);
-            let mut last_sweep: Option<std::time::Instant> = None;
-            let mut failures = 0u32;
-            loop {
-                let sweep = once || last_sweep.is_none_or(|at| at.elapsed() >= SWEEP);
-                let result = if sweep {
-                    last_sweep = Some(std::time::Instant::now());
-                    control.work_once(&driver).await
+            // Before migration 0045 no sign-in ever notifies: keep polling.
+            let notified = wakeups.enabled()
+                && control
+                    .auth_wakeups_installed()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e.code))?;
+            if wakeups.enabled() && !notified {
+                tracing::warn!(
+                    code = "auth_wakeups_missing",
+                    "Credential worker wakeups are not installed; polling instead"
+                );
+            }
+            let cadence = Cadence {
+                idle: if notified {
+                    std::time::Duration::from_secs(300)
                 } else {
-                    match control.auth_work_pending().await {
-                        Ok(true) => control.work_once(&driver).await,
-                        other => other,
+                    poll
+                },
+                busy: std::time::Duration::from_secs(1).min(poll),
+            };
+            tracing::info!(
+                idle_ms = cadence.idle.as_millis() as u64,
+                busy_ms = cadence.busy.as_millis() as u64,
+                listen = notified,
+                "Credential worker schedule"
+            );
+            let mut notifications = wakeups.subscribe();
+            let interest = [Work::Auth];
+            let mut failures = 0u32;
+            // Startup runs a full round: anything may have changed meanwhile.
+            let mut run = true;
+            loop {
+                let outcome = async {
+                    let mut next = None;
+                    if !run {
+                        // Idle safety pass: one statement decides whether a
+                        // round is needed at all.
+                        let now = now_ms();
+                        next = control.auth_due(now).await?.next(now);
+                        run = next.is_some_and(|at| at <= now);
                     }
-                };
-                if matches!(result, Ok(true)) {
-                    zuse_cloud::events::hint::send();
-                }
-                if once {
-                    println!("{}", result.map_err(|e| anyhow::anyhow!("{}", e.code))?);
-                    break;
-                }
-                let wait = match result {
-                    Ok(true) => {
-                        failures = 0;
-                        continue;
+                    if run {
+                        while control.work_once(&driver).await? {
+                            zuse_cloud::events::hint::send();
+                        }
+                        let now = now_ms();
+                        next = control.auth_due(now).await?.next(now);
                     }
-                    Ok(false) => {
+                    Ok::<_, zuse_cloud::error::ApiError>(next)
+                }
+                .await;
+                let (wait, timer) = match outcome {
+                    Ok(next) => {
                         failures = 0;
-                        poll
+                        zuse_cloud::db::wake::next_wait(now_ms(), next, cadence)
                     }
                     Err(error) => {
                         failures = failures.saturating_add(1);
@@ -676,10 +716,20 @@ async fn main() -> Result<()> {
                             retry_ms = wait.as_millis() as u64,
                             "Credential authority operation deferred"
                         );
-                        wait
+                        (wait, Reason::Due)
                     }
                 };
-                tokio::select! {_=tokio::signal::ctrl_c()=>break,_=tokio::time::sleep(wait)=>{}}
+                let reason = tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    reason = sleep_or_notify(&mut notifications, &interest, wait, timer) => reason,
+                };
+                // An idle wake first asks whether anything is due.
+                run = reason != Reason::Idle;
+                tracing::debug!(
+                    reason = reason.as_str(),
+                    waited_ms = wait.as_millis() as u64,
+                    "Credential worker woke"
+                );
             }
         }
         Command::PluginMigrate => {

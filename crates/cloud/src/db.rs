@@ -60,7 +60,8 @@ impl Role {
     ///
     /// The production set (`serve` + `worker` + `billing-worker` +
     /// `auth-worker`) is 6 + 3 + 2 + 1 = 12 pool connections, plus one
-    /// `LISTEN` connection each for `serve` and `worker`: 14 in total.
+    /// `LISTEN` connection each for `serve`, `worker` and `auth-worker`: 15
+    /// in total.
     pub const fn default_connections(self) -> u32 {
         match self {
             Self::Serve | Self::Gateway => 6,
@@ -84,7 +85,7 @@ impl Role {
     }
     /// Roles with background loops that sleep until woken.
     pub const fn listens(self) -> bool {
-        matches!(self, Self::Serve | Self::Worker)
+        matches!(self, Self::Serve | Self::Worker | Self::AuthWorker)
     }
     fn application_name(self) -> String {
         format!("zuse-cloud-{}", self.as_str())
@@ -366,9 +367,9 @@ mod tests {
         );
         assert_eq!(
             budgets.iter().map(|b| b.listen).collect::<Vec<_>>(),
-            [true, true, false, false]
+            [true, true, false, true]
         );
-        assert_eq!(budgets.iter().map(Budget::total).sum::<u32>(), 14);
+        assert_eq!(budgets.iter().map(Budget::total).sum::<u32>(), 15);
         for b in &budgets {
             assert_eq!(b.acquire_timeout, Duration::from_secs(5));
             assert_eq!(
@@ -418,7 +419,15 @@ mod tests {
         assert_eq!(worker.acquire_timeout, Duration::from_millis(2500));
         // A role without background loops never listens, even when asked to.
         assert!(
-            !budget(Role::AuthWorker, &[("ZUSE_CLOUD_DB_LISTEN", "true")])
+            !budget(Role::Operator, &[("ZUSE_CLOUD_DB_LISTEN", "true")])
+                .unwrap()
+                .listen
+        );
+        // The credential worker sleeps on NOTIFY: 1 pool + 1 LISTEN.
+        let auth = budget(Role::AuthWorker, &[]).unwrap();
+        assert_eq!((auth.listen, auth.total()), (true, 2));
+        assert!(
+            !budget(Role::AuthWorker, &[("ZUSE_CLOUD_DB_LISTEN", "false")])
                 .unwrap()
                 .listen
         );
