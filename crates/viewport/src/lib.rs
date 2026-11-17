@@ -2205,4 +2205,5 @@ pub fn initialize(cx: &mut App) {
         .expect("bundled interface fonts");
 }
 
+pub mod zapper_avatar;
 pub mod zot_issues;

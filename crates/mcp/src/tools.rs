@@ -45,8 +45,26 @@ pub struct Tools {
     pending_turns: tokio::sync::Mutex<HashMap<String, Arc<PendingTurn>>>,
 }
 
+/// Zapper tools are named `zapper_*`; the older `zot_*` names still route to
+/// the same operations for sessions that listed tools before the rename.
+fn zapper_tool(name: &str) -> bool {
+    name.starts_with("zapper_") || name.starts_with("zot_")
+}
+
+/// The current name of a tool listed under its pre-rename `zot_*` name.
+fn renamed(name: &str) -> &str {
+    match name {
+        "zot_command" => "zapper_command",
+        "zot_files" => "zapper_files",
+        "zot_events" => "zapper_events",
+        "zot_issue" => "zapper_issue",
+        "zot_acknowledge" => "zapper_acknowledge",
+        other => other,
+    }
+}
+
 fn coordinator_tool(name: &str) -> bool {
-    name.starts_with("zot_")
+    zapper_tool(name)
         || matches!(
             name,
             "whoami"
@@ -754,30 +772,30 @@ impl Tools {
         let mut all = catalog();
         for (name, description) in [
             (
-                "zot_command",
-                "Apply a scoped Zot command. Supply commandId, zotId, expectedRevision and action. Reuse the commandId on retry. Actions include createIssue/editIssue (issueId, details), commentIssue (issueId, text), linkIssueThread (issueId, chatId), linkIssuePullRequest (issueId, url, title), delegate (optional issueId, worker, model, base), messageWorker, stopWorker, archiveWorker, releaseWorker, decide, writeFile, restoreFile and freshConversation.",
+                "zapper_command",
+                "Apply one Zapper command: commandId (new and unique; reuse only to retry a lost result), zotId, expectedRevision (current revision) and action {type, ...fields}. Actions: createIssue/editIssue {issueId, details {title, description, doneCriteria, outOfScope, status, priority, owner {type: zapper | thread (chatId)}, assigned, parent, dueDate, labels, relations}} (editIssue replaces every field), askUser {issueId, question, recommendation} (hands the issue to the user), closeIssue {issueId, outcome: merged | dropped, note}, commentIssue {issueId, text, replyTo?}, linkIssueThread {issueId, chatId}, linkIssuePullRequest {issueId, url, title}, unlinkIssueThread, unlinkIssuePullRequest, delegate {issueId?, worker {chatId: zot-worker-<commandId>, deviceId, spaceId, objective, followups: 0}, model {harness, model}, base}, messageWorker {chatId, text, automatic: true}, stopWorker, archiveWorker, releaseWorker {chatId}, decide {decision {id, workerChatId, question, answer: null}}, writeFile {path, content, expectedVersion}, restoreFile and freshConversation.",
             ),
             (
-                "zot_files",
-                "Read versioned Zot rules, notes, digest and reports. Supply zotId and optional history.",
+                "zapper_files",
+                "Read this Zapper's versioned files (rules, notes, digest, reports) with their current versions. Supply zotId and optional history.",
             ),
             (
-                "zot_events",
-                "Read durable worker reports and blockers. Supply zotId.",
+                "zapper_events",
+                "Read durable thread reports and blockers for this Zapper. Supply zotId.",
             ),
             (
-                "zot_issue",
+                "zapper_issue",
                 "Read one issue in full, including its whole description and older activity. Supply zotId and issueId.",
             ),
             (
-                "zot_acknowledge",
-                "Acknowledge handled worker reports. Supply zotId and eventIds; unresolved human decisions remain separate.",
+                "zapper_acknowledge",
+                "Acknowledge handled thread reports. Supply zotId and eventIds; unresolved human decisions remain separate.",
             ),
         ] {
             all.push(ToolDef {
                 name,
                 description,
-                input_schema: if name=="zot_command" {zuse_protocol::zots::command_schema()}else if name=="zot_issue" {json!({"type":"object","properties":{"zotId":{"type":"string"},"issueId":{"type":"string"}},"required":["zotId","issueId"]})}else{json!({"type":"object","properties":{"zotId":{"type":"string"},"history":{"type":"boolean"},"eventIds":{"type":"array","items":{"type":"string"}}},"required":["zotId"]})},
+                input_schema: if name=="zapper_command" {zuse_protocol::zots::command_schema()}else if name=="zapper_issue" {json!({"type":"object","properties":{"zotId":{"type":"string"},"issueId":{"type":"string"}},"required":["zotId","issueId"]})}else{json!({"type":"object","properties":{"zotId":{"type":"string"},"history":{"type":"boolean"},"eventIds":{"type":"array","items":{"type":"string"}}},"required":["zotId"]})},
             });
         }
         all.into_iter()
@@ -789,14 +807,15 @@ impl Tools {
                         && !tool.name.starts_with("plugins_")
                         && !tool.name.starts_with("device_")))
                     && (!self.zuse.is_coordinator() || coordinator_tool(tool.name))
-                    && (!tool.name.starts_with("zot_")
+                    && (!zapper_tool(tool.name)
                         || self.zuse.is_coordinator()
-                        || (self.zuse.is_zot_worker() && tool.name == "zot_command"))
+                        || (self.zuse.is_zot_worker() && tool.name == "zapper_command"))
             })
             .collect()
     }
 
     pub fn has(&self, name: &str) -> bool {
+        let name = renamed(name);
         self.list().iter().any(|t| t.name == name)
     }
 
@@ -804,7 +823,7 @@ impl Tools {
     /// should read (surfaced as `isError`, never as a protocol error).
     pub async fn call(&self, name: &str, args: Value) -> Result<Value, String> {
         if self.zuse.is_coordinator() && !coordinator_tool(name) {
-            return Err("coordinators delegate mutations through scoped Zot commands".into());
+            return Err("a Zapper delegates repository work to threads; use zapper_command".into());
         }
         let result = match name {
             "request_secret" => {
@@ -816,27 +835,27 @@ impl Tools {
                     .ok_or("Private secrets require an originating chat")?;
                 self.zuse.call_once(zuse_rpc::methods::REQUEST_PRIVATE_OPERATION, json!({"chatId":chat,"targetDeviceId":self.zuse.origin().device_id,"operation":args})).await
             }
-            "zot_command" => {
+            "zapper_command" | "zot_command" => {
                 self.zuse
                     .control(zuse_protocol::control::ZOT_COMMAND, args)
                     .await
             }
-            "zot_files" => {
+            "zapper_files" | "zot_files" => {
                 self.zuse
                     .control(zuse_protocol::control::ZOT_FILES, args)
                     .await
             }
-            "zot_events" => {
+            "zapper_events" | "zot_events" => {
                 self.zuse
                     .control(zuse_protocol::control::ZOT_EVENTS, args)
                     .await
             }
-            "zot_issue" => {
+            "zapper_issue" | "zot_issue" => {
                 self.zuse
                     .control(zuse_protocol::control::ZOT_ISSUE, args)
                     .await
             }
-            "zot_acknowledge" => {
+            "zapper_acknowledge" | "zot_acknowledge" => {
                 self.zuse
                     .control(zuse_protocol::control::ACK_ZOT_EVENTS, args)
                     .await
@@ -1765,13 +1784,14 @@ mod tests {
         .with_control_context(None, false)
         .with_worker_context(true);
         let tools = super::Tools::new(std::sync::Arc::new(zuse)).list();
-        assert!(tools.iter().any(|t| t.name == "zot_command"));
-        assert!(
-            !tools
-                .iter()
-                .any(|t| matches!(t.name, "zot_events" | "zot_files" | "zot_acknowledge"))
-        );
+        assert!(tools.iter().any(|t| t.name == "zapper_command"));
+        assert!(!tools.iter().any(|t| matches!(
+            t.name,
+            "zapper_events" | "zapper_files" | "zapper_acknowledge"
+        )));
         assert!(tools.iter().any(|t| t.name == "list_projects"));
+        assert_eq!(super::renamed("zot_command"), "zapper_command");
+        assert_eq!(super::renamed("list_projects"), "list_projects");
     }
 
     use super::*;
