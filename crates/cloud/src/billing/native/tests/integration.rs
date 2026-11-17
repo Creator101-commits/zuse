@@ -187,6 +187,7 @@ async fn native_commerce_webhooks_wallet_concurrency_and_recovery() {
     .unwrap();
     let native = NativeBilling {
         engine: engine.clone(),
+        environment: Environment::Test,
         provider,
         accounts: HashSet::from(["user-native".into()]),
         default_provider: "stripe".into(),
@@ -253,16 +254,34 @@ async fn native_commerce_webhooks_wallet_concurrency_and_recovery() {
             .await
             .is_err()
     );
-    control
-        .native_webhook(Some("stripe"), &headers, &bytes)
+    // The API process projects an accepted notification itself, right after it
+    // commits, without waiting for the billing worker; replays coalesce into
+    // one follow-up task per account, which ends once nothing is due soon.
+    let serving = control.clone().with_native_follow_ups();
+    let accepted = std::time::Instant::now();
+    for _ in 0..2 {
+        serving
+            .native_webhook(Some("stripe"), &headers, &bytes)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(serving.follow_up_active("user-native"));
+    let projected = loop {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM api_entitlements WHERE account_id='user-native' AND status='active'",
+        )
+        .fetch_one(&pool)
         .await
-        .unwrap()
         .unwrap();
-    control
-        .native_webhook(Some("stripe"), &headers, &bytes)
-        .await
-        .unwrap()
-        .unwrap();
+        if count == 1 {
+            break accepted.elapsed();
+        }
+        assert!(accepted.elapsed() < std::time::Duration::from_secs(10));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    println!("webhook_to_projection_ms={}", projected.as_millis());
+    // The same pass in the billing worker stays idempotent crash recovery.
     control.native_maintenance().await.unwrap();
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM api_entitlements WHERE account_id='user-native' AND status='active'",
@@ -370,6 +389,20 @@ async fn native_commerce_webhooks_wallet_concurrency_and_recovery() {
             .reserve_hosted_model("user-native", &request, now)
             .await
             .unwrap()
+    );
+    // The worker sleeps exactly until the held reservation expires.
+    let floor = chrono::Utc::now().timestamp_millis();
+    assert_eq!(
+        control.native_next_due(floor).await.unwrap(),
+        Some(now + 3_600_000)
+    );
+    assert_eq!(
+        control
+            .native_next_due(now + 3_600_000)
+            .await
+            .unwrap()
+            .map(|d| d > now + 3_600_000),
+        Some(true)
     );
     control
         .increase_hosted_model("user-native", &request.request_id, 3_000_000)

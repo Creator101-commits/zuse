@@ -1592,6 +1592,19 @@ impl FileFold {
     }
 }
 
+/// New review files start folded; preserve the reader's choices on refresh.
+fn sync_sidebar_folds(folds: &mut HashMap<String, FileFold>, files: &[FileDiff]) {
+    let paths: std::collections::HashSet<&str> =
+        files.iter().map(|file| file.path.as_str()).collect();
+    folds.retain(|path, _| paths.contains(path.as_str()));
+    for file in files {
+        folds.entry(file.path.clone()).or_insert(FileFold {
+            collapsed: true,
+            ..Default::default()
+        });
+    }
+}
+
 struct HighlightSlot {
     fingerprint: u64,
     state: DiffHighlightState,
@@ -1650,6 +1663,11 @@ struct CommentDraft {
 /// (the shell calls it when the pane first opens).
 pub struct Changes {
     git_controls: Entity<crate::git_controls::GitPanel>,
+    /// Sidebar reviews lead with files; source control remains available on demand.
+    sidebar_review: bool,
+    /// A sidebar review stays attached to the chat that opened it.
+    owner_chat_id: Option<String>,
+    show_git_controls: bool,
     state: Entity<AppState>,
     diffs: Vec<CheckoutDiff>,
     started: bool,
@@ -1754,6 +1772,9 @@ impl Changes {
         let mode = DiffMode::from_split(settings.diff_split);
         Self {
             git_controls,
+            sidebar_review: false,
+            owner_chat_id: None,
+            show_git_controls: true,
             state,
             mode,
             wrap_lines: settings.diff_wrap,
@@ -1802,6 +1823,35 @@ impl Changes {
         }
     }
 
+    /// A compact file-first review for the sidebar.
+    pub fn for_sidebar_review(
+        state: Entity<AppState>,
+        owner_chat_id: String,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut changes = Self::new(state, cx);
+        changes.sidebar_review = true;
+        changes.owner_chat_id = Some(owner_chat_id);
+        changes.show_git_controls = false;
+        // A single code column is easier to scan in the sidebar. The layout
+        // toggle still lets the reader switch to a split view.
+        changes.mode = DiffMode::Unified;
+        changes
+    }
+
+    fn chat<'a>(&self, state: &'a AppState) -> Option<&'a Chat> {
+        match &self.owner_chat_id {
+            Some(id) => state.chats.iter().find(|chat| &chat.id == id),
+            None => state.selected_chat_row(),
+        }
+    }
+
+    fn composer_key(&self, state: &AppState) -> String {
+        self.owner_chat_id
+            .clone()
+            .unwrap_or_else(|| state.composer_key())
+    }
+
     /// A pane pinned to one commit's diff (a History row click) — fetches
     /// `parent vs commit` once and never offers the scope menu.
     pub fn for_commit(
@@ -1821,6 +1871,11 @@ impl Changes {
         let mut changes = Self::new(state, cx);
         changes.scope = DiffScope::History;
         changes
+    }
+
+    /// Whether this is the checkout review rather than history or a pinned commit.
+    pub fn is_review(&self) -> bool {
+        self.commit.is_none() && self.scope != DiffScope::History
     }
 
     pub fn is_history(&self) -> bool {
@@ -1847,7 +1902,7 @@ impl Changes {
     /// and the pane sits on "Preparing diff…" forever (user report).
     fn desired_target(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        let device = state.selected_chat_row()?.device_id.clone();
+        let device = self.chat(state)?.device_id.clone();
         (state.local_device_id.as_deref() != Some(device.as_str())).then_some(device)
     }
 
@@ -1857,9 +1912,7 @@ impl Changes {
     pub fn ensure_watch(&mut self, cx: &mut Context<Self>) {
         let target = self.desired_target(cx);
         let archive = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat(self.state.read(cx))
             .filter(|chat| chat.archived)
             .map(|chat| chat.id.clone());
         if self.started && self.watch_target == target && self.watch_archive == archive {
@@ -1965,7 +2018,7 @@ impl Changes {
 
     fn resolved(&self, cx: &App) -> Option<CheckoutDiff> {
         let state = self.state.read(cx);
-        let chat = state.selected_chat_row()?;
+        let chat = self.chat(state)?;
         resolve_diff(&self.diffs, chat).cloned()
     }
 
@@ -1975,7 +2028,7 @@ impl Changes {
         if let Some(diff) = self.resolved(cx) {
             return Some(diff.cwd);
         }
-        self.state.read(cx).selected_chat_row()?.cwd.clone()
+        self.chat(self.state.read(cx))?.cwd.clone()
     }
 
     /// The diff the pane currently displays: the watch stream for the working
@@ -2028,11 +2081,7 @@ impl Changes {
             return;
         };
         self.branches_for = Some(key.clone());
-        let chat_id = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone());
+        let chat_id = self.chat(self.state.read(cx)).map(|chat| chat.id.clone());
         self.branches_task = Some(cx.spawn(async move |this, cx| {
             let mut params = serde_json::Map::new();
             params.insert("repoPath".into(), serde_json::Value::String(cwd));
@@ -2060,9 +2109,7 @@ impl Changes {
                             .is_some_and(|base| changes.branches.contains(base));
                         if !keep {
                             let current = changes
-                                .state
-                                .read(cx)
-                                .selected_chat_row()
+                                .chat(changes.state.read(cx))
                                 .and_then(|chat| chat.branch.clone());
                             changes.base_ref =
                                 default_base_ref(&changes.branches, current.as_deref());
@@ -2093,12 +2140,7 @@ impl Changes {
             self.scoped_task = None;
             return;
         }
-        let Some(chat_id) = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone())
-        else {
+        let Some(chat_id) = self.chat(self.state.read(cx)).map(|chat| chat.id.clone()) else {
             return;
         };
         let Some(cwd) = self.scoped_cwd(cx) else {
@@ -2380,7 +2422,11 @@ impl Changes {
                     files.len()
                 };
                 let horizontal = files.iter().map(FileHorizontalState::new).collect();
-                changes.folds.clear();
+                if changes.sidebar_review {
+                    sync_sidebar_folds(&mut changes.folds, &files);
+                } else {
+                    changes.folds.clear();
+                }
                 changes.highlights.clear();
                 changes.review_fingerprints = fingerprints;
                 let staged = changes.staged_comments(cx);
@@ -2392,7 +2438,12 @@ impl Changes {
                         .as_ref()
                         .map(|(path, side, line)| (path.as_str(), *side, *line)),
                     changes.mode,
-                    |_| false,
+                    |ix| {
+                        changes
+                            .folds
+                            .get(&files[ix].path)
+                            .is_some_and(|fold| fold.collapsed)
+                    },
                 );
                 changes.comment_key = comment_state_key(&staged, draft.as_ref());
                 // The uniform hint keeps offsets for never-rendered rows
@@ -2756,7 +2807,7 @@ impl Changes {
     fn staged_comments(&self, cx: &App) -> Vec<ReviewComment> {
         let state = self.state.read(cx);
         state
-            .review_comments(&state.composer_key())
+            .review_comments(&self.composer_key(state))
             .iter()
             .filter(|comment| {
                 self.draft
@@ -2786,11 +2837,10 @@ impl Changes {
             .clone()
     }
 
-    /// A draft belongs to the checkout it was opened over. Chat navigation
-    /// swaps both the diff under it and the composer it would stage onto, so
-    /// the half-written note is dropped rather than following the user across.
+    /// Drop a draft if an unpinned pane changes its composer. Sidebar reviews
+    /// keep their owning chat's key even while another chat is selected.
     fn discard_stale_draft(&mut self, cx: &mut Context<Self>) {
-        let key = self.state.read(cx).composer_key();
+        let key = self.composer_key(self.state.read(cx));
         if self.draft.as_ref().is_some_and(|draft| draft.key != key) {
             self.draft = None;
             self.sync_comment_rows(cx);
@@ -2906,7 +2956,7 @@ impl Changes {
             _ => {}
         });
         let handle = input.read(cx).focus_handle(cx);
-        let key = self.state.read(cx).composer_key();
+        let key = self.composer_key(self.state.read(cx));
         let old_path = self.old_path_of(&path);
         self.draft = Some(CommentDraft {
             editing_id: None,
@@ -2926,7 +2976,7 @@ impl Changes {
     fn edit_comment(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let state = self.state.read(cx);
         let Some(comment) = state
-            .review_comments(&state.composer_key())
+            .review_comments(&self.composer_key(state))
             .iter()
             .find(|comment| comment.id == id && !comment.is_file())
             .cloned()
@@ -2984,8 +3034,8 @@ impl Changes {
     }
 
     fn remove_comment(&mut self, id: &str, cx: &mut Context<Self>) {
+        let key = self.composer_key(self.state.read(cx));
         self.state.update(cx, |state, cx| {
-            let key = state.composer_key();
             state.remove_review_comment(&key, id);
             cx.notify();
         });
@@ -3161,11 +3211,7 @@ impl Changes {
         let active = self.active_diff(cx);
         let engine = self.state.read(cx).engine().cloned();
         let target = self.desired_target(cx);
-        let chat_id = self
-            .state
-            .read(cx)
-            .selected_chat_row()
-            .map(|chat| chat.id.clone());
+        let chat_id = self.chat(self.state.read(cx)).map(|chat| chat.id.clone());
         let mode = self.scope.mode().to_string();
         let base_ref = self.base_ref.clone();
         let commit_sha = (self.scope == DiffScope::Commit)
@@ -3250,18 +3296,22 @@ impl Changes {
             return gpui::Empty.into_any_element();
         };
         let theme = Theme::of(cx).clone();
-        let highlight = files
-            .get(row.file())
+        let source_row = !matches!(row, DiffRow::FileHeader { .. });
+        let highlight = source_row
+            .then(|| files.get(row.file()))
+            .flatten()
             .and_then(|file| self.request_highlight(file, &parsed_key, cx));
         let horizontal = &self.parsed.as_ref().unwrap().horizontal[row.file()];
         let code_width = match files.get(row.file()) {
-            Some(file) if !self.wrap_lines => DiffCodeWidth::Scrollable(horizontal.metrics(
-                file,
-                highlight.as_ref(),
-                &theme,
-                window.text_system(),
-                crate::typography::generation(cx),
-            )),
+            Some(file) if source_row && !self.wrap_lines => {
+                DiffCodeWidth::Scrollable(horizontal.metrics(
+                    file,
+                    highlight.as_ref(),
+                    &theme,
+                    window.text_system(),
+                    crate::typography::generation(cx),
+                ))
+            }
             _ => DiffCodeWidth::Wrapped,
         };
         let code_scroll = DiffCodeScrollContext {
@@ -3583,8 +3633,12 @@ impl Changes {
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                if !this.reviewed.remove(&review_key) {
+                let marked_viewed = !this.reviewed.remove(&review_key);
+                if marked_viewed {
                     this.reviewed.insert(review_key.clone());
+                    if this.sidebar_review && !collapsed {
+                        this.toggle_fold(ix, cx);
+                    }
                 }
                 if let Some(range) = this.row_ranges.get(ix) {
                     this.list.remeasure_items(range.start..range.start + 1);
@@ -3598,6 +3652,8 @@ impl Changes {
         let sticky_paint = sticky.then(|| sticky_file_header_paint(theme));
         let rest_bg = if let Some(paint) = sticky_paint {
             paint.rest_bg
+        } else if self.sidebar_review && collapsed {
+            theme.ink(0.0)
         } else {
             theme.ink(0.025)
         };
@@ -3642,11 +3698,24 @@ impl Changes {
         // gone — rows are flat now).
         div()
             .id(presentation.element_id(ix))
+            .role(gpui::Role::Button)
+            .aria_label(format!(
+                "{}, {}",
+                file.path,
+                if collapsed { "collapsed" } else { "expanded" }
+            ))
+            .aria_expanded(!collapsed)
             .w_full()
             .h(px(FILE_HEADER_HEIGHT))
             .when(
                 presentation == FileHeaderPresentation::Row && ix > 0,
-                |el| el.border_t_1().border_color(crate::theme::hairline(0.04)),
+                |el| {
+                    el.border_t_1().border_color(if self.sidebar_review {
+                        theme.border
+                    } else {
+                        crate::theme::hairline(0.04)
+                    })
+                },
             )
             .when(sticky, |el| {
                 el.border_b_1()
@@ -3667,15 +3736,33 @@ impl Changes {
                 cx.notify();
             }))
             .child(chevron)
-            .child(
+            .child(if self.sidebar_review {
+                crate::pull_request_detail::status_badge(file.status, theme).into_any_element()
+            } else {
                 crate::file_icons::icon(
                     crate::file_icons::FileIconIdentity::file(&file.path),
                     theme.appearance,
                 )
                 .size(px(14.0))
-                .flex_none(),
-            )
-            .child({
+                .flex_none()
+                .into_any_element()
+            })
+            .child(if self.sidebar_review {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_start()
+                    .text_size(px(12.0))
+                    .text_color(if !reviewed {
+                        theme.text
+                    } else {
+                        theme.text_dim
+                    })
+                    .child(SharedString::from(file.path.clone()))
+                    .into_any_element()
+            } else {
                 let (dir, name) = match file.path.rsplit_once('/') {
                     Some((dir, name)) => (format!("{dir}/"), name.to_string()),
                     None => (String::new(), file.path.clone()),
@@ -3706,6 +3793,7 @@ impl Changes {
                                 .child(SharedString::from(dir)),
                         )
                     })
+                    .into_any_element()
             })
             .when(file.binary, |el| {
                 el.child(
@@ -3716,7 +3804,7 @@ impl Changes {
                         .child(SharedString::from("BIN")),
                 )
             })
-            .when(adds > 0 || !file.binary, |el| {
+            .when(adds > 0 || (!self.sidebar_review && !file.binary), |el| {
                 el.child(
                     div()
                         .flex_none()
@@ -3726,7 +3814,7 @@ impl Changes {
                         .child(SharedString::from(format!("+{adds}"))),
                 )
             })
-            .when(dels > 0 || !file.binary, |el| {
+            .when(dels > 0 || (!self.sidebar_review && !file.binary), |el| {
                 el.child(
                     div()
                         .flex_none()
@@ -3737,34 +3825,36 @@ impl Changes {
                 )
             })
             .child(viewed_control)
-            .child(
-                div()
-                    .id(("diff-open-file", ix))
-                    .flex_none()
-                    .size(px(crate::surface_chrome::CONTROL_SIZE))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
-                    .hover(|s| s.bg(theme.ink(0.08)))
-                    .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    })
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(ChangesEvent::OpenFile(path.clone()));
-                    }))
-                    .anchored_tooltip(crate::tooltip::Placement::Below, |_, cx| {
-                        cx.new(|_| DiffHeaderTooltip("Open in file browser")).into()
-                    })
-                    .tooltip_show_delay(Duration::from_millis(350))
-                    .child(
-                        crate::icons::icon(crate::icons::DOCUMENT)
-                            .size(px(crate::surface_chrome::ICON_SIZE))
-                            .text_color(theme.text_muted),
-                    ),
-            )
+            .when(!self.sidebar_review || !collapsed, |el| {
+                el.child(
+                    div()
+                        .id(("diff-open-file", ix))
+                        .flex_none()
+                        .size(px(crate::surface_chrome::CONTROL_SIZE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(crate::surface_chrome::CONTROL_RADIUS))
+                        .hover(|s| s.bg(theme.ink(0.08)))
+                        .on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(ChangesEvent::OpenFile(path.clone()));
+                        }))
+                        .anchored_tooltip(crate::tooltip::Placement::Below, |_, cx| {
+                            cx.new(|_| DiffHeaderTooltip("Open in file browser")).into()
+                        })
+                        .tooltip_show_delay(Duration::from_millis(350))
+                        .child(
+                            crate::icons::icon(crate::icons::DOCUMENT)
+                                .size(px(crate::surface_chrome::ICON_SIZE))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -3994,9 +4084,7 @@ impl Changes {
         }
         let scope = self.scope;
         let history_branch = (scope == DiffScope::History).then(|| {
-            self.state
-                .read(cx)
-                .selected_chat_row()
+            self.chat(self.state.read(cx))
                 .and_then(|chat| chat.branch.clone())
                 .unwrap_or_else(|| "HEAD".to_string())
         });
@@ -4159,6 +4247,22 @@ impl Changes {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(patch.clone()));
             });
             crate::surface_chrome::control_group(&theme)
+                .when(self.sidebar_review, |el| {
+                    el.child(
+                        Self::header_toggle(
+                            "changes-git-controls",
+                            crate::icons::GIT_BRANCH,
+                            "Source control and commit",
+                            self.show_git_controls,
+                            &theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.show_git_controls = !this.show_git_controls;
+                            cx.notify();
+                        })),
+                    )
+                })
                 .child(self.split_toggle(&theme, cx))
                 .child(Self::group_divider(&theme))
                 .child(self.wrap_toggle(&theme, cx))
@@ -4236,30 +4340,28 @@ impl Changes {
         popover::popover_card(theme)
             .w(px(200.0))
             .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_scope_menu(cx)))
-            .child(
-                // The 2px row gap every other menu carries — rows straight on
-                // the card abutted, adjacent washes read as one slab (user
-                // report).
-                div().flex().flex_col().gap(px(2.0)).children(
-                    DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
-                        popover::menu_row(
-                            theme,
-                            scope == current,
-                            format!("changes-scope-row-{ix}"),
-                        )
+            .child(div().flex().flex_col().gap(px(1.0)).children(
+                DiffScope::ALL.into_iter().enumerate().map(|(ix, scope)| {
+                    popover::menu_row(theme, scope == current, format!("changes-scope-row-{ix}"))
                         .id(("changes-scope-row", ix))
+                        .debug_selector(move || format!("changes-scope-row-{ix}"))
+                        .role(gpui::Role::MenuItem)
+                        .tab_index(0)
+                        .h(px(28.0))
+                        .py(px(0.0))
+                        .gap(px(8.0))
+                        .text_size(crate::typography::text_sm())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_scope(scope, cx);
                             this.close_scope_menu(cx);
                         }))
-                        .gap(px(8.0))
                         .child(
                             crate::icons::icon(scope_icon(scope))
                                 .size(px(14.0))
                                 .flex_none()
                                 .text_color(theme.text_muted),
                         )
-                        .child(div().flex_1().child(SharedString::from(scope.label())))
+                        .child(div().flex_1().min_w_0().truncate().child(scope.label()))
                         .when(scope == current, |row| {
                             row.child(
                                 crate::icons::icon(crate::icons::CHECK)
@@ -4268,9 +4370,8 @@ impl Changes {
                                     .text_color(theme.text_muted),
                             )
                         })
-                    }),
-                ),
-            )
+                }),
+            ))
             .into_any_element()
     }
 
@@ -4281,9 +4382,7 @@ impl Changes {
             return None;
         }
         let branch = self
-            .state
-            .read(cx)
-            .selected_chat_row()
+            .chat(self.state.read(cx))
             .and_then(|chat| chat.branch.clone())
             .unwrap_or_else(|| "HEAD".to_string());
         let base = self.base_ref.clone().unwrap_or_else(|| "…".to_string());
@@ -4429,7 +4528,7 @@ impl Changes {
             let list = popover::menu_scroll_list("changes-ref-list", &list_scroll)
                 .flex()
                 .flex_col()
-                .gap(px(2.0))
+                .gap(px(1.0))
                 .max_h(px(240.0))
                 .children(rows.into_iter().enumerate().map(|(row_ix, branch_ix)| {
                     let name = branches[branch_ix].clone();
@@ -4442,19 +4541,39 @@ impl Changes {
                         format!("changes-ref-row-{row_ix}"),
                     )
                     .id(("changes-ref-row", row_ix))
+                    .debug_selector(move || format!("changes-ref-row-{row_ix}"))
+                    .role(gpui::Role::Button)
+                    .aria_selected(selected)
+                    .aria_label(format!("Compare with {label}"))
+                    .tab_index(0)
+                    .min_h(px(30.0))
+                    .tooltip(crate::settings::widgets::text_tooltip(label.clone()))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_base_ref(name.clone(), cx);
                         this.close_ref_menu(cx);
                     }))
+                    .child(popover::picker_icon_slot(
+                        crate::icons::icon(crate::icons::GIT_BRANCH)
+                            .size(px(14.0))
+                            .text_color(theme.text_muted)
+                            .into_any_element(),
+                    ))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .font_family(theme.font_mono.clone())
-                            .text_size(px(12.0))
+                            .text_size(crate::typography::text_sm())
                             .child(SharedString::from(label)),
                     )
+                    .when(selected, |row| {
+                        row.child(
+                            crate::icons::icon(crate::icons::CHECK)
+                                .size(px(14.0))
+                                .flex_none()
+                                .text_color(theme.text_muted),
+                        )
+                    })
                 }));
             popover::menu_scroll_host("changes-ref-list-host")
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -4468,7 +4587,8 @@ impl Changes {
         };
 
         popover::popover_card(theme)
-            .w(px(240.0))
+            .w(px(256.0))
+            .font_family(theme.font_sans_fixed.clone())
             .track_focus(&focus)
             .on_key_down(
                 cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| this.ref_menu_key(event, cx)),
@@ -5317,7 +5437,7 @@ impl Render for Changes {
         let base = self.base_ref.clone();
         // With no session selected (new-chat canvas) there is nothing to
         // prepare — show the quiet empty state, not an endless spinner.
-        let no_chat = self.state.read(cx).selected_chat_row().is_none();
+        let no_chat = self.chat(self.state.read(cx)).is_none();
         let phase = if no_chat {
             DiffPhase::Clean
         } else {
@@ -5458,7 +5578,7 @@ impl Render for Changes {
                         .child(message),
                 )
             })
-            .when(self.commit.is_none(), |d| {
+            .when(self.commit.is_none() && self.show_git_controls, |d| {
                 d.child(self.git_controls.clone())
             })
             .child(content)
@@ -5518,6 +5638,72 @@ impl Changes {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[gpui::test]
+    fn sidebar_review_keeps_chat_diff_draft_and_folds_when_selection_changes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+        });
+        let window = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                let first = chat(Some("co-1"), "device-a", Some("/first"));
+                let mut second = chat(Some("co-2"), "device-b", Some("/second"));
+                second.id = "c2".into();
+                state.chats = vec![first, second];
+                state.selected_chat = Some("c1".into());
+                state.local_device_id = Some("local".into());
+                state
+            });
+            Changes::for_sidebar_review(state, "c1".into(), cx)
+        });
+        window
+            .update(cx, |changes, window, cx| {
+                let first_diff = diff("co-1", "device-a", "/first", PATCH);
+                changes.diffs = vec![first_diff.clone(), diff("co-2", "device-b", "/second", "")];
+                let files = parse_patch(PATCH);
+                sync_sidebar_folds(&mut changes.folds, &files);
+                changes.folds.get_mut(&files[0].path).unwrap().collapsed = false;
+                changes.parsed = Some(ParsedDiff {
+                    key: changes.parse_key(&first_diff),
+                    truncated: false,
+                    additions: 0,
+                    deletions: 0,
+                    file_count: files.len(),
+                    horizontal: files.iter().map(FileHorizontalState::new).collect(),
+                    files: Arc::new(files.clone()),
+                });
+                changes.open_draft(files[0].path.clone(), CommentSide::New, 1, window, cx);
+                changes
+                    .draft
+                    .as_ref()
+                    .unwrap()
+                    .input
+                    .clone()
+                    .update(cx, |input, cx| {
+                        input.set_text("Keep this draft", cx);
+                    });
+                changes
+                    .state
+                    .update(cx, |state, _| state.selected_chat = Some("c2".into()));
+                changes.sync(cx);
+                assert_eq!(changes.resolved(cx).unwrap().checkout_id, "co-1");
+                assert_eq!(changes.desired_target(cx).as_deref(), Some("device-a"));
+                assert_eq!(
+                    changes.draft.as_ref().unwrap().input.read(cx).text(),
+                    "Keep this draft"
+                );
+                assert!(!changes.folds[&files[0].path].collapsed);
+                changes.commit_draft(cx);
+                let state = changes.state.read(cx);
+                assert_eq!(state.review_comments("c1").len(), 1);
+                assert!(state.review_comments("c2").is_empty());
+            })
+            .unwrap();
+    }
 
     #[gpui::test]
     fn editing_staged_diff_comments_preserves_identity_and_cancellation(
@@ -5768,6 +5954,30 @@ rename to new_name.rs
         // Notices lead the body: the added file carries "New file".
         let added_rows = &rows[ranges[1].clone()];
         assert_eq!(added_rows[1], DiffRow::Notice { file: 1, notice: 0 });
+    }
+
+    #[test]
+    fn sidebar_review_lists_files_and_preserves_expansion_on_refresh() {
+        let files = parse_patch(PATCH);
+        let mut folds = HashMap::new();
+        sync_sidebar_folds(&mut folds, &files);
+        let (rows, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |ix| {
+            folds[&files[ix].path].collapsed
+        });
+        assert_eq!(rows.len(), files.len());
+        assert!(ranges.iter().all(|range| range.len() == 1));
+
+        folds.get_mut(&files[0].path).unwrap().collapsed = false;
+        folds.insert("removed.rs".into(), FileFold::default());
+        sync_sidebar_folds(&mut folds, &files);
+        assert!(!folds[&files[0].path].collapsed);
+        assert!(folds[&files[1].path].collapsed);
+        assert!(!folds.contains_key("removed.rs"));
+        let (_, ranges) = flatten_rows(&files, &[], None, DiffMode::Unified, |ix| {
+            folds[&files[ix].path].collapsed
+        });
+        assert!(ranges[0].len() > 1);
+        assert_eq!(ranges[1].len(), 1);
     }
 
     #[test]

@@ -81,8 +81,8 @@ impl RuntimeControl {
         if bindings.len() > 64 {
             return Err(ApiError::bad_request("invalid_workload_secret_binding"));
         }
-        let enabled: bool = crate::db::schema::present(
-            &self.pool,
+        let enabled: bool = crate::db::schema::present_in(
+            &mut **tx,
             "SELECT to_regclass('zuse_rust_workload_secrets') IS NOT NULL",
         )
         .await?;

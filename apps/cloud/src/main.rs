@@ -616,8 +616,11 @@ async fn main() -> Result<()> {
             let master = zuse_cloud::crypto::MasterKey::parse(&encryption)
                 .map_err(|_| anyhow::anyhow!("Invalid credential authority encryption key"))?;
             let db = process_db(&url, Role::AuthWorker).await?;
-            let control =
-                zuse_cloud::connections::ConnectionControl::from_pool(db.pool, master, accounts);
+            let control = zuse_cloud::connections::ConnectionControl::from_pool(
+                db.pool.clone(),
+                master,
+                accounts,
+            );
             zuse_cloud::connections::worker::CommandDriver::deployment_ready(&driver)?;
             let driver = zuse_cloud::connections::worker::CommandDriver::new(&driver)?;
             control
@@ -627,42 +630,79 @@ async fn main() -> Result<()> {
             if check {
                 return Ok(());
             }
-            // While nothing is pending, one cheap probe per poll replaces the
-            // full maintenance round; the full round still runs every sweep.
+            if once {
+                let result = control.work_once(&driver).await;
+                if matches!(result, Ok(true)) {
+                    zuse_cloud::events::hint::send();
+                }
+                println!("{}", result.map_err(|e| anyhow::anyhow!("{}", e.code))?);
+                return Ok(());
+            }
+            // Sleeps until NOTIFY (a sign-in or proposal became claimable, a
+            // refresh started or went stale), the next known deadline, or the
+            // idle safety net. NOTIFY only shortens waits; without `LISTEN`
+            // the short `ZUSE_CLOUD_AUTH_WORKER_POLL_MS` fallback applies.
+            let wakeups = db.wakeups().await;
             let poll = std::time::Duration::from_millis(env_ms(
                 "ZUSE_CLOUD_AUTH_WORKER_POLL_MS",
                 2_000,
                 250..=60_000,
             )?);
-            const SWEEP: std::time::Duration = std::time::Duration::from_secs(60);
-            let mut last_sweep: Option<std::time::Instant> = None;
-            let mut failures = 0u32;
-            loop {
-                let sweep = once || last_sweep.is_none_or(|at| at.elapsed() >= SWEEP);
-                let result = if sweep {
-                    last_sweep = Some(std::time::Instant::now());
-                    control.work_once(&driver).await
+            // Before migration 0045 no sign-in ever notifies: keep polling.
+            let notified = wakeups.enabled()
+                && control
+                    .auth_wakeups_installed()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e.code))?;
+            if wakeups.enabled() && !notified {
+                tracing::warn!(
+                    code = "auth_wakeups_missing",
+                    "Credential worker wakeups are not installed; polling instead"
+                );
+            }
+            let cadence = Cadence {
+                idle: if notified {
+                    std::time::Duration::from_secs(300)
                 } else {
-                    match control.auth_work_pending().await {
-                        Ok(true) => control.work_once(&driver).await,
-                        other => other,
+                    poll
+                },
+                busy: std::time::Duration::from_secs(1).min(poll),
+            };
+            tracing::info!(
+                idle_ms = cadence.idle.as_millis() as u64,
+                busy_ms = cadence.busy.as_millis() as u64,
+                listen = notified,
+                "Credential worker schedule"
+            );
+            let mut notifications = wakeups.subscribe();
+            let interest = [Work::Auth];
+            let mut failures = 0u32;
+            // Startup runs a full round: anything may have changed meanwhile.
+            let mut run = true;
+            loop {
+                let outcome = async {
+                    let mut next = None;
+                    if !run {
+                        // Idle safety pass: one statement decides whether a
+                        // round is needed at all.
+                        let now = now_ms();
+                        next = control.auth_due(now).await?.next(now);
+                        run = next.is_some_and(|at| at <= now);
                     }
-                };
-                if matches!(result, Ok(true)) {
-                    zuse_cloud::events::hint::send();
-                }
-                if once {
-                    println!("{}", result.map_err(|e| anyhow::anyhow!("{}", e.code))?);
-                    break;
-                }
-                let wait = match result {
-                    Ok(true) => {
-                        failures = 0;
-                        continue;
+                    if run {
+                        while control.work_once(&driver).await? {
+                            zuse_cloud::events::hint::send();
+                        }
+                        let now = now_ms();
+                        next = control.auth_due(now).await?.next(now);
                     }
-                    Ok(false) => {
+                    Ok::<_, zuse_cloud::error::ApiError>(next)
+                }
+                .await;
+                let (wait, timer) = match outcome {
+                    Ok(next) => {
                         failures = 0;
-                        poll
+                        zuse_cloud::db::wake::next_wait(now_ms(), next, cadence)
                     }
                     Err(error) => {
                         failures = failures.saturating_add(1);
@@ -676,10 +716,20 @@ async fn main() -> Result<()> {
                             retry_ms = wait.as_millis() as u64,
                             "Credential authority operation deferred"
                         );
-                        wait
+                        (wait, Reason::Due)
                     }
                 };
-                tokio::select! {_=tokio::signal::ctrl_c()=>break,_=tokio::time::sleep(wait)=>{}}
+                let reason = tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    reason = sleep_or_notify(&mut notifications, &interest, wait, timer) => reason,
+                };
+                // An idle wake first asks whether anything is due.
+                run = reason != Reason::Idle;
+                tracing::debug!(
+                    reason = reason.as_str(),
+                    waited_ms = wait.as_millis() as u64,
+                    "Credential worker woke"
+                );
             }
         }
         Command::PluginMigrate => {
@@ -827,36 +877,80 @@ async fn main() -> Result<()> {
                 control = control.with_payment_providers(providers);
             }
             control = control.connect_native_from_env(&url).await?;
+            // Settlement and export run hourly, at the instant a closed day
+            // becomes settleable, and at the earliest known due time of
+            // outbox retries, engine work and reservation or grant expiries.
+            // Between those instants the worker runs no statements. Spending
+            // holds are recomputed by every event that changes them (see
+            // infra/cloud/DATABASE.md, "Billing schedule and spending caps").
+            use zuse_cloud::billing::schedule;
+            let mut pass: u64 = 0;
+            let mut retry: Option<u32> = None;
+            let mut next_settlement = i64::MIN; // settle at startup
+            let mut next_reconcile: Option<i64> = None;
             loop {
+                let started = now_ms();
+                if started >= next_settlement {
+                    let mut latest_pending = false;
+                    if let Some(config) = storage {
+                        match control.settle_snapshot_storage_once(config, now_ms()).await {
+                            Ok(report) => println!("{}", serde_json::to_string(&report)?),
+                            Err(error) if once => anyhow::bail!("{}", error.code),
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Snapshot storage settlement failed"
+                                )
+                            }
+                        }
+                    }
+                    if let (Some(provider), Some(config)) = (&provider, settlement) {
+                        match control
+                            .settle_boxd_once(provider, config, now_ms(), pass)
+                            .await
+                        {
+                            Ok(report) => {
+                                latest_pending = report.latest_pending;
+                                println!("{}", serde_json::to_string(&report)?)
+                            }
+                            Err(error) if once => anyhow::bail!("{}", error.code),
+                            Err(error) => {
+                                latest_pending = true;
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Provider settlement maintenance failed"
+                                )
+                            }
+                        }
+                    }
+                    pass = pass.wrapping_add(1);
+                    retry = latest_pending.then(|| retry.map_or(0, |n| n.saturating_add(1)));
+                    next_settlement = schedule::next_settlement(now_ms(), retry);
+                }
+                // Right after settlement: debit new compute charges from the
+                // shared wallet and recompute the spending hold.
+                let mut more = false;
                 match control.native_maintenance().await {
-                    Ok(report) => println!("{}", report),
+                    Ok(report) => {
+                        more = report["reports"]
+                            .as_array()
+                            .is_some_and(|r| r.iter().any(|r| r["more"] == true));
+                        println!("{}", report)
+                    }
                     Err(error) if once => anyhow::bail!("{}", error.code),
                     Err(error) => {
                         tracing::warn!(code = error.code, "Embedded billing maintenance deferred")
                     }
                 }
-                if let Some(config) = storage {
-                    match control.settle_snapshot_storage_once(config, now_ms()).await {
-                        Ok(report) => println!("{}", serde_json::to_string(&report)?),
-                        Err(error) if once => anyhow::bail!("{}", error.code),
-                        Err(error) => {
-                            tracing::warn!(code = error.code, "Snapshot storage settlement failed")
-                        }
-                    }
-                }
-
-                if let (Some(provider), Some(config)) = (&provider, settlement) {
-                    match control.settle_boxd_once(provider, config, now_ms()).await {
-                        Ok(report) => println!("{}", serde_json::to_string(&report)?),
-                        Err(error) if once => anyhow::bail!("{}", error.code),
-                        Err(error) => tracing::warn!(
-                            code = error.code,
-                            "Provider settlement maintenance failed"
-                        ),
-                    }
-                }
+                next_reconcile = next_reconcile.filter(|at| *at > started);
                 match control.export_once(now_ms(), 25).await {
-                    Ok(report) => println!("{}", serde_json::to_string(&report)?),
+                    Ok(report) => {
+                        next_reconcile = zuse_cloud::db::wake::earliest([
+                            next_reconcile,
+                            schedule::next_reconciliation(now_ms(), report.financial),
+                        ]);
+                        println!("{}", serde_json::to_string(&report)?)
+                    }
                     Err(error) if once => anyhow::bail!("{}", error.code),
                     Err(error) => {
                         tracing::warn!(code = error.code, "Billing export maintenance failed")
@@ -865,7 +959,30 @@ async fn main() -> Result<()> {
                 if once {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let native_due = control
+                    .native_next_due(started)
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(code = error.code, "Embedded billing due time unavailable");
+                        None
+                    });
+                let export_due = control.export_next_due().await.unwrap_or_else(|error| {
+                    tracing::warn!(code = error.code, "Billing export due time unavailable");
+                    None
+                });
+                let due = zuse_cloud::db::wake::earliest([
+                    Some(next_settlement),
+                    native_due,
+                    export_due,
+                    next_reconcile,
+                    more.then_some(started),
+                ]);
+                let wait = schedule::wait_until(now_ms(), due);
+                tracing::debug!(wait_ms = wait.as_millis() as u64, "Billing worker sleeping");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    _ = tokio::time::sleep(wait) => {}
+                }
             }
             control
                 .close_native_billing()
@@ -1434,16 +1551,22 @@ async fn main() -> Result<()> {
             let billing_accounts =
                 zuse_cloud::access_policy::Accounts::from_env("ZUSE_CLOUD_BILLING_WRITE_ACCOUNTS")?;
             if !billing_accounts.is_empty() {
-                let mut billing = zuse_cloud::billing::BillingControl::from_pool(
+                // Checkout takes a receipt connection while its control
+                // transaction is open: keep receipts on their own pool.
+                let mut billing = zuse_cloud::billing::BillingControl::from_pools(
                     db.pool.clone(),
+                    db.receipts_pool(),
                     billing_accounts,
                 );
                 if let Some(providers) = zuse_cloud::billing::PaymentProviders::from_env()? {
                     billing = billing.with_payment_providers(providers);
                 }
+                // Payment notifications for embedded billing accounts are
+                // projected in this process right after they commit.
                 billing = billing
                     .connect_native_from_env(&config.database_url)
-                    .await?;
+                    .await?
+                    .with_native_follow_ups();
                 store = store.with_billing_control(billing);
             }
             let identity = WorkosIdentity::new(&config)?;
@@ -1541,6 +1664,12 @@ async fn main() -> Result<()> {
             };
             let mut app = app;
             let slack_worker = if let Some(slack_config) = zuse_cloud::slack::Config::from_env()? {
+                // The Slack worker queries the pool while its advisory-lock
+                // transaction holds one shared connection.
+                anyhow::ensure!(
+                    db.budget.shared_connections() >= 2,
+                    "Slack requires at least two shared database connections; raise ZUSE_CLOUD_DB_MAX_CONNECTIONS"
+                );
                 let slack =
                     zuse_cloud::slack::Slack::connect(state, slack_config, db.pool.clone()).await?;
                 let worker = slack.start_worker();

@@ -270,7 +270,8 @@ impl Authority {
 
     /// The device authority writes through `ZUSE_CLOUD_DEVICE_DATABASE_URL`.
     /// When that is the process database it shares `shared`; a different
-    /// database gets one dedicated connection.
+    /// database gets two dedicated connections: a link holds one in its
+    /// transaction while helper reads take the other (links are serialized).
     pub async fn from_env(shared: &crate::db::ProcessDb) -> anyhow::Result<Option<Arc<Self>>> {
         let Some(path) = std::env::var_os("ZUSE_CLOUD_DEVICE_SIGNING_KEY_FILE") else {
             return Ok(None);
@@ -292,7 +293,7 @@ impl Authority {
         let pool = if shared.url() == url {
             shared.pool.clone()
         } else {
-            crate::db::dedicated_pool(&url, shared.budget.role, 1)
+            crate::db::dedicated_pool(&url, shared.budget.role, 2)
                 .await
                 .map_err(|_| anyhow::anyhow!("Cannot connect device authority database"))?
         };

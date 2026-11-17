@@ -60,7 +60,8 @@ impl Role {
     ///
     /// The production set (`serve` + `worker` + `billing-worker` +
     /// `auth-worker`) is 6 + 3 + 2 + 1 = 12 pool connections, plus one
-    /// `LISTEN` connection each for `serve` and `worker`: 14 in total.
+    /// `LISTEN` connection each for `serve`, `worker` and `auth-worker`: 15
+    /// in total.
     pub const fn default_connections(self) -> u32 {
         match self {
             Self::Serve | Self::Gateway => 6,
@@ -75,14 +76,16 @@ impl Role {
     /// The fewest connections this role can run with.
     const fn minimum_connections(self) -> u32 {
         match self {
-            // Serve keeps a separate read-only connection for the catalog.
-            Self::Serve | Self::Gateway | Self::BillingWorker => 2,
+            // Serve keeps one read-only catalog connection and one for billing
+            // receipts beside its shared pool.
+            Self::Serve => 3,
+            Self::Gateway | Self::BillingWorker => 2,
             _ => 1,
         }
     }
     /// Roles with background loops that sleep until woken.
     pub const fn listens(self) -> bool {
-        matches!(self, Self::Serve | Self::Worker)
+        matches!(self, Self::Serve | Self::Worker | Self::AuthWorker)
     }
     fn application_name(self) -> String {
         format!("zuse-cloud-{}", self.as_str())
@@ -158,10 +161,12 @@ impl Budget {
             _ => 0,
         }
     }
-    /// Connections reserved for billing delivery receipts (billing worker only).
+    /// Connections reserved for billing delivery receipts. Checkout and export
+    /// paths take a receipt connection while their control transaction is still
+    /// open; a separate pool means they never wait on a connection they hold.
     pub fn receipt_connections(&self) -> u32 {
         match self.role {
-            Role::BillingWorker => 1,
+            Role::BillingWorker | Role::Serve => 1,
             _ => 0,
         }
     }
@@ -183,7 +188,7 @@ pub struct ProcessDb {
     pub pool: PgPool,
     /// `default_transaction_read_only` catalog pool (serve and gateway).
     pub read_only: Option<PgPool>,
-    /// Billing delivery receipts (billing worker).
+    /// Billing delivery receipts (serve and billing worker).
     pub receipts: Option<PgPool>,
     url: String,
 }
@@ -362,9 +367,9 @@ mod tests {
         );
         assert_eq!(
             budgets.iter().map(|b| b.listen).collect::<Vec<_>>(),
-            [true, true, false, false]
+            [true, true, false, true]
         );
-        assert_eq!(budgets.iter().map(Budget::total).sum::<u32>(), 14);
+        assert_eq!(budgets.iter().map(Budget::total).sum::<u32>(), 15);
         for b in &budgets {
             assert_eq!(b.acquire_timeout, Duration::from_secs(5));
             assert_eq!(
@@ -376,16 +381,18 @@ mod tests {
 
     #[test]
     fn serve_splits_read_only_and_shared_connections() {
-        let serve = budget(Role::Serve, &[]).unwrap();
-        assert_eq!(
-            (serve.shared_connections(), serve.read_only_connections()),
-            (4, 2)
-        );
-        let small = budget(Role::Serve, &[("ZUSE_CLOUD_DB_MAX_CONNECTIONS", "2")]).unwrap();
-        assert_eq!(
-            (small.shared_connections(), small.read_only_connections()),
-            (1, 1)
-        );
+        let split = |b: &Budget| {
+            (
+                b.shared_connections(),
+                b.read_only_connections(),
+                b.receipt_connections(),
+            )
+        };
+        assert_eq!(split(&budget(Role::Serve, &[]).unwrap()), (3, 2, 1));
+        let small = budget(Role::Serve, &[("ZUSE_CLOUD_DB_MAX_CONNECTIONS", "3")]).unwrap();
+        assert_eq!(split(&small), (1, 1, 1));
+        let large = budget(Role::Serve, &[("ZUSE_CLOUD_DB_MAX_CONNECTIONS", "12")]).unwrap();
+        assert_eq!(split(&large), (7, 4, 1));
         let billing = budget(Role::BillingWorker, &[]).unwrap();
         assert_eq!(
             (billing.shared_connections(), billing.receipt_connections()),
@@ -412,14 +419,22 @@ mod tests {
         assert_eq!(worker.acquire_timeout, Duration::from_millis(2500));
         // A role without background loops never listens, even when asked to.
         assert!(
-            !budget(Role::AuthWorker, &[("ZUSE_CLOUD_DB_LISTEN", "true")])
+            !budget(Role::Operator, &[("ZUSE_CLOUD_DB_LISTEN", "true")])
+                .unwrap()
+                .listen
+        );
+        // The credential worker sleeps on NOTIFY: 1 pool + 1 LISTEN.
+        let auth = budget(Role::AuthWorker, &[]).unwrap();
+        assert_eq!((auth.listen, auth.total()), (true, 2));
+        assert!(
+            !budget(Role::AuthWorker, &[("ZUSE_CLOUD_DB_LISTEN", "false")])
                 .unwrap()
                 .listen
         );
         for bad in ["0", "65", "-1", "many"] {
             assert!(budget(Role::Worker, &[("ZUSE_CLOUD_DB_MAX_CONNECTIONS", bad)]).is_err());
         }
-        assert!(budget(Role::Serve, &[("ZUSE_CLOUD_DB_MAX_CONNECTIONS", "1")]).is_err());
+        assert!(budget(Role::Serve, &[("ZUSE_CLOUD_DB_MAX_CONNECTIONS", "2")]).is_err());
         assert!(
             budget(
                 Role::BillingWorker,

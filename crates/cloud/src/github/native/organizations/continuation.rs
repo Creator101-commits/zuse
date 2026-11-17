@@ -110,8 +110,8 @@ impl NativeGithub {
         verification: &str,
         installation: &Value,
     ) -> Result<(), ApiError> {
-        let exists: bool = crate::db::schema::present(
-            &self.pool,
+        let exists: bool = crate::db::schema::present_in(
+            &mut **tx,
             "SELECT to_regclass('api_github_identities') IS NOT NULL",
         )
         .await?;
@@ -147,8 +147,8 @@ impl NativeGithub {
             }
             Err(e) => Err(e.into()),
         }?;
-        let configured: bool = crate::db::schema::present(
-            &self.pool,
+        let configured: bool = crate::db::schema::present_in(
+            &mut **tx,
             "SELECT to_regclass('zuse_rust_github_join_jobs') IS NOT NULL",
         )
         .await?;

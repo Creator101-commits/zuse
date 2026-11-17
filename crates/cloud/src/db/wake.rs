@@ -2,7 +2,8 @@
 //!
 //! Loops sleep until the earliest of:
 //! - a PostgreSQL `NOTIFY` saying matching work was created or rescheduled
-//!   (triggers from migration `0043_work_wakeups.sql`),
+//!   (triggers from migrations `0043_work_wakeups.sql` and
+//!   `0045_auth_wakeups.sql`),
 //! - the next known due time of their work (`due_at`, `next_attempt_at`,
 //!   lease expiry), or
 //! - an idle fallback timer.
@@ -29,6 +30,12 @@ pub enum Work {
     AccountEvents,
     /// A command mailbox revision changed.
     Mailbox,
+    /// Credential worker: a sign-in or proposal became claimable, a refresh
+    /// started, or a refresh result went stale (migration 0045).
+    Auth,
+    /// An account's shared-credit hold turned on; its online computers should
+    /// be paused (trigger from optional migration `0047_billing_wakeups.sql`).
+    IdleSleep,
     /// Notifications may have been missed (listener reconnected or lagged).
     All,
 }
@@ -43,6 +50,8 @@ impl Work {
             "project_cache" => Self::ProjectCache,
             "account_events" => Self::AccountEvents,
             "mailbox" => Self::Mailbox,
+            "auth" => Self::Auth,
+            "idle_sleep" => Self::IdleSleep,
             _ => return None,
         })
     }
@@ -55,6 +64,8 @@ impl Work {
             Self::ProjectCache => "project_cache",
             Self::AccountEvents => "account_events",
             Self::Mailbox => "mailbox",
+            Self::Auth => "auth",
+            Self::IdleSleep => "idle_sleep",
             Self::All => "all",
         }
     }
@@ -389,6 +400,8 @@ mod tests {
             Work::ProjectCache,
             Work::AccountEvents,
             Work::Mailbox,
+            Work::Auth,
+            Work::IdleSleep,
         ] {
             assert_eq!(Work::parse(kind.as_str()), Some(kind));
         }

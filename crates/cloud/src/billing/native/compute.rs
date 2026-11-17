@@ -97,7 +97,9 @@ impl BillingControl {
         let pending:i64=sqlx::query_scalar("SELECT COALESCE(SUM(amount_micros),0)::bigint FROM zuse_brokeboy_compute_charges WHERE account_id=$1 AND state IN ('pending','reconciliation')").bind(owner).fetch_one(&mut *tx).await?;
         let available = (available - i128::from(pending)).max(0);
         let review:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM zuse_brokeboy_compute_charges WHERE account_id=$1 AND state='reconciliation')").bind(owner).fetch_one(&mut *tx).await?;
-        sqlx::query("UPDATE api_cloud_billing_periods SET shared_credit_hold=$2 WHERE account_id=$1 AND shared_credit_account").bind(owner).bind(available==0 || review).execute(&mut *tx).await?;
+        // Unchanged rows are not rewritten. Turning the hold on wakes the runtime
+        // worker (trigger in migration 0047) so it pauses computers right away.
+        sqlx::query("UPDATE api_cloud_billing_periods SET shared_credit_hold=$2 WHERE account_id=$1 AND shared_credit_account AND shared_credit_hold IS DISTINCT FROM $2").bind(owner).bind(available==0 || review).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
     }

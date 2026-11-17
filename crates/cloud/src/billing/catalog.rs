@@ -16,6 +16,7 @@ pub struct BillingControl {
     pub(super) accounts: crate::access_policy::Accounts,
     pub(super) payments: Option<Arc<super::PaymentProviders>>,
     pub(super) native: Option<Arc<super::native::NativeBilling>>,
+    pub(super) follow_ups: Option<Arc<super::native::FollowUps>>,
 }
 impl BillingControl {
     pub fn from_pool(pool: PgPool, accounts: impl Into<crate::access_policy::Accounts>) -> Self {
@@ -25,6 +26,7 @@ impl BillingControl {
             pool,
             payments: None,
             native: None,
+            follow_ups: None,
             accounts: accounts.into(),
         }
     }

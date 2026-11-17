@@ -226,8 +226,8 @@ impl RuntimeControl {
                 log.stdout = log.stdout.replace(credential, "[redacted]");
                 log.stderr = log.stderr.replace(credential, "[redacted]");
             }
-            let available: bool = crate::db::schema::present(
-                &self.pool,
+            let available: bool = crate::db::schema::present_in(
+                &mut *tx,
                 "SELECT to_regclass('zuse_rust_preparation_logs') IS NOT NULL",
             )
             .await?;
@@ -276,8 +276,8 @@ impl RuntimeControl {
         {
             return Err(ApiError::not_found("cloud_workspace_not_found"));
         }
-        let available: bool = crate::db::schema::present(
-            &self.pool,
+        let available: bool = crate::db::schema::present_in(
+            &mut *tx,
             "SELECT to_regclass('zuse_rust_preparation_logs') IS NOT NULL",
         )
         .await?;

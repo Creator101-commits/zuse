@@ -272,8 +272,8 @@ impl RuntimeControl {
                 .bind(format!("cloud-create:{owner}"))
                 .execute(&mut *tx)
                 .await?;
-            let tombstones: bool = crate::db::schema::present(
-                &self.pool,
+            let tombstones: bool = crate::db::schema::present_in(
+                &mut *tx,
                 "SELECT to_regclass('zuse_rust_deletions') IS NOT NULL",
             )
             .await?;
@@ -745,8 +745,8 @@ impl RuntimeControl {
         let staging: bool = if facts.is_some() {
             true
         } else {
-            crate::db::schema::present(
-                &self.pool,
+            crate::db::schema::present_in(
+                &mut *tx,
                 "SELECT to_regclass('zuse_rust_launch_staging') IS NOT NULL",
             )
             .await?

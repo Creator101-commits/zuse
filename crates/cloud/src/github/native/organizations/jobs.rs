@@ -53,8 +53,8 @@ impl NativeGithub {
         ) {
             return Ok(());
         }
-        let configured: bool = crate::db::schema::present(
-            &self.pool,
+        let configured: bool = crate::db::schema::present_in(
+            &mut **tx,
             "SELECT to_regclass('zuse_rust_github_join_jobs') IS NOT NULL",
         )
         .await?;
