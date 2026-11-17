@@ -356,6 +356,7 @@ impl Shell {
                     .as_ref()
                     .map(|view| view.read(cx).title.clone())
                     .unwrap_or_else(|| "New chat".into());
+                let harness = view.as_ref().and_then(|view| view.read(cx).harness());
                 let active = index == self.cloud_tabs.active;
                 crate::surface_chrome::workspace_tab(
                     ("cloud-conversation-tab", index),
@@ -376,6 +377,7 @@ impl Shell {
                 .when(!active, |tab| tab.text_color(theme.text_muted))
                 .cursor_pointer()
                 .text_size(crate::typography::text_md())
+                .child(cloud_tab_icon(harness, index, &theme))
                 .child(div().flex_1().min_w_0().truncate().child(title))
                 .child(
                     div()
@@ -415,11 +417,78 @@ impl Shell {
     }
 }
 
+/// The mark a cloud tab leads with: the same agent icon a local chat tab
+/// shows, the plain chat glyph before the agent is known.
+fn cloud_tab_mark(harness: Option<zuse_protocol::HarnessId>) -> (&'static str, Option<gpui::Hsla>) {
+    harness.map_or((icons::CHAT_ROUND_LINE, None), |harness| {
+        crate::pickers::harness_brand_icon(harness)
+    })
+}
+
+/// The agent's icon with a small cloud badge on its lower right corner, so a
+/// cloud tab reads as the same agent running on a cloud computer.
+fn cloud_tab_icon(
+    harness: Option<zuse_protocol::HarnessId>,
+    index: usize,
+    theme: &Theme,
+) -> AnyElement {
+    let (path, tint) = cloud_tab_mark(harness);
+    div()
+        .id(("cloud-tab-icon", index))
+        .debug_selector(move || format!("cloud-tab-icon-{index}"))
+        .relative()
+        .flex_none()
+        .size(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icons::brand_icon(
+            path,
+            14.,
+            tint.unwrap_or(theme.text_muted),
+        ))
+        .child(
+            div()
+                .absolute()
+                .right(px(-4.))
+                .bottom(px(-3.))
+                .size(px(10.))
+                .rounded_full()
+                .bg(theme.bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    icon(icons::DITHER_CLOUD)
+                        .size(px(8.))
+                        .text_color(theme.text_muted),
+                ),
+        )
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use serde_json::{Value, json};
+
+    #[test]
+    fn cloud_tabs_use_the_local_agent_icon_set() {
+        use zuse_protocol::HarnessId;
+        for harness in [
+            HarnessId::Codex,
+            HarnessId::ClaudeCode,
+            HarnessId::Grok,
+            HarnessId::Gemini,
+        ] {
+            assert_eq!(
+                cloud_tab_mark(Some(harness)),
+                crate::pickers::harness_brand_icon(harness)
+            );
+        }
+        assert_eq!(cloud_tab_mark(None), (icons::CHAT_ROUND_LINE, None));
+    }
     struct Pending;
     #[async_trait::async_trait]
     impl zuse_rpc::RpcService for Pending {
