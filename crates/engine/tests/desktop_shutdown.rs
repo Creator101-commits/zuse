@@ -57,6 +57,35 @@ fn a_stalled_drain_has_a_bounded_exit_and_does_not_keep_the_profile() {
 }
 
 #[test]
+fn terminating_without_returning_from_the_event_loop_still_finishes_the_drain() {
+    let profile = tempfile::tempdir().unwrap();
+    let lock = InstanceLock::acquire(profile.path()).unwrap();
+    let snapshot = profile.path().join("saved");
+    let saved = snapshot.clone();
+    let runtime = zuse_engine::runtime().unwrap();
+    let shutdown = DesktopShutdown::default();
+    let completion = shutdown.start(runtime.handle(), async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::write(saved, "settled before AppKit exits").unwrap();
+        drop(lock);
+    });
+    let termination = shutdown.before_termination(runtime.handle(), Duration::from_secs(2));
+    let observer = async move {
+        let _ = completion.await;
+        drop(termination);
+    };
+    // Cancelling the observer models GPUI's termination deadline. Do not call
+    // finish here: AppKit never returns to the code following app.run().
+    drop(observer);
+    assert_eq!(
+        std::fs::read_to_string(snapshot).unwrap(),
+        "settled before AppKit exits"
+    );
+    InstanceLock::acquire(profile.path()).unwrap();
+    runtime.shutdown_timeout(Duration::from_millis(100));
+}
+
+#[test]
 fn blocking_worker_child() {
     let Some(profile) = std::env::var_os("ZUSE_SHUTDOWN_TEST_PROFILE") else {
         return;

@@ -49,7 +49,10 @@ async fn serve(
     let lock = match InstanceLock::acquire(&data_dir) {
         Ok(lock) => lock,
         Err(error) if InstanceLock::holder(&data_dir).is_some() => {
-            return reuse_engine(&args, &data_dir, requested_port.unwrap_or(crate::DEFAULT_IPC_PORT), l10n)
+            let port = requested_port
+                .or_else(|| recorded_ipc_port(&data_dir))
+                .unwrap_or(crate::DEFAULT_IPC_PORT);
+            return reuse_engine(&args, &data_dir, port, l10n)
                 .await.with_context(|| format!("{error}. Could not enable browser access on that engine; use its --ipc-port, or choose a separate --data-dir"));
         }
         Err(error) => return Err(error.into()),
@@ -86,6 +89,13 @@ async fn serve(
     let runtime =
         Engine::assemble_runtime_with_lock(&config, auth, EngineProfile::local(&data_dir)?, lock)
             .await?;
+    let _port_record = match IpcPortRecord::publish(&data_dir, ipc_port) {
+        Ok(record) => record,
+        Err(error) => {
+            runtime.shutdown().await;
+            return Err(error).context("Could not publish this profile's RPC port");
+        }
+    };
     // Agent-origin attribution and plugin tools must dial this engine's real port.
     runtime.core().sessions.set_ipc_port(ipc_port);
     let browser = match BrowserServer::new(
@@ -228,6 +238,47 @@ async fn serve(
     result
 }
 
+const IPC_RECORD: &str = "serve-ipc.json";
+
+struct IpcPortRecord {
+    path: PathBuf,
+    value: Vec<u8>,
+}
+
+impl IpcPortRecord {
+    fn publish(profile: &std::path::Path, port: u16) -> anyhow::Result<Self> {
+        use std::io::Write;
+        let path = profile.join(IPC_RECORD);
+        let value = serde_json::to_vec(&json!({"pid": std::process::id(), "port": port}))?;
+        let mut pending = tempfile::NamedTempFile::new_in(profile)?;
+        pending.write_all(&value)?;
+        pending.as_file().sync_all()?;
+        pending.persist(&path)?;
+        Ok(Self { path, value })
+    }
+}
+
+impl Drop for IpcPortRecord {
+    fn drop(&mut self) {
+        if std::fs::read(&self.path).ok().as_deref() == Some(self.value.as_slice()) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn recorded_ipc_port(profile: &std::path::Path) -> Option<u16> {
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(profile.join(IPC_RECORD)).ok()?).ok()?;
+    let pid = record["pid"].as_u64()?.to_string();
+    // A file left after a crash must never redirect a later profile owner.
+    if InstanceLock::holder(profile)?.trim() != pid {
+        return None;
+    }
+    u16::try_from(record["port"].as_u64()?)
+        .ok()
+        .filter(|port| *port != 0)
+}
+
 async fn bind_ipc(
     requested: Option<u16>,
     default: u16,
@@ -307,6 +358,22 @@ async fn reuse_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn port_discovery_requires_the_current_profile_lock_owner() {
+        let profile = tempfile::tempdir().unwrap();
+        let _lock = InstanceLock::acquire(profile.path()).unwrap();
+        let record = IpcPortRecord::publish(profile.path(), 31000).unwrap();
+        assert_eq!(recorded_ipc_port(profile.path()), Some(31000));
+        drop(record);
+        assert!(recorded_ipc_port(profile.path()).is_none());
+        std::fs::write(
+            profile.path().join(IPC_RECORD),
+            serde_json::to_vec(&json!({"pid": u64::MAX, "port": 31000})).unwrap(),
+        )
+        .unwrap();
+        assert!(recorded_ipc_port(profile.path()).is_none());
+    }
 
     #[tokio::test]
     async fn an_explicit_busy_rpc_port_is_not_silently_changed() {

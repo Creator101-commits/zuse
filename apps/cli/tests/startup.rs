@@ -684,6 +684,10 @@ async fn serve_reuses_the_profile_owner_and_starts_browser_access_without_anothe
         .arg(port.to_string())
         .arg("--data-dir")
         .arg(&other)
+        .env_remove("ZUSE_BROWSER_TOKEN")
+        .env_remove("ZUSE_PUBLIC_ORIGIN")
+        .env_remove("ZUSE_TLS_CERT")
+        .env_remove("ZUSE_TLS_KEY")
         .kill_on_drop(true)
         .output()
         .await
@@ -705,6 +709,77 @@ async fn serve_reuses_the_profile_owner_and_starts_browser_access_without_anothe
     );
     core.shutdown().await;
     task.abort();
+}
+
+#[tokio::test]
+async fn plain_serve_discovers_its_profiles_ephemeral_rpc_port_and_keeps_explicit_ports_strict() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let profile = root.path().join("profile");
+    let mut server = Server::start(&profile, &bin, &root.path().join("mcp.json")).await;
+    let mut other = Server::start(
+        &root.path().join("other"),
+        &bin,
+        &root.path().join("other-mcp.json"),
+    )
+    .await;
+    let command = || {
+        let mut command = Command::new(ZUSE);
+        command
+            .arg("serve")
+            .env("ZUSE_DATA_DIR", &profile)
+            .env_remove("ZUSE_IPC_PORT")
+            .env_remove("ZUSE_BROWSER_TOKEN")
+            .env_remove("ZUSE_PUBLIC_ORIGIN")
+            .env_remove("ZUSE_TLS_CERT")
+            .env_remove("ZUSE_TLS_KEY")
+            .kill_on_drop(true);
+        command
+    };
+    let opened = command().output().await.unwrap();
+    assert!(opened.status.success(), "{opened:?}");
+    assert!(
+        String::from_utf8_lossy(&opened.stdout).contains("/#pair="),
+        "{opened:?}"
+    );
+    let refused = command()
+        .arg("--ipc-port")
+        .arg(other.port.to_string())
+        .output()
+        .await
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("another profile"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        server
+            .client()
+            .await
+            .call(methods::LIST_PAIRINGS, json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        other
+            .client()
+            .await
+            .call(methods::LIST_PAIRINGS, json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    server.stop().await;
+    assert!(!profile.join("serve-ipc.json").exists());
+    other.stop().await;
 }
 
 #[tokio::test]

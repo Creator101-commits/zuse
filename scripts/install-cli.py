@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import subprocess
 import tempfile
 import uuid
 
@@ -77,6 +78,13 @@ def install(source, root, bin_dir, launchers=True):
                 shutil.copytree(source, staged, symlinks=True)
                 verify(staged)
                 os.rename(staged, destination)
+        try:
+            probe = subprocess.run([str(destination / "bin/zuse"), "--version"],
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ValueError("Could not run the packaged command's version check") from error
+        if probe.returncode != 0 or probe.stdout.strip() != "zuse " + manifest["version"]:
+            raise ValueError("Packaged command version does not match the release")
         (root / MARKER).write_text("1\n")
         replace_link(root / "current", destination)
         if launchers:

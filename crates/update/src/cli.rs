@@ -10,6 +10,7 @@ pub fn install_root(exe: &Path) -> Option<PathBuf> {
     if !matches!(std::env::consts::OS, "linux" | "macos") {
         return None;
     }
+    let exe = exe.canonicalize().ok()?;
     let bin = exe.parent()?;
     let package = bin.parent()?;
     let packages = package.parent()?;
@@ -153,9 +154,19 @@ mod tests {
         std::fs::create_dir_all(package.join("bin")).unwrap();
         std::fs::write(package.join("install.py"), "").unwrap();
         let exe = package.join("bin/zuse");
+        std::fs::write(&exe, "").unwrap();
         assert_eq!(install_root(&exe), None);
         std::fs::write(root.join(".installed-by-zuse-cli"), "1").unwrap();
-        assert_eq!(install_root(&exe), Some(root.to_owned()));
+        let canonical = root.canonicalize().unwrap();
+        assert_eq!(install_root(&exe), Some(canonical.clone()));
+        std::os::unix::fs::symlink(&package, root.join("current")).unwrap();
+        let launcher = root.join("zuse");
+        std::os::unix::fs::symlink(root.join("current/bin/zuse"), &launcher).unwrap();
+        assert_eq!(install_root(&launcher), Some(canonical.clone()));
+        assert_eq!(
+            install_root(&root.join("current/bin/zuse")),
+            Some(canonical)
+        );
         assert_eq!(install_root(&root.join("other/version/bin/zuse")), None);
     }
 
@@ -281,6 +292,6 @@ mod tests {
             "new browser"
         );
         let exe = std::fs::canonicalize(root.join("current/bin/zuse")).unwrap();
-        assert_eq!(install_root(&exe), Some(root));
+        assert_eq!(install_root(&exe), Some(root.canonicalize().unwrap()));
     }
 }

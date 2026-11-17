@@ -312,9 +312,12 @@ pub fn run_app(config: UiConfig) {
                     handle.shutdown().await
                 }
             });
+            let termination =
+                quit_shutdown.before_termination(&quit_runtime, std::time::Duration::from_secs(15));
             async move {
                 let _ = completion.await;
                 drop(analytics_states);
+                drop(termination);
             }
         })
         .detach();

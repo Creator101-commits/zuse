@@ -32,6 +32,13 @@ class CliInstallTests(unittest.TestCase):
     def assemble(self, destination, version="0.25.0"):
         fixtures.package.assemble_cli(destination, self.fixture.binaries[1], self.fixture.assets,
                                       "linux", "x86_64", version, {})
+        # Executable fixture for the installer's version probe; assembly checks
+        # the platform header separately before this replacement.
+        binary = destination / "bin/zuse"
+        binary.write_text("#!/bin/sh\nprintf '%s\\n' 'zuse " + version + "'\n")
+        manifest = json.loads((destination / "manifest.json").read_text())
+        manifest["files"]["bin/zuse"] = hashlib.sha256(binary.read_bytes()).hexdigest()
+        (destination / "manifest.json").write_text(json.dumps(manifest))
 
     def test_install_upgrade_and_uninstall_preserve_previous_package_and_profiles(self):
         profile = self.fixture.root / "profile"
@@ -91,6 +98,20 @@ class CliInstallTests(unittest.TestCase):
             bootstrap.uninstall(cli=True)
         self.assertTrue(any(url.endswith("SHA256SUMS.cli") for url in requested))
         self.assertFalse(os.path.lexists(self.bin_dir / "zuse"))
+
+    def test_wrong_executable_version_cannot_activate_a_new_or_reused_package(self):
+        installer.install(self.package, self.root, self.bin_dir)
+        before = os.readlink(self.root / "current")
+        bad = self.fixture.root / "zuse-cli-0.25.1-linux-x86_64"
+        self.assemble(bad, "0.25.1")
+        manifest_path = bad / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["version"] = "0.25.2"
+        manifest_path.write_text(json.dumps(manifest))
+        for _ in range(2):
+            with self.assertRaisesRegex(ValueError, "version does not match"):
+                installer.install(bad, self.root, self.bin_dir)
+            self.assertEqual(os.readlink(self.root / "current"), before)
 
 
 if __name__ == "__main__":

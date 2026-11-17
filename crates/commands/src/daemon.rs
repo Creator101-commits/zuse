@@ -299,7 +299,7 @@ fn exec_path_for(exe: &Path, home: Option<&Path>) -> String {
     if installed {
         "%h/.zuse/app/current/zuse".to_string()
     } else {
-        format!("{}", exe.display())
+        systemd_quote(&exe.to_string_lossy())
     }
 }
 
@@ -524,6 +524,19 @@ mod tests {
                 Some(Path::new("/home/u"))
             ),
             "/src/target/debug/zuse"
+        );
+    }
+
+    #[test]
+    fn custom_service_executable_paths_remain_one_literal_word() {
+        let unit = render_systemd_unit(
+            Path::new("/home/alice/Zuse CLI/100%/$bin/zuse"),
+            &headless(),
+            &[],
+        );
+        assert!(
+            unit.contains("ExecStart=\"/home/alice/Zuse CLI/100%%/$$bin/zuse\" headless\n"),
+            "{unit}"
         );
     }
 
