@@ -78,6 +78,7 @@ const METHODS: &[(&str, &str)] = &[
     (m::CLOUD_CREATE, "cloud workspace created"),
     (m::CLOUD_PAUSE, "cloud workspace paused"),
     (m::CLOUD_UNARCHIVE, "cloud workspace resumed"),
+    (m::CLOUD_ARCHIVE, "cloud workspace archived"),
     (m::CLOUD_DELETE, "cloud workspace deleted"),
     (m::CLOUD_ACCOUNT_SIGN_IN, "account sign in started"),
     (m::CLOUD_ACCOUNT_SIGN_OUT, "account signed out"),

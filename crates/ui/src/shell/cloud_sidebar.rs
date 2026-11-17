@@ -177,6 +177,71 @@ impl Shell {
             self.open_cloud_conversation(target, row, serde_json::json!({}), cx);
         }
     }
+    /// Archive the cloud task behind a `cloud:<workspace>` row. Its computer
+    /// sleeps now and is deleted after the archive retention; the chat stays
+    /// in Settings → Archived, where restoring it brings a computer back.
+    pub(super) fn archive_cloud_sidebar_row(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.close_chat_menu(cx);
+        let Some(workspace) = id.strip_prefix(super::CLOUD_ROW_PREFIX) else {
+            return;
+        };
+        motion::set_hover(&format!("chat-{id}-hover"), false, true);
+        if self.cloud_archiving.contains(workspace) {
+            return;
+        }
+        let row = self
+            .state
+            .read(cx)
+            .cloud_sidebar_workspaces()
+            .into_iter()
+            .find(|row| row["workspaceId"].as_str() == Some(workspace));
+        let Some(target) = row.and_then(|row| self.cloud_row_target(&row, cx)) else {
+            return;
+        };
+        // Settings → Archived restores personal computers only; an archived
+        // organization task would have nowhere to be restored from.
+        if target.organization.is_some() {
+            self.show_notice(
+                crate::toast::ToastKind::Info,
+                "Archiving is available for personal cloud chats.",
+                cx,
+            );
+            return;
+        }
+        let workspace = workspace.to_owned();
+        self.cloud_archiving.insert(workspace.clone());
+        let command = uuid::Uuid::new_v4().to_string();
+        cx.spawn(async move |this, cx| {
+            let result = target.archive(&command).await;
+            let _ = this.update(cx, |this, cx| {
+                this.cloud_archiving.remove(&workspace);
+                match result {
+                    Ok(_) => {
+                        this.state.update(cx, |state, cx| {
+                            if state.hide_cloud_sidebar_workspace(&workspace) {
+                                cx.notify();
+                            }
+                        });
+                        this.show_notice(
+                            crate::toast::ToastKind::Success,
+                            "Archived. Its cloud computer sleeps now and is deleted after 7 days; restore the chat from Settings → Archived.",
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        this.show_notice(
+                            crate::toast::ToastKind::Error,
+                            format!("Couldn’t archive this cloud chat. {error}"),
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     /// A cloud task drawn exactly like a local chat row: the project's
     /// avatar, its title and age, and the same activity corner. Only the
     /// click target differs.
@@ -385,6 +450,246 @@ mod tests {
             assert_eq!(
                 shell.state.read(cx).cloud_project.as_ref().unwrap()["projectId"],
                 "project"
+            );
+        });
+    }
+
+    /// Records archive requests and acknowledges them like the controller.
+    #[derive(Default)]
+    struct Archiver {
+        calls: std::sync::Mutex<Vec<Value>>,
+    }
+    #[async_trait::async_trait]
+    impl zuse_rpc::RpcService for Archiver {
+        async fn handle(
+            &self,
+            method: &str,
+            params: Value,
+        ) -> Result<zuse_rpc::RpcReply, zuse_rpc::RpcError> {
+            if method == zuse_rpc::methods::CLOUD_ARCHIVE {
+                self.calls.lock().unwrap().push(params.clone());
+                return zuse_rpc::RpcReply::value(&json!({
+                    "accountId":"owner","organizationId":null,
+                    "workspace":{"workspaceId":params["workspaceId"],"state":"archiving","desiredState":"archived"}
+                }));
+            }
+            Ok(zuse_rpc::RpcReply::Stream(Box::pin(
+                futures::stream::pending(),
+            )))
+        }
+    }
+    /// The memory controller runs on tokio: drive it and gpui until `calls`
+    /// archive requests were answered.
+    fn settle(
+        runtime: &tokio::runtime::Runtime,
+        archiver: &Archiver,
+        calls: usize,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        for _ in 0..200 {
+            cx.run_until_parked();
+            runtime.block_on(tokio::time::sleep(std::time::Duration::from_millis(5)));
+            cx.run_until_parked();
+            if archiver.calls.lock().unwrap().len() >= calls {
+                break;
+            }
+        }
+        for _ in 0..5 {
+            runtime.block_on(tokio::task::yield_now());
+            cx.run_until_parked();
+        }
+    }
+    #[gpui::test]
+    fn organization_cloud_rows_are_not_offered_archive(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(UiSettings::default(), directory.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let archiver = std::sync::Arc::new(Archiver::default());
+        let controller =
+            crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(archiver.clone()));
+        let (host,cx)=cx.add_window_view(|_,cx| {
+            let shell=cx.new(|cx| {
+                let state=cx.new(|_| {
+                    let mut state=AppState::new();
+                    state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":"org-team"}));
+                    let rows=(1..=2).map(|n| json!({
+                        "workspaceId":format!("task-{n}"),"projectId":"project","providerId":"boxd",
+                        "chatId":format!("session-{n}"),"initialSessionId":format!("session-{n}"),
+                        "title":format!("Cloud chat {n}"),"state":"paused","desiredState":"paused",
+                        "createdAt":n,"updatedAt":n
+                    })).collect::<Vec<_>>();
+                    assert!(state.apply_cloud_sidebar_catalog(
+                        &json!({"accountId":"owner","organizationId":"org-team","ownerId":"organization:org-team","projects":[{"projectId":"project","displayName":"Cloud repo","repositoryIdentity":"github.com/owner/repo","canCreate":true}]}),
+                        &json!({"accountId":"owner","organizationId":"org-team","workspaces":rows})));
+                    state
+                });
+                state.update(cx,|state,_|state.set_test_engine(controller));
+                let mut shell=Shell::new(state,EngineBootConfig {
+                    target:None,data_dir:directory.path().into(),ipc_port:0,edge_url:"http://127.0.0.1:1".into(),
+                    edge_token:None,org_id:None,workos_client_id:None,default_harness:zuse_protocol::HarnessId::Mock,
+                },cx);
+                shell.reduced_motion=true;
+                shell.settings.sidebar_organization=SidebarOrganization::ByProject;
+                shell.sidebar_collapsed_groups.clear();
+                shell
+            });
+            ProjectList {shell,_directory:directory}
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        // Settings → Archived lists personal computers only, so an
+        // organization task offers no Archive menu and refuses to archive.
+        let row = cx.debug_bounds("chat-cloud:task-1").expect("cloud row");
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: row.center(),
+            button: gpui::MouseButton::Right,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        shell.read_with(cx, |shell, _| {
+            assert!(!shell.chat_menu_targets("cloud:task-1"));
+        });
+        shell.update(cx, |shell, cx| {
+            shell.archive_cloud_sidebar_row("cloud:task-1", cx)
+        });
+        settle(&runtime, &archiver, 1, cx);
+        assert!(archiver.calls.lock().unwrap().is_empty());
+        shell.read_with(cx, |shell, cx| {
+            assert_eq!(shell.state.read(cx).cloud_sidebar_workspaces().len(), 2);
+        });
+    }
+    #[gpui::test]
+    fn cloud_rows_archive_from_their_menu_and_hover_pill(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(UiSettings::default(), directory.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let archiver = std::sync::Arc::new(Archiver::default());
+        let controller =
+            crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(archiver.clone()));
+        let (host,cx)=cx.add_window_view(|_,cx| {
+            let shell=cx.new(|cx| {
+                let state=cx.new(|_| {
+                    let mut state=AppState::new();
+                    state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+                    let rows=(1..=2).map(|n| json!({
+                        "workspaceId":format!("task-{n}"),"projectId":"project","providerId":"boxd",
+                        "chatId":format!("session-{n}"),"initialSessionId":format!("session-{n}"),
+                        "title":format!("Cloud chat {n}"),"state":"paused","desiredState":"paused",
+                        "createdAt":n,"updatedAt":n
+                    })).collect::<Vec<_>>();
+                    assert!(state.apply_cloud_sidebar_catalog(
+                        &json!({"accountId":"owner","organizationId":null,"ownerId":"owner","projects":[{"projectId":"project","displayName":"Cloud repo","repositoryIdentity":"github.com/owner/repo","canCreate":true}]}),
+                        &json!({"accountId":"owner","organizationId":null,"workspaces":rows})));
+                    state
+                });
+                state.update(cx,|state,_|state.set_test_engine(controller));
+                let mut shell=Shell::new(state,EngineBootConfig {
+                    target:None,data_dir:directory.path().into(),ipc_port:0,edge_url:"http://127.0.0.1:1".into(),
+                    edge_token:None,org_id:None,workos_client_id:None,default_harness:zuse_protocol::HarnessId::Mock,
+                },cx);
+                shell.reduced_motion=true;
+                shell.settings.sidebar_organization=SidebarOrganization::ByProject;
+                shell.sidebar_collapsed_groups.clear();
+                shell
+            });
+            ProjectList {shell,_directory:directory}
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        // Right-click opens the row menu for the cloud task (Archive only).
+        let row = cx.debug_bounds("chat-cloud:task-1").expect("cloud row");
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: row.center(),
+            button: gpui::MouseButton::Right,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        shell.read_with(cx, |shell, _| {
+            assert!(shell.chat_menu_targets("cloud:task-1"));
+        });
+        shell.update(cx, |shell, cx| {
+            shell.archive_cloud_sidebar_row("cloud:task-1", cx);
+            assert!(!shell.chat_menu.is_open(), "archiving closes the menu");
+            // A second request while the first is in flight is ignored.
+            shell.archive_cloud_sidebar_row("cloud:task-1", cx);
+        });
+        settle(&runtime, &archiver, 1, cx);
+        {
+            let calls = archiver.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["workspaceId"], "task-1");
+            assert_eq!(calls[0]["expectedAccountId"], "owner");
+            assert!(
+                calls[0]["commandId"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+            );
+        }
+        shell.read_with(cx, |shell, cx| {
+            let rows = shell.state.read(cx).cloud_sidebar_workspaces();
+            assert_eq!(rows.len(), 1, "the archived task leaves Threads");
+            assert_eq!(rows[0]["workspaceId"], "task-2");
+        });
+        // Hovering the remaining row offers the same Archive pill as a local chat.
+        cx.update(|window, cx| window.draw(cx).clear());
+        let row = cx.debug_bounds("chat-cloud:task-2").expect("cloud row");
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        shell.read_with(cx, |shell, _| {
+            assert_eq!(
+                shell.chat_status_hover.as_deref(),
+                Some("chat-cloud:task-2"),
+                "cloud rows swap their corner for the archive pill on hover"
+            );
+        });
+        let pill = cx
+            .debug_bounds("chat-time-cloud:task-2")
+            .expect("cloud rows show the archive pill on hover");
+        cx.simulate_click(pill.center(), gpui::Modifiers::default());
+        settle(&runtime, &archiver, 2, cx);
+        assert_eq!(archiver.calls.lock().unwrap().len(), 2);
+        assert_eq!(archiver.calls.lock().unwrap()[1]["workspaceId"], "task-2");
+        shell.read_with(cx, |shell, cx| {
+            assert!(shell.state.read(cx).cloud_sidebar_workspaces().is_empty());
+            assert!(
+                shell.cloud_conversation.is_none(),
+                "archiving does not open the task"
             );
         });
     }

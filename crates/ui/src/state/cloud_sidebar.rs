@@ -57,6 +57,10 @@ pub(super) struct Catalog {
     loading: bool,
     error: Option<String>,
     refresh: Arc<tokio::sync::Notify>,
+    /// Bumped whenever a fresh workspace list lands (after a `workspace`
+    /// account event) or a task is archived here, so views of archived
+    /// tasks reload without polling.
+    workspaces_revision: u64,
 }
 fn access_denied(error: &RpcError) -> bool {
     matches!(error,RpcError::Capability(code) if code=="workspace_access_denied"||code=="workspace_not_found")
@@ -96,6 +100,9 @@ impl AppState {
     pub(crate) fn cloud_sidebar_stale(&self) -> bool {
         !self.cloud_sidebar.projects_fresh || !self.cloud_sidebar.workspaces_fresh
     }
+    pub(crate) fn cloud_sidebar_workspaces_revision(&self) -> u64 {
+        self.cloud_sidebar.workspaces_revision
+    }
     pub(crate) fn cloud_sidebar_error(&self) -> Option<&str> {
         self.cloud_sidebar.error.as_deref()
     }
@@ -103,6 +110,17 @@ impl AppState {
         self.cloud_sidebar.refresh.notify_one();
         self.cloud_sidebar.loading = true;
         cx.notify();
+    }
+    /// Drop an archived (or archiving) task from the visible catalog at once;
+    /// the `workspace` account event that follows refreshes it for real.
+    pub(crate) fn hide_cloud_sidebar_workspace(&mut self, workspace: &str) -> bool {
+        let before = self.cloud_sidebar.workspaces.len();
+        self.cloud_sidebar
+            .workspaces
+            .retain(|row| row["workspaceId"].as_str() != Some(workspace));
+        self.cloud_sidebar.workspaces_revision =
+            self.cloud_sidebar.workspaces_revision.wrapping_add(1);
+        self.cloud_sidebar.workspaces.len() != before
     }
     pub(super) fn clear_cloud_sidebar(&mut self) {
         self.cloud_sidebar = Catalog::default();
@@ -211,6 +229,10 @@ impl AppState {
                     .cloned()
                     .collect();
                 self.cloud_sidebar.workspaces_fresh = !provisional;
+                if !provisional {
+                    self.cloud_sidebar.workspaces_revision =
+                        self.cloud_sidebar.workspaces_revision.wrapping_add(1);
+                }
             }
         }
         if !provisional && self.cloud_sidebar.projects_fresh && self.cloud_sidebar.workspaces_fresh
@@ -414,6 +436,37 @@ mod cache_tests {
         assert!(!state.apply_sidebar_part(Part::Projects, &projects(true, "old")));
         assert_eq!(state.cloud_sidebar_projects()[0]["projectId"], "fresh");
         assert!(state.cloud_sidebar_stale());
+    }
+    #[test]
+    fn archived_tasks_leave_the_list_and_fresh_lists_bump_the_revision() {
+        let mut state = AppState::new();
+        state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+        let start = state.cloud_sidebar_workspaces_revision();
+        // Saved (provisional) rows paint but do not count as a refresh.
+        assert!(state.apply_sidebar_part(Part::Workspaces, &workspaces(true)));
+        assert_eq!(state.cloud_sidebar_workspaces_revision(), start);
+        let fresh = json!({"accountId":"owner","organizationId":null,"apiOrigin":"https://cloud.test","provisional":false,"workspaces":[
+            {"workspaceId":"saved","state":"paused","initialSessionId":"session"},
+            {"workspaceId":"archiving","state":"archiving","desiredState":"archived","initialSessionId":"a"},
+            {"workspaceId":"archived","state":"archived","desiredState":"archived","initialSessionId":"b"}]});
+        assert!(state.apply_sidebar_part(Part::Workspaces, &fresh));
+        let ids: Vec<_> = state
+            .cloud_sidebar_workspaces()
+            .iter()
+            .map(|row| row["workspaceId"].clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![json!("saved")],
+            "archived tasks stay out of Threads"
+        );
+        let refreshed = state.cloud_sidebar_workspaces_revision();
+        assert_ne!(refreshed, start);
+        // Archiving from the sidebar hides the row before the event arrives.
+        assert!(state.hide_cloud_sidebar_workspace("saved"));
+        assert!(state.cloud_sidebar_workspaces().is_empty());
+        assert_ne!(state.cloud_sidebar_workspaces_revision(), refreshed);
+        assert!(!state.hide_cloud_sidebar_workspace("saved"));
     }
     #[test]
     fn denial_and_account_org_or_api_changes_do_not_resurrect_saved_catalog() {

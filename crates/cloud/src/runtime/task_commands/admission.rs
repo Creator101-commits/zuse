@@ -144,6 +144,10 @@ impl RuntimeControl {
             return Err(ApiError::unavailable("cloud_task_command_schema_not_ready"));
         }
         validation::request(&request)?;
+        if request.wake == wire::WakePolicy::ExplicitResume {
+            self.restore_archived_computer_for_task(id, access, &request.command_id, now)
+                .await?;
+        }
         // External membership lookup is complete before the workspace lock.
         let fresh = self
             .scope_access(id, Some(&access.actor.account_id), true)
@@ -166,6 +170,49 @@ impl RuntimeControl {
             super::super::lifecycle::wakeup::send();
         }
         Ok(result)
+    }
+    /// A message to an unarchived chat whose computer was deleted after its
+    /// archive retention brings a computer back first: the ordinary Resume
+    /// path restores a fresh computer from the verified backup (it takes the
+    /// ownership lock a restore needs, which command admission does not). The
+    /// message is then admitted as usual and waits for that computer.
+    pub(in crate::runtime) async fn restore_archived_computer_for_task(
+        &self,
+        id: &str,
+        access: &Access,
+        command: &str,
+        now: i64,
+    ) -> Result<(), ApiError> {
+        let row: Option<Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(w) FROM api_cloud_workspaces w WHERE workspace_id=$1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else { return Ok(()) };
+        if !needs_archive_restore(&row) {
+            return Ok(());
+        }
+        // A replayed command returns its stored acceptance (or its conflict)
+        // from admission; only a new message may start a restore.
+        let replay: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM zuse_rust_task_command_actions WHERE workspace_id=$1 AND command_id=$2)")
+            .bind(id)
+            .bind(command)
+            .fetch_one(&self.pool)
+            .await?;
+        if replay {
+            return Ok(());
+        }
+        let resume = format!("task-restore:{}", hash(command));
+        self.lifecycle_action(
+            id,
+            access,
+            zuse_protocol::cloud_lifecycle::Action::Resume,
+            Some(&resume),
+            now,
+        )
+        .await?;
+        Ok(())
     }
     pub(super) fn authorize_task_command_row(
         &self,
@@ -852,6 +899,65 @@ fn requested_runtime_mode(
         (S::Auto, false) => Some(M::Auto),
         (S::WorkspaceWrite, false) => Some(M::ApprovalRequired),
         _ => None,
+    }
+}
+
+/// Sleeping (not archived) chat whose computer was retired after archive
+/// retention, or is being retired or restored right now.
+pub(super) fn needs_archive_restore(row: &Value) -> bool {
+    row["state"] == "paused"
+        && row["desired_state"] == "paused"
+        && matches!(
+            row["request_config"]["recoveryArchive"]["phase"].as_str(),
+            Some("retiring" | "retired" | "restoring")
+        )
+}
+
+#[cfg(test)]
+mod archive_restore_tests {
+    use super::needs_archive_restore;
+    use serde_json::json;
+    #[test]
+    fn only_unarchived_chats_with_a_retired_computer_restore_before_a_message() {
+        let row = |state: &str, desired: &str, phase: Option<&str>| json!({"state":state,"desired_state":desired,"request_config":{"recoveryArchive":phase.map(|p| json!({"phase":p}))}});
+        assert!(needs_archive_restore(&row(
+            "paused",
+            "paused",
+            Some("retired")
+        )));
+        assert!(needs_archive_restore(&row(
+            "paused",
+            "paused",
+            Some("retiring")
+        )));
+        assert!(needs_archive_restore(&row(
+            "paused",
+            "paused",
+            Some("restoring")
+        )));
+        // Still archived: the chat must be restored (unarchived) first.
+        assert!(!needs_archive_restore(&row(
+            "archived",
+            "archived",
+            Some("retired")
+        )));
+        // The machine is still there: the ordinary wake handles it.
+        assert!(!needs_archive_restore(&row("paused", "paused", None)));
+        assert!(!needs_archive_restore(&row(
+            "paused",
+            "paused",
+            Some("uploading")
+        )));
+        assert!(!needs_archive_restore(&row(
+            "paused",
+            "paused",
+            Some("restored")
+        )));
+        assert!(!needs_archive_restore(&row(
+            "provisioning",
+            "ready",
+            Some("restoring")
+        )));
     }
 }
 

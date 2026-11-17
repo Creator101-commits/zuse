@@ -55,6 +55,13 @@ impl RpcService for Controller {
                     &json!({"accountId":"owner","organizationId":null,"workspace":{"workspaceId":"workspace-one","state":"deleting"}}),
                 )
             }
+            methods::CLOUD_ARCHIVE => {
+                self.calls.lock().unwrap().push(params.clone());
+                let workspace = params["workspaceId"].clone();
+                RpcReply::value(
+                    &json!({"accountId":"owner","organizationId":null,"workspace":{"workspaceId":workspace,"state":"archiving"}}),
+                )
+            }
             methods::CLOUD_ACCOUNT_SIGN_OUT => RpcReply::value(&json!({"root":true})),
             _ => Err(RpcError::UnknownMethod(method.into())),
         }
@@ -139,4 +146,33 @@ async fn cloud_delete_uses_bound_controller_lifecycle_and_rejects_other_sessions
     assert_eq!(calls[0]["expectedAccountId"], "owner");
     assert!(calls[0]["expectedOrganizationId"].is_null());
     assert_eq!(calls[0]["commandId"], "delete-command");
+}
+
+#[tokio::test]
+async fn cloud_archive_uses_bound_controller_lifecycle_and_verifies_the_reply() {
+    let (account, _) = watch::channel(json!({"user":{"id":"owner"}}));
+    let root = Arc::new(Controller {
+        account,
+        calls: Default::default(),
+    });
+    let mut target = CloudTarget {
+        controller: EngineHandle::from_test_client(zuse_rpc::memory_client(root.clone())),
+        subject: "owner".into(),
+        organization: None,
+        workspace: "workspace-one".into(),
+        initial_session: "session-one".into(),
+    };
+    let value = target.archive("archive-command").await.unwrap();
+    assert_eq!(value["workspace"]["state"], "archiving");
+    {
+        let calls = root.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["workspaceId"], "workspace-one");
+        assert_eq!(calls[0]["expectedAccountId"], "owner");
+        assert!(calls[0]["expectedOrganizationId"].is_null());
+        assert_eq!(calls[0]["commandId"], "archive-command");
+    }
+    // A reply for another account cannot be taken as this task's archive.
+    target.subject = "someone-else".into();
+    assert!(target.archive("archive-command").await.is_err());
 }

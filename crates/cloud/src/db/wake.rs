@@ -39,6 +39,9 @@ pub enum Work {
     /// A plugin connection or custom server row changed (migration
     /// `0046_plugin_wakeups.sql`); cached plugin views must be re-read.
     Plugins,
+    /// An archived computer's deletion due time appeared or moved earlier
+    /// (migration `0050_archive_machine_deletion.sql`).
+    ArchiveRetention,
     /// Notifications may have been missed (listener reconnected or lagged).
     All,
 }
@@ -56,6 +59,7 @@ impl Work {
             "auth" => Self::Auth,
             "idle_sleep" => Self::IdleSleep,
             "plugins" => Self::Plugins,
+            "archive_retention" => Self::ArchiveRetention,
             _ => return None,
         })
     }
@@ -71,6 +75,7 @@ impl Work {
             Self::Auth => "auth",
             Self::IdleSleep => "idle_sleep",
             Self::Plugins => "plugins",
+            Self::ArchiveRetention => "archive_retention",
             Self::All => "all",
         }
     }
@@ -435,6 +440,7 @@ mod tests {
             Work::Auth,
             Work::IdleSleep,
             Work::Plugins,
+            Work::ArchiveRetention,
         ] {
             assert_eq!(Work::parse(kind.as_str()), Some(kind));
         }

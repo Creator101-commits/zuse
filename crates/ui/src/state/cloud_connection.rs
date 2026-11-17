@@ -49,6 +49,35 @@ impl CloudTarget {
         Ok(value)
     }
 }
+impl CloudTarget {
+    /// Archive this cloud task through the account control plane: its
+    /// computer sleeps now and is deleted after the archive retention, while
+    /// the chat stays restorable from Archived.
+    pub(crate) async fn archive(&self, command_id: &str) -> Result<Value, RpcError> {
+        let value = self
+            .controller
+            .client()
+            .call_scoped(
+                methods::CLOUD_ARCHIVE,
+                json!({
+                    "workspaceId": self.workspace,
+                    "expectedAccountId": self.subject,
+                    "expectedOrganizationId": self.organization,
+                    "commandId": command_id,
+                }),
+            )
+            .await?;
+        if value["accountId"] != self.subject
+            || value["organizationId"].as_str() != self.organization.as_deref()
+            || value["workspace"]["workspaceId"] != self.workspace
+        {
+            return Err(RpcError::Failed(
+                "Archiving could not be verified. Refresh to check its state.".into(),
+            ));
+        }
+        Ok(value)
+    }
+}
 struct Source {
     target: CloudTarget,
     closed: CancellationToken,

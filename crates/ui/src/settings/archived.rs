@@ -83,12 +83,27 @@ pub struct ArchivedPage {
     cloud_epoch: u64,
     cloud_action: Option<cloud_cards::Action>,
     cloud_commands: std::collections::HashMap<String, String>,
+    /// Last cloud task list revision this page loaded against.
+    cloud_revision: u64,
+    /// The task list changed while the page could not reload (an operation
+    /// in flight or saved history open); reload once it can.
+    cloud_stale: bool,
 }
 
 impl ArchivedPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let owner = cloud_owner(state.read(cx));
+        let cloud_revision = state.read(cx).cloud_sidebar_workspaces_revision();
         let observe = cx.observe(&state, |page: &mut Self, state, cx| {
+            // A `workspace` account event refreshed the cloud task list (or a
+            // task was archived from the sidebar): reload archived tasks on
+            // the next paint instead of polling for them.
+            let revision = state.read(cx).cloud_sidebar_workspaces_revision();
+            if revision != page.cloud_revision {
+                page.cloud_revision = revision;
+                page.cloud_stale = true;
+            }
+            page.apply_cloud_staleness();
             let owner = cloud_owner(state.read(cx));
             if owner != page.cloud_owner {
                 page.cloud_owner = owner;
@@ -135,9 +150,23 @@ impl ArchivedPage {
             cloud_epoch: 0,
             cloud_action: None,
             cloud_commands: Default::default(),
+            cloud_revision,
+            cloud_stale: false,
         }
     }
 
+    /// Turn a pending task-list change into a reload once nothing in flight
+    /// or on screen depends on the current rows.
+    fn apply_cloud_staleness(&mut self) {
+        if self.cloud_stale
+            && !self.cloud.loading
+            && !self.cloud.busy
+            && self.cloud_history.is_none()
+        {
+            self.cloud_stale = false;
+            self.cloud_loaded = false;
+        }
+    }
     fn load_cloud(&mut self, cx: &mut Context<Self>) {
         if self.cloud_loaded
             || self.cloud.loading
@@ -875,6 +904,7 @@ impl popover::ScrollRailHost for ArchivedPage {
 
 impl Render for ArchivedPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_cloud_staleness();
         self.load_cloud(cx);
         if let Some(preview) = &self.preview {
             return preview.clone().into_any_element();
@@ -1168,6 +1198,60 @@ mod tests {
         let rows = archived_chats(&chats);
         let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["b", "c"]);
+    }
+
+    #[gpui::test]
+    fn cloud_archives_reload_when_the_task_list_changes(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| ArchivedPage::new(state.clone(), cx));
+        page.update(cx, |page, _| page.cloud_loaded = true);
+        // An unrelated state change keeps the loaded archive.
+        state.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(page.read_with(cx, |page, _| page.cloud_loaded));
+        // A task archived from the sidebar (or a `workspace` account event
+        // refreshing the list) reloads it on the next paint.
+        state.update(cx, |state, cx| {
+            state.hide_cloud_sidebar_workspace("task");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!page.read_with(cx, |page, _| page.cloud_loaded));
+        // A cloud action in flight keeps what the page shows, but the change
+        // stays pending and reloads once the action ends.
+        page.update(cx, |page, _| {
+            page.cloud_loaded = true;
+            page.cloud.busy = true;
+        });
+        state.update(cx, |state, cx| {
+            state.hide_cloud_sidebar_workspace("task");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(page.read_with(cx, |page, _| page.cloud_loaded));
+        page.update(cx, |page, _| {
+            page.cloud.busy = false;
+            page.apply_cloud_staleness();
+            assert!(!page.cloud_loaded, "the pending change reloads afterwards");
+        });
+        // A failed Open leaves its action recorded; it must not block reloads.
+        page.update(cx, |page, _| {
+            page.cloud_loaded = true;
+            page.cloud_action = Some(cloud_cards::Action::Open("task".into()));
+        });
+        state.update(cx, |state, cx| {
+            state.hide_cloud_sidebar_workspace("task");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!page.read_with(cx, |page, _| page.cloud_loaded));
     }
 
     #[gpui::test]

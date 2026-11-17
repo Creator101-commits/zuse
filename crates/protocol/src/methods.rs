@@ -303,6 +303,9 @@ pub const SSH_TUNNEL_CLOSE: &str = "SshTunnelClose";
 pub const CLOUD_CLEANUP_MIRROR: &str = "CloudCleanupMirror";
 pub const CLOUD_DELETE: &str = "CloudDelete";
 pub const CLOUD_UNARCHIVE: &str = "CloudUnarchive";
+/// Archive a cloud chat: its computer sleeps now and is deleted after the
+/// archive retention; the chat stays restorable.
+pub const CLOUD_ARCHIVE: &str = "CloudArchive";
 pub const CLOUD_LOCAL_TERMINAL: &str = "CloudLocalTerminal";
 pub const CLOUD_SYNC_STATUS: &str = "CloudSyncStatus";
 pub const CLOUD_SYNC_CONFIGURE: &str = "CloudSyncConfigure";
@@ -464,6 +467,7 @@ mod retry_tests {
             PLUGINS,
             MODEL_CONNECT,
             CLOUD_UNARCHIVE,
+            CLOUD_ARCHIVE,
             CLOUD_PAUSE,
             CLOUD_RUNTIME_REPAIR,
             CLOUD_ALLOCATION_RETRY,
