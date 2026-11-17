@@ -798,7 +798,10 @@ async fn catalog_authorization_archive_reads_and_durable_job_recovery() {
         None,
     )
     .await;
-    assert_eq!(archive["retentionDeadline"], 100 + 10 * 86400000_i64);
+    assert_eq!(
+        archive["retentionDeadline"],
+        100 + zuse_protocol::cloud::ARCHIVE_RETENTION_MS
+    );
     assert_eq!(archive["machineRetained"], true);
     assert_eq!(archive["backupVerified"], false);
     assert_eq!(archive["computeRetired"], false);
