@@ -693,21 +693,26 @@ impl Shell {
         let main_tab = self.active_main_tab(cx);
         let main_tabs = self.main_tab_rows(cx);
         let closable = rows.len() > 1;
-        let tab_spinner = |id: &str, cx: &mut Context<Self>| {
-            div()
-                .size(px(14.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(crate::loaders::mini_glyph_spinner(
-                    format!("thread-conversation-working-{id}"),
-                    2.0,
-                    theme.loader_glyph(),
-                    cx.entity_id(),
-                    cx,
-                ))
-                .into_any_element()
+        let tab_spinner = |id: &str, active: bool, cx: &mut Context<Self>| {
+            crate::surface_chrome::tab_icon_tile(
+                div()
+                    .size(px(14.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::loaders::mini_glyph_spinner(
+                        format!("thread-conversation-working-{id}"),
+                        2.0,
+                        theme.loader_glyph(),
+                        cx.entity_id(),
+                        cx,
+                    ))
+                    .into_any_element(),
+                None,
+                active,
+                &theme,
+            )
         };
         let tab_chip = |id: SharedString, title: SharedString, active: bool| {
             crate::surface_chrome::workspace_tab(id, active, &theme)
@@ -717,17 +722,27 @@ impl Shell {
                 .cursor_pointer()
                 .flex_none()
                 .w(px(160.))
-                .h(px(28.))
-                .px(px(9.))
+                .h(px(crate::surface_chrome::TAB_CHIP_HEIGHT))
+                .p(px(crate::surface_chrome::TAB_CHIP_PADDING))
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(px(crate::surface_chrome::TAB_CHIP_CONTENT_GAP))
+                .rounded(px(7.))
+                .border_1()
+                .bg(crate::surface_chrome::tab_chip_background(active, &theme))
+                .border_color(crate::surface_chrome::tab_chip_border(active, &theme))
                 .text_size(crate::typography::text_md())
                 .when(active, |d| {
                     d.text_color(active_tab_text_color(&theme))
                         .font_weight(gpui::FontWeight::MEDIUM)
                 })
-                .when(!active, |d| d.text_color(theme.text_muted))
+                .when(!active, |d| {
+                    d.text_color(theme.text_muted).hover(|d| {
+                        d.bg(crate::surface_chrome::tab_chip_hover_background(&theme))
+                            .border_color(theme.ink(0.06))
+                            .text_color(theme.text)
+                    })
+                })
         };
         // The × every closable tab shares: shown on the active tab, revealed
         // on hover for the rest.
@@ -776,18 +791,19 @@ impl Shell {
                 let group = SharedString::from(format!("main-tab-{key}"));
                 let selector = group.to_string();
                 let leading = match &path {
-                    Some(path) => crate::file_icons::icon(
-                        crate::file_icons::FileIconIdentity::file(path.as_ref()),
-                        theme.appearance,
-                    )
-                    .size(px(14.))
-                    .flex_none()
-                    .into_any_element(),
-                    None => icon(icons::GIT_BRANCH)
-                        .size(px(13.))
+                    Some(path) => crate::surface_chrome::tab_icon_tile(
+                        crate::file_icons::icon(
+                            crate::file_icons::FileIconIdentity::file(path.as_ref()),
+                            theme.appearance,
+                        )
+                        .size(px(12.))
                         .flex_none()
-                        .text_color(theme.text_muted)
                         .into_any_element(),
+                        None,
+                        active,
+                        &theme,
+                    ),
+                    None => crate::surface_chrome::tab_chip_icon(icons::GIT_BRANCH, active, &theme),
                 };
                 let close_label = match tab {
                     main_tabs::MainTab::File(_) => "Close file",
@@ -810,9 +826,9 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .bg(if active {
-                                theme.accent_fill()
+                                crate::surface_chrome::tab_chip_background(true, &theme)
                             } else {
-                                theme.surface
+                                theme.surface.into()
                             })
                             .rounded(px(4.))
                             .group_hover(group.clone(), |d| d.opacity(0.))
@@ -825,7 +841,6 @@ impl Shell {
                 }));
                 tab_chip(group.clone(), title.clone(), active)
                     .group(group.clone())
-                    .pr(px(4.))
                     .debug_selector(move || selector.clone())
                     .when_some(path, |chip, path| {
                         chip.tip(path)
@@ -867,24 +882,19 @@ impl Shell {
                 let (close_id, middle_id) = (id.clone(), id.clone());
                 tab_chip(group.clone(), title.clone().into(), active)
                     .group(group.clone())
-                    .when(closable, |d| d.pr(px(4.)))
                     .debug_selector({
                         let id = id.clone();
                         move || format!("thread-conversation-{id}")
                     })
                     .child(if working.contains(&id) {
-                        tab_spinner(&id, cx)
+                        tab_spinner(&id, active, cx)
                     } else {
-                        match brand {
-                            Some((path, tint)) => {
-                                icons::brand_icon(path, 14., tint.unwrap_or(theme.text_muted))
-                            }
-                            None => icon(icons::CHAT_ROUND_LINE)
-                                .size(px(14.))
-                                .flex_none()
-                                .text_color(theme.text_muted)
-                                .into_any_element(),
-                        }
+                        crate::surface_chrome::tab_provider_icon(
+                            brand.map_or(icons::CHAT_ROUND_LINE, |(path, _)| path),
+                            brand.and_then(|(_, tint)| tint),
+                            active,
+                            &theme,
+                        )
                     })
                     .child(div().flex_1().min_w_0().truncate().child(title))
                     .when(closable, |d| {
@@ -942,16 +952,17 @@ impl Shell {
                     false,
                 )
                 .child(if working.contains(&id) {
-                    tab_spinner(&id, cx)
+                    tab_spinner(&id, false, cx)
                 } else {
-                    icons::brand_icon(
+                    crate::surface_chrome::tab_provider_icon(
                         brand.map_or(icons::CHAT_ROUND_LINE, |(path, _)| path),
-                        14.,
-                        brand.and_then(|(_, tint)| tint).unwrap_or(theme.text_muted),
+                        brand.and_then(|(_, tint)| tint),
+                        false,
+                        &theme,
                     )
                 })
                 .child(match rename {
-                    Some(input) => div().w(px(120.)).child(input).into_any_element(),
+                    Some(input) => div().flex_1().min_w_0().child(input).into_any_element(),
                     None => div()
                         .flex_1()
                         .min_w_0()

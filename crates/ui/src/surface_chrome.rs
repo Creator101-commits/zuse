@@ -119,16 +119,19 @@ pub(crate) fn workspace_tab(
     selected: bool,
     theme: &Theme,
 ) -> gpui::Stateful<Div> {
-    let hover = theme.glass_hover();
-    let hover_text = theme.text;
-    let (fill, ring) = workspace_tab_selected_paint(theme);
     div()
         .id(id)
         .rounded(px(7.0))
-        .bg(if selected { fill } else { hover.opacity(0.0) })
-        .when(selected, |tab| tab.shadow(ring))
+        .border_1()
+        .bg(tab_chip_background(selected, theme))
+        .border_color(tab_chip_border(selected, theme))
         .when(!selected, |tab| {
-            tab.hover(move |style| style.bg(hover).text_color(hover_text))
+            tab.hover(|style| {
+                style
+                    .bg(tab_chip_hover_background(theme))
+                    .border_color(theme.ink(0.06))
+                    .text_color(theme.text)
+            })
         })
 }
 
@@ -234,11 +237,47 @@ pub(crate) fn group_button(
 /// Fixed pane tab width. Drag reordering (drop-index quantisation and slide
 /// offsets) assumes uniform chips.
 pub(crate) const TAB_CHIP_WIDTH: f32 = 112.0;
-pub(crate) const TAB_CHIP_HEIGHT: f32 = 24.0;
+pub(crate) const TAB_CHIP_HEIGHT: f32 = 28.0;
+/// Three pixels inside the border leave the icon equally inset on each edge.
+pub(crate) const TAB_CHIP_PADDING: f32 = 3.0;
+pub(crate) const TAB_CHIP_CONTENT_GAP: f32 = 8.0;
 /// A chip plus the strip's own gap.
 pub(crate) const TAB_CHIP_SLOT: f32 = TAB_CHIP_WIDTH + CONTROL_GAP;
 /// Width of the fade over tabs scrolled out of a strip.
 pub(crate) const TAB_STRIP_FADE: f32 = 36.0;
+
+pub(crate) fn tab_chip_background(selected: bool, theme: &Theme) -> gpui::Background {
+    if !selected {
+        return theme.ink(0.045).into();
+    }
+    let base = theme
+        .accent_fill()
+        .blend(gpui::white().opacity(if theme.appearance.is_dark() {
+            0.04
+        } else {
+            0.0
+        }));
+    gpui::linear_gradient(
+        180.0,
+        gpui::linear_color_stop(
+            base.blend(gpui::white().opacity(if theme.appearance.is_dark() {
+                0.035
+            } else {
+                0.18
+            })),
+            0.0,
+        ),
+        gpui::linear_color_stop(base, 1.0),
+    )
+}
+
+pub(crate) fn tab_chip_border(selected: bool, theme: &Theme) -> gpui::Hsla {
+    theme.ink(if selected { 0.10 } else { 0.035 })
+}
+
+pub(crate) fn tab_chip_hover_background(theme: &Theme) -> gpui::Hsla {
+    theme.ink(0.075)
+}
 
 /// One pane tab chip, as drawn in the titlebar band above a side pane.
 pub(crate) struct TabChip {
@@ -252,12 +291,11 @@ pub(crate) struct TabChip {
     pub title: gpui::SharedString,
     /// Shows the unsaved dot in the close slot while the tab is not hovered.
     pub dirty: bool,
-    /// The leading 18px slot's content, usually [`tab_chip_icon`].
+    /// The leading 24×20px slot's content, usually [`tab_chip_icon`].
     pub leading: gpui::AnyElement,
 }
 
-/// A pane tab (reference workspace-panel-tab: 24px tall, `px-1.5`, 11px
-/// label): the leading icon, the truncated title, and a trailing 16px slot
+/// A 28px pane tab with an inset icon tile, truncated label, and trailing 16px slot
 /// whose ✕ fades in on hover over the unsaved dot (same slot, no width jump).
 /// Callers add activation, menus, tooltips and drag behaviour.
 pub(crate) fn tab_chip(
@@ -297,12 +335,24 @@ pub(crate) fn tab_chip(
         .h(px(TAB_CHIP_HEIGHT))
         .w(px(TAB_CHIP_WIDTH))
         .flex_none()
-        .px(px(6.0))
-        .rounded(px(if workspace_style { 7.0 } else { 4.0 }))
+        .p(px(TAB_CHIP_PADDING))
+        .rounded(px(7.0))
+        .border_1()
+        .bg(tab_chip_background(active, theme))
+        .border_color(tab_chip_border(active, theme))
+        .when(!active, |chip| {
+            chip.hover(|style| {
+                style
+                    .bg(tab_chip_hover_background(theme))
+                    .border_color(theme.ink(0.06))
+                    .text_color(theme.text)
+            })
+        })
+        .focus_visible(|style| style.border_1().border_color(theme.accent))
         .flex()
         .flex_row()
         .items_center()
-        .gap(px(4.0))
+        .gap(px(TAB_CHIP_CONTENT_GAP))
         .cursor_pointer()
         .role(gpui::Role::Button)
         // The old session-tab strip's solved carve-out: NOT `.occlude()` — a
@@ -317,7 +367,8 @@ pub(crate) fn tab_chip(
         .child(
             div()
                 .flex_none()
-                .size(px(14.0))
+                .w(px(TAB_ICON_WIDTH))
+                .h(px(TAB_ICON_HEIGHT))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -327,7 +378,6 @@ pub(crate) fn tab_chip(
             div()
                 .flex_1()
                 .min_w_0()
-                .ml(px(2.0))
                 .truncate()
                 .text_size(crate::typography::text_xs())
                 .when(active && workspace_style, |label| {
@@ -390,17 +440,119 @@ pub(crate) fn tab_chip(
         )
 }
 
-/// A chip's leading glyph: 13px, the label's tone when active and a quieter
-/// step below it otherwise, so inactive tabs recede to their titles.
-pub(crate) fn tab_chip_icon(path: &'static str, active: bool, theme: &Theme) -> gpui::AnyElement {
-    crate::icons::icon(path)
-        .size(px(13.0))
-        .text_color(if active {
-            theme.text.opacity(0.85)
+pub(crate) const TAB_ICON_WIDTH: f32 = 24.0;
+pub(crate) const TAB_ICON_HEIGHT: f32 = 20.0;
+const TAB_GLYPH_SIZE: f32 = 12.0;
+
+/// A compact raised tile. Content keeps its own paint, including multicolor
+/// file icons, favicons and animated loading indicators.
+pub(crate) fn tab_icon_tile(
+    content: gpui::AnyElement,
+    tint: Option<gpui::Hsla>,
+    active: bool,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    let dark = theme.appearance.is_dark();
+    let white = gpui::white();
+    let black = gpui::black();
+    let base = tint.unwrap_or_else(|| {
+        theme
+            .surface_raised
+            .blend(theme.ink(if dark { 0.11 } else { 0.04 }))
+    });
+    let top = if tint.is_some() {
+        base
+    } else {
+        base.blend(white.opacity(if active { 0.10 } else { 0.06 }))
+    };
+    let bottom = base.blend(black.opacity(if tint.is_some() { 0.08 } else { 0.04 }));
+    div()
+        .w(px(TAB_ICON_WIDTH))
+        .h(px(TAB_ICON_HEIGHT))
+        .flex_none()
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(if tint.is_some() || dark {
+            white.opacity(if active { 0.18 } else { 0.12 })
         } else {
-            theme.text_muted.opacity(0.7)
+            theme.border
         })
+        .bg(gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(top, 0.0),
+            gpui::linear_color_stop(bottom, 1.0),
+        ))
+        .shadow(vec![
+            gpui::BoxShadow::new(
+                px(0.0),
+                px(1.0),
+                white.opacity(if dark { 0.13 } else { 0.55 }),
+            )
+            .inset(),
+            gpui::BoxShadow::new(
+                px(0.0),
+                px(1.0),
+                black.opacity(if dark { 0.24 } else { 0.10 }),
+            )
+            .blur_radius(px(2.0)),
+        ])
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(content)
         .into_any_element()
+}
+
+/// Provider marks use their tint as a tile fill; monochrome marks retain a
+/// distinct session identity through a restrained indigo fallback.
+pub(crate) fn tab_provider_icon(
+    path: &'static str,
+    tint: Option<gpui::Hsla>,
+    active: bool,
+    theme: &Theme,
+) -> gpui::AnyElement {
+    let tint = tint
+        .unwrap_or_else(|| gpui::rgb(0x7065c2).into())
+        .opacity(1.0);
+    let rgb = tint.to_rgb();
+    let linear = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let luminance = 0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b);
+    // The tint is the gradient's brightest stop. White keeps at least 3:1
+    // contrast up to 0.30 luminance; paler fills use a dark mark.
+    let foreground = if luminance > 0.30 {
+        gpui::black()
+    } else {
+        gpui::white()
+    };
+    tab_icon_tile(
+        crate::icons::brand_icon(path, TAB_GLYPH_SIZE, foreground),
+        Some(tint),
+        active,
+        theme,
+    )
+}
+
+/// Neutral utility glyph in the same fixed tile as session and file icons.
+pub(crate) fn tab_chip_icon(path: &'static str, active: bool, theme: &Theme) -> gpui::AnyElement {
+    tab_icon_tile(
+        crate::icons::icon(path)
+            .size(px(TAB_GLYPH_SIZE))
+            .text_color(if active {
+                theme.text_strong
+            } else {
+                theme.text
+            })
+            .into_any_element(),
+        None,
+        active,
+        theme,
+    )
 }
 
 /// Wrap a horizontally scrolling tab strip in its region, fading whichever

@@ -14329,43 +14329,66 @@ impl Shell {
                 accessible_name.to_string()
             };
             let leading = if subagent_running {
-                loaders::mini_glyph_spinner(
-                    format!("subagent-tab-{ix}"),
-                    2.0,
-                    theme.loader_glyph(),
-                    cx.entity_id(),
-                    cx,
+                crate::surface_chrome::tab_icon_tile(
+                    loaders::mini_glyph_spinner(
+                        format!("subagent-tab-{ix}"),
+                        2.0,
+                        theme.loader_glyph(),
+                        cx.entity_id(),
+                        cx,
+                    )
+                    .into_any_element(),
+                    None,
+                    is_active,
+                    &theme,
                 )
-                .into_any_element()
             } else if let Some(favicon) = browser_favicon {
-                gpui::img(favicon).size(px(12.0)).into_any_element()
+                crate::surface_chrome::tab_icon_tile(
+                    gpui::img(favicon).size(px(12.0)).into_any_element(),
+                    None,
+                    is_active,
+                    &theme,
+                )
             } else if let RightSurface::PullRequest(id) = surface {
                 let (glyph, color) = self
                     .chat_pull_requests
                     .get(&id)
                     .map(|tab| tab.page.read(cx).lifecycle_icon(&theme))
                     .unwrap_or((icons::PULL_REQUEST, theme.text_muted));
-                icons::icon(glyph)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(color)
-                    .into_any_element()
-            } else if matches!(surface, RightSurface::File(_)) {
-                crate::file_icons::icon(
-                    crate::file_icons::FileIconIdentity::file(file_identity_path.as_ref()),
-                    theme.appearance,
+                crate::surface_chrome::tab_icon_tile(
+                    icons::icon(glyph)
+                        .size(px(12.0))
+                        .flex_none()
+                        .text_color(color)
+                        .into_any_element(),
+                    None,
+                    is_active,
+                    &theme,
                 )
-                .size(px(14.0))
-                .when(!is_active, |icon| icon.opacity(0.78))
-                .into_any_element()
-            } else if let Some((icon_path, Some(brand_color))) = harness_icon {
-                icons::brand_icon(
-                    icon_path,
-                    12.0,
-                    brand_color.opacity(if is_active { 1.0 } else { 0.7 }),
+            } else if matches!(surface, RightSurface::File(_)) {
+                crate::surface_chrome::tab_icon_tile(
+                    crate::file_icons::icon(
+                        crate::file_icons::FileIconIdentity::file(file_identity_path.as_ref()),
+                        theme.appearance,
+                    )
+                    .size(px(12.0))
+                    .when(!is_active, |icon| icon.opacity(0.78))
+                    .into_any_element(),
+                    None,
+                    is_active,
+                    &theme,
+                )
+            } else if matches!(
+                surface,
+                RightSurface::SideChat(_) | RightSurface::Subagent(_)
+            ) {
+                crate::surface_chrome::tab_provider_icon(
+                    harness_icon.map_or(icon_path, |(path, _)| path),
+                    harness_icon.and_then(|(_, tint)| tint),
+                    is_active,
+                    &theme,
                 )
             } else {
-                let icon_path = harness_icon.map_or(icon_path, |(path, _)| path);
                 crate::surface_chrome::tab_chip_icon(icon_path, is_active, &theme)
             };
             let chip = crate::surface_chrome::tab_chip(
