@@ -8777,6 +8777,8 @@ impl Composer {
         } else {
             Vec::new()
         };
+        // Chips for these plugins find their logo by id from here on.
+        crate::plugin_logos::remember(&self.mention.plugins);
         self.mention.token = token.clone();
         if !refining {
             self.mention.results.clear();

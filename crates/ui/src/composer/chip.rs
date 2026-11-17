@@ -53,6 +53,9 @@ pub(crate) enum ChipIcon {
     Favicon(SharedString),
     /// An image chip's own picture, cropped to fill the well.
     Thumbnail(std::sync::Arc<gpui::Image>),
+    /// A plugin chip's logo, at icon size in the well; the plug glyph stands
+    /// in while it decodes.
+    PluginLogo(std::sync::Arc<gpui::Image>),
 }
 
 /// The padding around the label in a chip's display `range`: the side
@@ -174,7 +177,8 @@ pub(super) fn chip_pad_overrides(spans: &[SentMentionSpan]) -> Vec<Range<usize>>
         .collect()
 }
 
-/// The icon of a chip. `path` names the file or folder for the file kinds.
+/// The icon of a chip. `path` names the file or folder for the file kinds,
+/// and the plugin id for a plugin.
 pub(crate) fn chip_icon(
     kind: ChipKind,
     path: &str,
@@ -187,7 +191,11 @@ pub(crate) fn chip_icon(
         ChipKind::Link => ChipIcon::Favicon(SharedString::from(path.to_string())),
         ChipKind::Command => ChipIcon::Glyph(crate::icons::COMMAND),
         ChipKind::Chat => ChipIcon::Glyph(crate::icons::CHAT_ROUND_LINE),
-        ChipKind::Plugin => ChipIcon::Glyph(crate::icons::SETTINGS_PLUGINS),
+        // A plugin shows its logo; one without a known logo keeps the plug.
+        ChipKind::Plugin => match crate::plugin_logos::logo_image(path) {
+            Some(logo) => ChipIcon::PluginLogo(logo),
+            None => ChipIcon::Glyph(crate::icons::SETTINGS_PLUGINS),
+        },
         ChipKind::File => ChipIcon::FileTheme(asset_path(FileIconIdentity::file(path), appearance)),
         ChipKind::Directory => ChipIcon::FileTheme(asset_path(
             FileIconIdentity::directory(path.trim_end_matches('/'), false),
@@ -375,6 +383,22 @@ pub(crate) fn paint_chip(
         ChipIcon::Favicon(url) => {
             crate::site_links::paint_favicon(window, bounds, url, theme.text_muted, cx)
         }
+        ChipIcon::PluginLogo(logo) => match logo.clone().use_render_image(window, cx) {
+            Some(render) => {
+                let _ = window.paint_image(bounds, gpui::Corners::all(px(3.0)), render, 0, false);
+            }
+            // Still decoding: the plug holds the well meanwhile.
+            None => {
+                let _ = window.paint_svg(
+                    bounds,
+                    crate::icons::SETTINGS_PLUGINS.into(),
+                    None,
+                    gpui::TransformationMatrix::default(),
+                    theme.text_muted,
+                    cx,
+                );
+            }
+        },
         // A picture still decoding keeps the empty well.
         ChipIcon::Thumbnail(_) => {}
     }

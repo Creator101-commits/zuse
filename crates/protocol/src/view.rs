@@ -534,7 +534,15 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
             let done = items.iter().filter(|i| i.done).count();
             ("Todo", format!("{done}/{} done", items.len()))
         }
-        ToolCall::Mcp { server, tool, .. } => ("MCP", format!("{server} · {tool}")),
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } => match crate::plugin_tools::plugin_tool_call(server, tool, input.as_ref()) {
+            // Zuse's own plugin tools name the plugin and what it did.
+            Some(call) => ("Plugin", call.label()),
+            None => ("MCP", format!("{server} · {tool}")),
+        },
         // Subagent spawns decode as Unknown named "Agent[: <description>]"
         // (every native driver's convention): label them "Agent" with the
         // description as the detail — "Tool · Agent: scan repo" read as two
