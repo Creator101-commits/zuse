@@ -589,6 +589,25 @@ fn file_chips_use_the_file_theme_to_tell_formats_apart() {
     ));
 }
 
+#[test]
+fn plugin_chips_show_their_logo_and_fall_back_to_the_plug() {
+    use crate::theme::Appearance::Dark;
+    // Links carry only the plugin id, as old messages do: the logo is
+    // resolved from it.
+    let (_, spans) =
+        sent_mention_display("read [Linear](zuse-plugin:linear) and [Mine](zuse-plugin:my-server)")
+            .unwrap();
+    assert_eq!(spans[0].path.as_ref(), "linear");
+    assert!(matches!(
+        chip_icon(spans[0].kind, &spans[0].path, Dark),
+        ChipIcon::PluginLogo(_)
+    ));
+    assert!(matches!(
+        chip_icon(spans[1].kind, &spans[1].path, Dark),
+        ChipIcon::Glyph(crate::icons::SETTINGS_PLUGINS)
+    ));
+}
+
 /// Put a queued message carrying `Image 1` and `notes.md` into the composer,
 /// as an acquired edit does.
 fn begin_queued_edit(

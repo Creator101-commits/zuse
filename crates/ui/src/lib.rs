@@ -61,6 +61,7 @@ pub mod onboarding;
 pub mod orb;
 pub mod overscroll;
 pub mod pickers;
+mod plugin_logos;
 pub mod popover;
 mod pr_watch;
 pub mod project_actions;
