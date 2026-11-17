@@ -31,6 +31,30 @@ fn fixture_path() -> PathBuf {
     path
 }
 
+/// Install a fake executable at `path` without ever opening it for writing in
+/// this process. Tests run in parallel threads, and a fork from another test
+/// inherits any open write descriptor until its exec; exec of the fake then
+/// fails with ETXTBSY. Copying through a short-lived child keeps the
+/// descriptor out of every fork of this process, and the child has exited
+/// before the fake is first executed.
+fn install_executable(path: &std::path::Path, source: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let status = std::process::Command::new("cp")
+        .arg(source)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "copy {} failed", source.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Write a generated fake executable; see [`install_executable`].
+fn write_executable(path: &std::path::Path, contents: &str) {
+    let source = path.with_extension("source");
+    std::fs::write(&source, contents).unwrap();
+    install_executable(path, &source);
+}
+
 fn harness() -> CodexHarness {
     CodexHarness::new().with_executable(fixture_path())
 }
@@ -837,9 +861,7 @@ async fn models_discovers_visible_catalog_with_pagination() {
     // A failed probe stays useful and includes the new model in the fallback.
     let failed_probe = tempfile::tempdir().unwrap();
     let failed_exe = failed_probe.path().join("failed-codex");
-    std::fs::write(&failed_exe, "#!/bin/sh\nexit 1\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&failed_exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    write_executable(&failed_exe, "#!/bin/sh\nexit 1\n");
     let fallback = CodexHarness::new()
         .with_executable(failed_exe)
         .models()
@@ -1924,18 +1946,16 @@ async fn idle_voice_runtime_has_no_initial_turn_and_preserves_mcp() {
 #[cfg(unix)]
 #[tokio::test]
 async fn external_voice_keeps_canonical_events_without_any_local_helper() {
-    use std::os::unix::fs::PermissionsExt;
     use zuse_protocol::voice::{VoiceEvent, remote::Sdp};
     use zuse_providers::codex::realtime::{VoiceCommand, channel};
     let dir = tempfile::tempdir().unwrap();
     let binary = dir.path().join("bin/codex");
     std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
-    std::fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-codex-voice-native.py"),
+    install_executable(
         &binary,
-    )
-    .unwrap();
-    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fake-codex-voice-native.py"),
+    );
     let driver = CodexHarness::new().with_executable(binary);
     let mut req = request("");
     req.cwd = dir.path().display().to_string();
@@ -2083,7 +2103,6 @@ fn changing_access_posture_requires_a_new_runtime() {
 
 #[tokio::test]
 async fn brokered_renewal_does_not_block_streaming_or_stop() {
-    use std::os::unix::fs::PermissionsExt;
     use zeroize::Zeroizing;
     use zuse_providers::codex::auth::{Credential, CredentialResolver};
     struct Broker {
@@ -2111,7 +2130,9 @@ async fn brokered_renewal_does_not_block_streaming_or_stop() {
     }
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("codex");
-    std::fs::write(&script, r#"#!/usr/bin/env python3
+    write_executable(
+        &script,
+        r#"#!/usr/bin/env python3
 import json,sys
 assert 'cli_auth_credentials_store="ephemeral"' in sys.argv
 logged_in=False
@@ -2139,8 +2160,8 @@ for line in sys.stdin:
         continue
     else: raise Exception('Unexpected method')
     print(json.dumps({'id':message['id'],'result':result}),flush=True)
-"#).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     let renewing = Arc::new(tokio::sync::Notify::new());
     let harness = CodexHarness::new()
         .with_executable(script)
@@ -2178,7 +2199,6 @@ for line in sys.stdin:
 
 #[tokio::test]
 async fn retained_app_server_reauthenticates_rotated_connection_before_next_turn() {
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use zeroize::Zeroizing;
     use zuse_providers::codex::auth::{Credential, CredentialResolver};
@@ -2195,7 +2215,9 @@ async fn retained_app_server_reauthenticates_rotated_connection_before_next_turn
     }
     let temp = tempfile::tempdir().unwrap();
     let script = temp.path().join("codex");
-    std::fs::write(&script, r#"#!/usr/bin/env python3
+    write_executable(
+        &script,
+        r#"#!/usr/bin/env python3
 import json,sys
 logins=0
 turns=0
@@ -2223,8 +2245,8 @@ for line in sys.stdin:
         continue
     else: raise Exception('Unexpected method')
     print(json.dumps({'id':message['id'],'result':result}),flush=True)
-"#).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#,
+    );
     let broker = Arc::new(Broker(AtomicUsize::new(0)));
     let harness = CodexHarness::new()
         .with_executable(script)
