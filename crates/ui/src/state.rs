@@ -922,6 +922,9 @@ pub struct AppState {
     zot_watches: HashMap<String, Task<()>>,
     /// Devices whose Zapper list has arrived since the runtime started.
     zots_loaded: HashSet<String>,
+    /// When the Zapper watches started, bounding how long unloaded lists
+    /// may hide `zot-` conversations.
+    zots_watching_since: Option<std::time::Instant>,
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
     /// in place, but changing this scope requires assembling a new runtime.
@@ -1144,6 +1147,7 @@ impl AppState {
             zots: Vec::new(),
             zot_watches: HashMap::new(),
             zots_loaded: HashSet::new(),
+            zots_watching_since: None,
             connection: ConnectionStatus::Connecting,
             workspace_scope: None,
             auth: None,
@@ -1706,10 +1710,19 @@ impl AppState {
         if !zapper_chat_id(&chat.id) {
             return false;
         }
-        // A released thread keeps its id but rejoins its project once the
-        // Zapper list is in and the delegation race has long passed.
+        // A released thread keeps its id but rejoins its project once every
+        // watched device's Zapper list is in (any of them may own it) and the
+        // delegation race has long passed. Lists that never arrive (no Zapper
+        // support, failing watches) stop hiding anything after a short grace.
         let fresh = (Utc::now() - chat.created_at).num_minutes() < 5;
-        fresh || self.zots_loaded.is_empty()
+        let loading = !self
+            .zot_watches
+            .keys()
+            .all(|device| self.zots_loaded.contains(device))
+            && self
+                .zots_watching_since
+                .is_some_and(|since| since.elapsed() < std::time::Duration::from_secs(30));
+        fresh || loading
     }
 
     pub fn apply_zots(&mut self, zots: Vec<zuse_protocol::zots::Zot>) -> bool {
@@ -1787,6 +1800,8 @@ impl AppState {
                         .await;
                 }
             });
+            self.zots_watching_since
+                .get_or_insert_with(std::time::Instant::now);
             self.zot_watches.insert(device, task);
         }
     }
@@ -3318,6 +3333,7 @@ impl AppState {
         self.zots.clear();
         self.zot_watches.clear();
         self.zots_loaded.clear();
+        self.zots_watching_since = None;
         self.engine = None;
         *self.desktop_epoch.lock().unwrap() = None;
         self.desktop_events = None;

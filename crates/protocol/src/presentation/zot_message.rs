@@ -87,6 +87,16 @@ pub fn parse_display(text: &str) -> Option<(ZotSender, &str)> {
     parse(text)
 }
 
+/// The message up to the first execution-context marker, current or legacy,
+/// so private host context never shows as message text whichever comes first.
+fn visible_body(body: &str) -> &str {
+    [EXECUTION_CONTEXT, LEGACY_EXECUTION_CONTEXT]
+        .iter()
+        .filter_map(|marker| body.find(marker))
+        .min()
+        .map_or(body, |at| &body[..at])
+}
+
 pub fn parse(text: &str) -> Option<(ZotSender, &str)> {
     let rest = text
         .strip_prefix(PREFIX)
@@ -96,13 +106,7 @@ pub fn parse(text: &str) -> Option<(ZotSender, &str)> {
     if sender.name.trim().is_empty() || sender.zot_id.is_empty() || sender.chat_id.is_empty() {
         return None;
     }
-    Some((
-        sender,
-        body.split_once(EXECUTION_CONTEXT)
-            .or_else(|| body.split_once(LEGACY_EXECUTION_CONTEXT))
-            .map(|(visible, _)| visible)
-            .unwrap_or(body),
-    ))
+    Some((sender, visible_body(body)))
 }
 #[cfg(test)]
 mod tests {
@@ -147,6 +151,10 @@ mod tests {
         assert_eq!(parse(&enriched).unwrap().1, "Body\n\nReply");
         let legacy = format!("{input}{LEGACY_EXECUTION_CONTEXT}Private engine instructions");
         assert_eq!(parse(&legacy).unwrap().1, "Body\n\nReply");
+        // A legacy marker ahead of a current one still ends the visible text.
+        let both =
+            format!("{input}{LEGACY_EXECUTION_CONTEXT}Private{EXECUTION_CONTEXT}More private");
+        assert_eq!(parse(&both).unwrap().1, "Body\n\nReply");
     }
     #[test]
     fn new_messages_name_the_zapper() {

@@ -1340,7 +1340,35 @@ impl WorkspaceView {
             self.zots.issues = Some(panel);
         }
         let panel = self.zots.issues.as_ref().unwrap().clone();
+        // Same inputs the native host supplies: each thread's live state and
+        // the signed-in person's name for their comments.
+        let states: std::collections::HashMap<String, crate::zot_issues::ThreadState> = zot
+            .workers
+            .iter()
+            .map(|w| {
+                use crate::zot_issues::ThreadState;
+                let state = if self.zot_thread_archived(&w.chat_id) {
+                    ThreadState::Archived
+                } else {
+                    match self.zot_thread_status(&w.chat_id) {
+                        "working" => ThreadState::Working,
+                        "awaitingInput" | "errored" => ThreadState::NeedsYou,
+                        _ => ThreadState::Idle,
+                    }
+                };
+                (w.chat_id.clone(), state)
+            })
+            .collect();
+        let user = ["name", "email"].iter().find_map(|key| {
+            self.cloud_account["user"][key]
+                .as_str()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned)
+        });
         panel.update(cx, |p, cx| {
+            p.thread_states(states, cx);
+            p.user_name(user, cx);
             p.sync(zot.clone(), overview, self.zots.pending.is_some(), cx);
             p.files(self.zots.files.clone(), cx);
             p.thread_titles(
