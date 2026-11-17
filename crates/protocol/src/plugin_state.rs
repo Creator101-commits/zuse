@@ -1,6 +1,7 @@
 //! Shared plugin management state. Writes are reconciled by reads, never replayed.
 use crate::plugins::PluginResponse;
 use serde_json::{Value, json};
+use std::borrow::Cow;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Removal {
@@ -38,6 +39,9 @@ pub struct PluginState {
     pub attempt: Value,
     pub confirmation: Option<Confirmation>,
     pub notice: Option<String>,
+    /// Why the last workspace read failed, kept until a snapshot arrives so an
+    /// empty page names its cause instead of a generic "unavailable".
+    pub load_error: Option<String>,
     pending: Option<Pending>,
     attempt_tenant: Option<String>,
     selection_uncertain: bool,
@@ -136,13 +140,63 @@ impl PluginState {
         self.pending = Some(Pending { action, tenant });
         Ok(request)
     }
-    pub fn apply(&mut self, response: &Value) -> Result<Option<Value>, &'static str> {
+    /// What an empty plugins page says when no snapshot is loaded and nothing
+    /// is in flight: the last read's failure when there was one.
+    pub fn unavailable_message(&self) -> String {
+        match &self.load_error {
+            Some(error) => format!("Plugins are unavailable: {error}"),
+            None => "Plugins are unavailable. Refresh to try again.".into(),
+        }
+    }
+    /// True while a request has been prepared and its reply is outstanding.
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+    /// Forget an outstanding request whose reply will never be read (it timed
+    /// out or its transport was replaced). Like [`Self::failed`] it never
+    /// replays the request; unlike it, the caller decides what to read next.
+    pub fn abandon(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.selection_uncertain |= pending.action == "selectWorkspace";
+        }
+    }
+    /// [`Self::failed`] with the service's reason. A failed read keeps the
+    /// reason as [`Self::load_error`]; a failed write reports it in the notice.
+    pub fn failed_with(&mut self, error: impl Into<String>) -> Option<Value> {
+        let error = error.into();
+        let read = self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| matches!(pending.action.as_str(), "list" | "selectWorkspace"));
+        let next = self.failed();
+        if read {
+            self.load_error = Some(error);
+        } else {
+            self.notice = Some(match self.notice.take() {
+                Some(notice) => format!("{error} {notice}"),
+                None => error,
+            });
+        }
+        next
+    }
+    pub fn apply(&mut self, response: &Value) -> Result<Option<Value>, Cow<'static, str>> {
+        if self.pending.is_none() {
+            return Err("No plugin request is awaiting a response.".into());
+        }
+        let decoded = serde_json::from_value::<PluginResponse>(response.clone()).map_err(|error| {
+            format!("The plugin service returned an invalid response ({error}). Refresh connections.")
+        })?;
+        self.apply_decoded(response, decoded).map_err(Cow::Borrowed)
+    }
+    fn apply_decoded(
+        &mut self,
+        response: &Value,
+        decoded: PluginResponse,
+    ) -> Result<Option<Value>, &'static str> {
         let pending = self
             .pending
             .as_ref()
             .ok_or("No plugin request is awaiting a response.")?;
-        let decoded = serde_json::from_value::<PluginResponse>(response.clone())
-            .map_err(|_| "The plugin service returned an invalid response. Refresh connections.")?;
         match decoded {
             PluginResponse::Snapshot { ref tenant_id, .. } => {
                 if !matches!(pending.action.as_str(), "list" | "selectWorkspace")
@@ -164,6 +218,7 @@ impl PluginState {
                     self.notice = None;
                 }
                 self.selection_uncertain = false;
+                self.load_error = None;
                 self.snapshot = response.clone();
                 if self.confirmation.as_ref().is_some_and(|c| {
                     c.tenant != tenant_id.as_str() || self.removable(c.kind, &c.id).is_none()
@@ -454,6 +509,79 @@ mod tests {
         assert!(state.failed().is_none());
         state.begin(next).unwrap();
         assert!(state.failed().is_none());
+        assert_eq!(state.snapshot, before);
+    }
+    #[test]
+    fn failed_reads_name_their_cause_until_a_snapshot_arrives() {
+        let mut state = PluginState::default();
+        assert_eq!(
+            state.unavailable_message(),
+            "Plugins are unavailable. Refresh to try again."
+        );
+        state.begin(json!({"action":"list"})).unwrap();
+        assert!(
+            state
+                .failed_with("Plugin service is unavailable (could not connect).")
+                .is_none()
+        );
+        assert!(!state.is_pending());
+        assert!(state.notice.is_none());
+        assert_eq!(
+            state.unavailable_message(),
+            "Plugins are unavailable: Plugin service is unavailable (could not connect)."
+        );
+        // A malformed reply keeps the decoder's reason rather than a generic line.
+        state.begin(json!({"action":"list"})).unwrap();
+        let error = state
+            .apply(&json!({"kind":"snapshot","tenantId":"personal:owner"}))
+            .unwrap_err();
+        assert!(error.contains("missing field"), "{error}");
+        state.failed_with(error);
+        assert!(
+            state
+                .load_error
+                .as_deref()
+                .unwrap()
+                .contains("missing field")
+        );
+        // The next good read clears it.
+        state.begin(json!({"action":"list"})).unwrap();
+        state.apply(&snapshot("personal:owner")).unwrap();
+        assert!(state.load_error.is_none());
+        assert!(state.snapshot["catalog"].is_array());
+    }
+    #[test]
+    fn failed_writes_report_the_reason_and_still_reconcile_once() {
+        let mut state = loaded();
+        state.begin(json!({"action":"disconnect","tenantId":"organization:team","connectionId":"connection"})).unwrap();
+        let next = state
+            .failed_with("Plugin request failed (plugin_unreachable).")
+            .unwrap();
+        assert_eq!(
+            next,
+            json!({"action":"list","tenantId":"organization:team"})
+        );
+        assert!(state.load_error.is_none());
+        assert!(
+            state
+                .notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Plugin request failed (plugin_unreachable).")
+        );
+    }
+    #[test]
+    fn an_abandoned_request_lets_the_next_read_start_without_replaying_it() {
+        let mut state = loaded();
+        state.begin(json!({"action":"list"})).unwrap();
+        assert!(state.begin(json!({"action":"list"})).is_err());
+        state.abandon();
+        assert!(!state.is_pending());
+        let before = state.snapshot.clone();
+        assert_eq!(
+            state.begin(json!({"action":"list"})).unwrap(),
+            json!({"action":"list","tenantId":"organization:team"})
+        );
         assert_eq!(state.snapshot, before);
     }
     #[test]

@@ -718,7 +718,7 @@ impl WorkspaceView {
                     if self.plugin_request.is_some() {
                         crate::localization::text("plugins-plugins_loading", cx)
                     } else {
-                        ("Plugins are unavailable. Refresh to try again.").to_string()
+                        self.plugin_state.unavailable_message()
                     },
                 ));
             } else if listing.sections.is_empty() {

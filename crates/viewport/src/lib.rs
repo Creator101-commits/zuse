@@ -397,6 +397,9 @@ pub struct WorkspaceView {
     browser_local: bool,
     plugin_state: zuse_protocol::plugin_state::PluginState,
     plugin_request: Option<u64>,
+    /// When [`Self::plugin_request`] was sent, so a reply that never arrives
+    /// cannot block Refresh forever.
+    plugin_request_at: Option<web_time::Instant>,
     plugin_poll: Option<Task<()>>,
     plugin_setup: Option<Entity<plugin_setup::PluginSetup>>,
     plugin_setup_events: Option<Subscription>,
@@ -417,6 +420,9 @@ pub struct WorkspaceView {
     composer_generation: u64,
     _reader: Task<()>,
 }
+
+/// Longer than the engine's own bounds for one plugin read (two 60 s calls).
+const PLUGIN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
 
 impl WorkspaceView {
     pub fn new(transport: Transport, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -976,6 +982,7 @@ impl WorkspaceView {
             browser_local: false,
             plugin_state: Default::default(),
             plugin_request: None,
+            plugin_request_at: None,
             plugin_poll: None,
             plugin_setup: None,
             plugin_setup_events: None,
@@ -1018,10 +1025,25 @@ impl WorkspaceView {
         );
     }
     fn plugin_request_with(&mut self, method: &'static str, request: Value) {
-        if self.plugin_request.is_some() {
-            return;
+        if let Some(id) = self.plugin_request {
+            if self
+                .plugin_request_at
+                .is_some_and(|at| at.elapsed() < PLUGIN_REQUEST_TIMEOUT)
+            {
+                return;
+            }
+            // The reply is overdue: stop waiting for it (never replay it) so
+            // this request, usually a Refresh, can read the current state.
+            self.pending.remove(&id);
+            self.plugin_request = None;
+            self.plugin_request_at = None;
+            self.plugin_state.abandon();
         }
         if !self.connected {
+            if request["action"] == "list" {
+                self.plugin_state.load_error =
+                    Some("The engine is not connected yet. Refresh once it reconnects.".into());
+            }
             return;
         }
         let prepared = if method == methods::SELECT_PLUGIN_WORKSPACE {
@@ -1038,7 +1060,14 @@ impl WorkspaceView {
         };
         self.plugin_setup = None;
         self.plugin_setup_events = None;
-        self.plugin_request = Some(self.call(method, request));
+        let id = self.call(method, request);
+        if id == 0 {
+            // Cached-only views never send; nothing will answer this request.
+            self.plugin_state.abandon();
+            return;
+        }
+        self.plugin_request = Some(id);
+        self.plugin_request_at = Some(web_time::Instant::now());
     }
 
     fn call(&mut self, method: &str, params: Value) -> u64 {
