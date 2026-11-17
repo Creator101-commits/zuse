@@ -964,6 +964,7 @@ impl CodexHarness {
                 HarnessError::Io(e)
             }
         })?;
+        controls.turn.adopt_agent(child.id()).await;
 
         let stdin = child
             .stdin

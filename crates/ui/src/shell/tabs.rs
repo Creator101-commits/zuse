@@ -1354,11 +1354,11 @@ impl Shell {
                 .when(!on_canvas && self.cloud_conversation.is_none(), |row| {
                     row.child(self.render_thread_conversations(cx))
                 })
+                // A cloud chat's header carries only its tabs: no branch
+                // picker and no startup text. The branch and progress live
+                // in the environment summary.
                 .when(self.cloud_conversation.is_some() && !on_canvas, |row| {
                     row.children(self.render_cloud_tabs(cx))
-                })
-                .when(self.cloud_conversation.is_some() && !on_canvas, |row| {
-                    row.children(self.render_top_bar_branch(&theme, cx))
                 })
                 .into_any_element()
         });

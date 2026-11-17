@@ -17,6 +17,26 @@ pub(super) enum CloudConversationEvent {
     /// Open a folder on this computer (the synced copy) in an app.
     OpenPathIn(super::open_in::OpenTarget, String),
 }
+/// The header cloud glyph's color: the theme's success green while the
+/// computer is online, muted grey otherwise.
+pub(super) fn header_status_color(online: bool, theme: &Theme) -> gpui::Hsla {
+    if online {
+        theme.success
+    } else {
+        theme.text_muted.opacity(0.6)
+    }
+}
+
+/// The agent a cloud chat's saved config names. Account rows may use the
+/// short `claude` id for the agent local chats call `claude-code`.
+pub(super) fn cloud_harness(config: &Value) -> Option<zuse_protocol::HarnessId> {
+    match config["agent"].as_str()? {
+        "" => None,
+        "claude" => Some(zuse_protocol::HarnessId::ClaudeCode),
+        other => zuse_protocol::HarnessId::try_from(other.to_owned()).ok(),
+    }
+}
+
 pub(super) struct CloudConversation {
     pub(super) target: CloudTarget,
     pub(super) state: Entity<AppState>,
@@ -184,6 +204,7 @@ impl CloudConversation {
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned)
             .or_else(|| first_message.clone())
+            .map(|title| zuse_protocol::file_mentions::mention_display_text(&title))
             .unwrap_or_else(|| "Cloud chat".into());
         let initial_metadata = config.clone();
         let mut this = Self {
@@ -327,17 +348,9 @@ impl CloudConversation {
         }
         let computer = self.computer_activity(cx);
         let agent = self.agent_activity(cx);
-        // Issues (a failed stage, a message that needs checking) stay in the
-        // status line; routine progress is the working line's.
-        let status = computer
-            .as_ref()
-            .map(|stage| (stage.label.clone(), stage.busy))
-            .or_else(|| {
-                agent
-                    .as_ref()
-                    .filter(|activity| !activity.busy)
-                    .map(|activity| (activity.label.clone(), false))
-            });
+        // Only issues (a failed stage, a message that needs checking) reach
+        // the status line; startup phases are the environment card's.
+        let status = activity::status_line(computer.as_ref(), agent.as_ref());
         let line = if computer.as_ref().is_some_and(|stage| stage.busy) {
             Some(SharedString::from("Waiting for computer…"))
         } else {
@@ -363,16 +376,38 @@ impl CloudConversation {
             .map(str::to_owned)
     }
 
+    /// The agent this chat runs, for its tab's icon.
+    pub(super) fn harness(&self) -> Option<zuse_protocol::HarnessId> {
+        cloud_harness(&self.config)
+    }
+
+    /// Whether the computer is up and usable right now. Asleep, paused,
+    /// starting, failed, deleted or no longer this account's all read as
+    /// unavailable. Follows the workspace state the history and environment
+    /// streams already deliver.
+    pub(super) fn computer_online(&self) -> bool {
+        !self.access_revoked && matches!(self.computer_summary().tone, Tone::Running)
+    }
+
     /// The same cloud icon placement as an ordinary conversation. Computer
     /// details never consume a second header or push the transcript down.
+    /// The glyph is green while the computer is online and grey otherwise;
+    /// startup progress never shows in the header.
     pub(super) fn render_header_control(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).clone();
         let open = self.computer.open;
-        let mut button = header_icon_button(
+        let online = self.computer_online();
+        let glyph = icon(icons::DITHER_CLOUD)
+            .size(px(14.0))
+            .text_color(header_status_color(online, &theme));
+        let mut button = header_icon_button_with(
             "native-cloud-computer",
-            icons::DITHER_CLOUD,
-            "Cloud computer",
-            &theme,
+            glyph,
+            if online {
+                "Cloud computer: running"
+            } else {
+                "Cloud computer: not available"
+            },
             cx.listener(|this, _, _, cx| {
                 if this.computer.menu.take_press_was_open() {
                     this.close_computer(cx);
@@ -634,7 +669,7 @@ impl CloudConversation {
             .as_ref()
             .filter(|title| !title.trim().is_empty())
         {
-            self.title = title.clone();
+            self.title = zuse_protocol::file_mentions::mention_display_text(title);
         }
         self.first_message = None;
         self.error = None;
@@ -683,6 +718,8 @@ impl CloudConversation {
             return;
         }
         let refresh_logs = self.computer.observe_metadata(row.clone());
+        // The header's status glyph follows the new state.
+        cx.notify();
         let sleeping = self.domain_sleeping();
         self.composer
             .update(cx, |composer, _| composer.set_cloud_task_sleeping(sleeping));
@@ -1201,8 +1238,8 @@ mod tests {
             ));
             assert_eq!(
                 view.composer.read(cx).cloud_status(),
-                Some(&("Starting computer".to_owned(), true)),
-                "the computer's stage is the composer's one status line"
+                None,
+                "routine startup phases stay out of the composer's status line"
             );
         });
         assert!(view.read_with(cx, |view, _| view.computer.open));
@@ -1210,6 +1247,95 @@ mod tests {
             view.close_computer(cx);
         });
         assert!(!view.read_with(cx, |view, _| view.computer.open));
+    }
+
+    #[test]
+    fn cloud_harness_reads_saved_and_account_agent_ids() {
+        use zuse_protocol::HarnessId;
+        assert_eq!(
+            cloud_harness(&json!({"agent":"codex"})),
+            Some(HarnessId::Codex)
+        );
+        assert_eq!(
+            cloud_harness(&json!({"agent":"claude-code"})),
+            Some(HarnessId::ClaudeCode)
+        );
+        assert_eq!(
+            cloud_harness(&json!({"agent":"claude"})),
+            Some(HarnessId::ClaudeCode)
+        );
+        assert_eq!(
+            cloud_harness(&json!({"agent":"grok"})),
+            Some(HarnessId::Grok)
+        );
+        assert_eq!(cloud_harness(&json!({"agent":""})), None);
+        assert_eq!(cloud_harness(&json!({})), None);
+    }
+
+    #[test]
+    fn header_status_is_green_only_while_online() {
+        let theme = Theme::default();
+        assert_eq!(header_status_color(true, &theme), theme.success);
+        assert_ne!(header_status_color(false, &theme), theme.success);
+    }
+
+    #[gpui::test]
+    fn header_status_follows_workspace_state_events(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        cx.update(|cx| {
+            initialize(cx);
+            gpui_tokio::init(cx);
+        });
+        let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            std::sync::Arc::new(PendingController),
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        let view = cx.new(|cx| {
+            CloudConversation::new(
+                CloudTarget {
+                    controller,
+                    subject: "owner".into(),
+                    organization: None,
+                    workspace: "task".into(),
+                    initial_session: "session".into(),
+                },
+                json!({"workspaceId":"task","state":"provisioning","agent":"codex"}),
+                Value::Null,
+                boot(directory.path()),
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.account = None;
+            view.authorized = true;
+            assert_eq!(view.harness(), Some(zuse_protocol::HarnessId::Codex));
+            assert!(!view.computer_online(), "starting is not online yet");
+            let mut revision = 1;
+            let mut apply = |view: &mut CloudConversation, state: &str, cx: &mut Context<_>| {
+                revision += 1;
+                view.apply_computer_metadata(
+                    &json!({"workspaceId":"task","state":state,"revision":revision}),
+                    cx,
+                );
+            };
+            apply(view, "ready", cx);
+            assert!(view.computer_online());
+            for unavailable in ["paused", "failed", "deleted"] {
+                apply(view, unavailable, cx);
+                assert!(
+                    !view.computer_online(),
+                    "{unavailable} reads as unavailable"
+                );
+                apply(view, "ready", cx);
+                assert!(view.computer_online());
+            }
+            view.revoke(cx);
+            assert!(!view.computer_online(), "another account's chat is grey");
+        });
     }
 
     fn boot(path: &std::path::Path) -> EngineBootConfig {
@@ -2215,7 +2341,15 @@ mod tests {
         let shell = host.read_with(cx, |host, _| host.shell.clone());
         cx.update(|window, cx| window.draw(cx).clear());
         assert!(cx.debug_bounds("workspace-app-logo").is_some());
-        assert!(cx.debug_bounds("top-bar-branch").is_some());
+        assert!(
+            cx.debug_bounds("top-bar-branch").is_none(),
+            "a cloud chat's header has no branch picker"
+        );
+        assert!(cx.debug_bounds("cloud-saved-branch").is_none());
+        assert!(
+            cx.debug_bounds("cloud-tab-icon-0").is_some(),
+            "cloud tabs lead with an icon like local chat tabs"
+        );
         assert!(cx.debug_bounds("native-cloud-computer").is_some());
         assert!(cx.debug_bounds("titlebar-conversation-tabs").is_some());
         assert!(cx.debug_bounds("conversation-tab-row").is_none());
