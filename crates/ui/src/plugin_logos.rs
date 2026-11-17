@@ -33,21 +33,23 @@ pub(crate) fn known_name(plugin_id: &str) -> Option<String> {
         .filter(|name| !name.trim().is_empty())
 }
 
-/// The domain `plugin_id`'s logo is stored under.
-pub(crate) fn domain(plugin_id: &str) -> Option<String> {
+/// The asset path of `plugin_id`'s logo, when the app ships one. The live
+/// catalog's domain wins; when the app has no logo under it (say the live
+/// catalog spells it `www.linear.app`), the bundled catalog's domain is tried.
+pub(crate) fn logo_path(plugin_id: &str) -> Option<SharedString> {
     let remembered = KNOWN
         .read()
         .unwrap()
         .get(plugin_id)
         .map(|(_, domain)| domain.clone())
         .filter(|domain| !domain.is_empty());
-    remembered.or_else(|| zuse_protocol::plugin_tools::bundled_domain(plugin_id).map(Into::into))
-}
-
-/// The asset path of `plugin_id`'s logo, when the app ships one.
-pub(crate) fn logo_path(plugin_id: &str) -> Option<SharedString> {
-    let path = format!("plugin-icons/{}", domain(plugin_id)?);
-    zuse_icons::load_plugin_icon(&path).map(|_| path.into())
+    let bundled = zuse_protocol::plugin_tools::bundled_domain(plugin_id).map(str::to_owned);
+    [remembered, bundled]
+        .into_iter()
+        .flatten()
+        .map(|domain| format!("plugin-icons/{domain}"))
+        .find(|path| zuse_icons::load_plugin_icon(path).is_some())
+        .map(Into::into)
 }
 
 /// `plugin_id`'s logo as an image to paint straight into a text layout,
@@ -104,6 +106,19 @@ mod tests {
             Some("plugin-icons/github.com")
         );
         assert_eq!(known_name("test-github-plugin").as_deref(), Some("GitHub"));
+    }
+
+    #[test]
+    fn a_live_domain_without_a_logo_falls_back_to_the_bundled_one() {
+        remember(&[crate::composer::MentionPlugin {
+            id: "linear".into(),
+            name: "Linear".into(),
+            domain: "www.linear.app".into(),
+        }]);
+        assert_eq!(
+            logo_path("linear").as_deref(),
+            Some("plugin-icons/linear.app")
+        );
     }
 
     #[test]
