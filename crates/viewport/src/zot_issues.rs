@@ -37,7 +37,7 @@ pub struct IssuePanel {
     thread_titles: HashMap<String, String>,
     overview: bool,
     selected: Option<String>,
-    assigned_only: bool,
+    needs_you_only: bool,
     collapsed: HashSet<String>,
     thread_states: HashMap<String, ThreadState>,
     /// The signed-in person's name, for their avatar on comments.
@@ -67,6 +67,8 @@ enum Field {
     Description,
     DueDate,
     Labels,
+    DoneCriteria,
+    OutOfScope,
 }
 #[derive(Clone)]
 enum EditorKind {
@@ -92,7 +94,7 @@ impl IssuePanel {
             thread_titles: HashMap::new(),
             overview,
             selected: None,
-            assigned_only: false,
+            needs_you_only: false,
             thread_states: HashMap::new(),
             user_name: None,
             collapsed: ["Done".to_owned(), "Canceled".to_owned()]
@@ -112,9 +114,14 @@ impl IssuePanel {
     }
     pub fn sync(&mut self, zot: Zot, overview: bool, pending: bool, cx: &mut Context<Self>) {
         if self.zot != zot || self.overview != overview || self.pending != pending {
-            if self.zot.id != zot.id || self.overview != overview {
+            // Tab switches reset the page through `show_list`; only a
+            // different Zapper drops the open issue here, so "Answer" in
+            // the overview can open an issue on the Issues page.
+            if self.zot.id != zot.id {
                 self.selected = None;
                 self.editor = None;
+                self.menu = None;
+            } else if self.overview != overview {
                 self.menu = None;
             }
             self.zot = zot;
@@ -174,12 +181,25 @@ impl IssuePanel {
             .copied()
             .unwrap_or(ThreadState::Idle)
     }
-    /// The assignee's picture: this Zapper's face, or an empty ring.
-    fn assignee_avatar(&self, assigned: bool, size: f32) -> Div {
-        if assigned {
-            zapper_avatar(&self.avatar(), size)
-        } else {
-            unassigned_avatar(size)
+    /// The owner's picture: you, this Zapper's face (also for its threads),
+    /// or an empty ring.
+    fn owner_avatar(&self, owner: Option<&ZotIssueOwner>, size: f32) -> Div {
+        match owner {
+            Some(ZotIssueOwner::User) => {
+                person_avatar(self.user_name.as_deref().unwrap_or("You"), size)
+            }
+            Some(ZotIssueOwner::Zapper | ZotIssueOwner::Thread { .. }) => {
+                zapper_avatar(&self.avatar(), size)
+            }
+            None => unassigned_avatar(size),
+        }
+    }
+    fn owner_name(&self, owner: Option<&ZotIssueOwner>) -> String {
+        match owner {
+            Some(ZotIssueOwner::User) => "You".into(),
+            Some(ZotIssueOwner::Zapper) => self.zot.config.name.clone(),
+            Some(ZotIssueOwner::Thread { chat_id }) => self.thread_title(chat_id),
+            None => "No owner".into(),
         }
     }
     fn avatar(&self) -> ZotAvatar {
@@ -237,6 +257,7 @@ impl IssuePanel {
             EditorKind::Create => vec![
                 ("Issue title", String::new(), false),
                 ("Description", String::new(), true),
+                ("What must be true for this to be done", String::new(), true),
             ],
             EditorKind::Field(_, field) => {
                 let Some(i) = issue else {
@@ -253,6 +274,16 @@ impl IssuePanel {
                         false,
                     ),
                     Field::Labels => ("bug, ux", i.details.labels.join(", "), false),
+                    Field::DoneCriteria => (
+                        "What must be true for this to be done…",
+                        i.details.done_criteria.clone(),
+                        true,
+                    ),
+                    Field::OutOfScope => (
+                        "What this issue leaves alone…",
+                        i.details.out_of_scope.clone(),
+                        true,
+                    ),
                 }]
             }
             EditorKind::Comment(_) => vec![("Leave a comment…", String::new(), true)],
@@ -333,6 +364,7 @@ impl IssuePanel {
                     details: ZotIssueDetails {
                         title: values[0].trim().into(),
                         description: values[1].clone(),
+                        done_criteria: values[2].trim().into(),
                         ..Default::default()
                     },
                 }
@@ -353,6 +385,8 @@ impl IssuePanel {
                         details.title = value.into();
                     }
                     Field::Description => details.description = values[0].trim_end().into(),
+                    Field::DoneCriteria => details.done_criteria = values[0].trim_end().into(),
+                    Field::OutOfScope => details.out_of_scope = values[0].trim_end().into(),
                     Field::DueDate => {
                         if !value.is_empty()
                             && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err()
@@ -452,11 +486,8 @@ impl IssuePanel {
     }
     fn issue_row(&self, issue: &ZotIssue, cx: &mut Context<Self>) -> AnyElement {
         let id = issue.id.clone();
-        let assignee = if issue.details.assigned {
-            self.zot.config.name.clone()
-        } else {
-            "No assignee".to_owned()
-        };
+        let owner = issue.details.current_owner();
+        let assignee = self.owner_name(owner.as_ref());
         row()
             .id(SharedString::from(format!("issue-row-{id}")))
             .role(Role::Button)
@@ -486,7 +517,7 @@ impl IssuePanel {
                 div()
                     .id(SharedString::from(format!("issue-row-assignee-{id}")))
                     .tip(assignee)
-                    .child(self.assignee_avatar(issue.details.assigned, 16.)),
+                    .child(self.owner_avatar(owner.as_ref(), 16.)),
             )
             .child(
                 div()
@@ -523,16 +554,16 @@ impl IssuePanel {
             return self.overview_page(cx);
         }
         let mut body = column().gap(px(2.));
-        let assigned = self
+        let waiting = self
             .zot
             .issues
             .iter()
-            .filter(|i| i.details.assigned)
+            .filter(|i| i.details.status == ZotIssueStatus::NeedsYou)
             .count();
         let mut tabs = row().gap(px(2.));
-        for (index, label, count) in [(0, "All", self.zot.issues.len()), (1, "Assigned", assigned)]
+        for (index, label, count) in [(0, "All", self.zot.issues.len()), (1, "Needs you", waiting)]
         {
-            let selected = (index == 1) == self.assigned_only;
+            let selected = (index == 1) == self.needs_you_only;
             tabs = tabs.child(
                 button(format!("issues-filter-{index}"), "")
                     .aria_label(label)
@@ -543,7 +574,9 @@ impl IssuePanel {
                     .text_size(px(12.5))
                     .when(selected, |d| d.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                     .when(!selected, |d| d.text_color(rgb(MUTED)))
-                    .when(index == 1, |d| d.child(self.assignee_avatar(true, 14.)))
+                    .when(index == 1, |d| {
+                        d.child(self.owner_avatar(Some(&ZotIssueOwner::User), 14.))
+                    })
                     .child(label)
                     .child(
                         div()
@@ -552,7 +585,7 @@ impl IssuePanel {
                             .child(count.to_string()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.assigned_only = index == 1;
+                        this.needs_you_only = index == 1;
                         cx.notify();
                     })),
             );
@@ -612,16 +645,15 @@ impl IssuePanel {
             .filter(|_| self.searching)
             .map(|i| i.read(cx).value(cx).to_lowercase())
             .unwrap_or_default();
-        for status in ZotIssueStatus::ALL {
+        for status in ZotIssueStatus::BOARD {
+            if self.needs_you_only && status != ZotIssueStatus::NeedsYou {
+                continue;
+            }
             let issues: Vec<_> = self
                 .zot
                 .issues
                 .iter()
-                .filter(|i| {
-                    i.details.status == status
-                        && (!self.assigned_only || i.details.assigned)
-                        && self.matches_query(i, &query)
-                })
+                .filter(|i| i.details.status == status && self.matches_query(i, &query))
                 .collect();
             // Done and Canceled keep a header so finished work stays findable.
             if issues.is_empty() && !status.terminal() {
@@ -635,6 +667,15 @@ impl IssuePanel {
                     body = body.child(self.issue_row(i, cx));
                 }
             }
+        }
+        if self.needs_you_only && waiting == 0 {
+            body = body.child(
+                div()
+                    .px(px(10.))
+                    .py(px(20.))
+                    .text_color(rgb(MUTED))
+                    .child("Nothing needs you right now. When the Zapper needs a decision, it hands the issue to you here."),
+            );
         }
         body.into_any_element()
     }
@@ -741,7 +782,7 @@ impl IssuePanel {
     /// The overview: open work first, then live threads, pull requests and
     /// documents. Empty blocks are left out instead of showing a zero.
     fn overview_page(&self, cx: &mut Context<Self>) -> AnyElement {
-        let open: Vec<&ZotIssue> = ZotIssueStatus::ALL
+        let open: Vec<&ZotIssue> = ZotIssueStatus::BOARD
             .iter()
             .filter(|s| !s.terminal())
             .flat_map(|s| {
@@ -1027,12 +1068,8 @@ impl IssuePanel {
             ),
             (
                 "bot",
-                "Assignee",
-                if issue.details.assigned {
-                    self.zot.config.name.clone()
-                } else {
-                    "No assignee".into()
-                },
+                "Owner",
+                self.owner_name(issue.details.current_owner().as_ref()),
                 "assignee",
             ),
             (
@@ -1061,7 +1098,8 @@ impl IssuePanel {
                 content = content.child(priority_icon(issue.details.priority));
             }
             if menu == "assignee" {
-                content = content.child(self.assignee_avatar(issue.details.assigned, 16.));
+                content =
+                    content.child(self.owner_avatar(issue.details.current_owner().as_ref(), 16.));
             }
             content = content
                 .child(
@@ -1125,10 +1163,26 @@ impl IssuePanel {
                         cx.notify();
                     }),
                 );
+                // Owners: nobody, you, the Zapper, then threads on this issue.
+                let owners: Vec<Option<ZotIssueOwner>> =
+                    [None, Some(ZotIssueOwner::User), Some(ZotIssueOwner::Zapper)]
+                        .into_iter()
+                        .chain(
+                            issue
+                                .threads
+                                .iter()
+                                .filter(|id| self.zot.workers.iter().any(|w| w.chat_id == **id))
+                                .map(|id| {
+                                    Some(ZotIssueOwner::Thread {
+                                        chat_id: id.clone(),
+                                    })
+                                }),
+                        )
+                        .collect();
                 let count = match menu {
                     "status" => ZotIssueStatus::ALL.len(),
                     "priority" => ZotIssuePriority::ALL.len(),
-                    _ => 2,
+                    _ => owners.len(),
                 };
                 for index in 0..count {
                     let mut details = issue.details.clone();
@@ -1150,18 +1204,23 @@ impl IssuePanel {
                             )
                         }
                         _ => {
-                            details.assigned = index == 1;
+                            let owner = owners[index].clone();
+                            details.assigned = matches!(
+                                owner,
+                                Some(ZotIssueOwner::Zapper | ZotIssueOwner::Thread { .. })
+                            );
+                            details.owner = owner.clone();
                             (
-                                self.assignee_avatar(index == 1, 18.).into_any_element(),
-                                if index == 1 {
-                                    self.zot.config.name.clone()
-                                } else {
-                                    "No assignee".into()
-                                },
+                                self.owner_avatar(owner.as_ref(), 18.).into_any_element(),
+                                self.owner_name(owner.as_ref()),
                             )
                         }
                     };
-                    let current = details == issue.details;
+                    let current = if menu == "assignee" {
+                        details.current_owner() == issue.details.current_owner()
+                    } else {
+                        details == issue.details
+                    };
                     let id = issue.id.clone();
                     options = options.child(
                         menu_option(format!("issue-option-{menu}-{index}"), lead, label, current)
@@ -1487,13 +1546,31 @@ impl IssuePanel {
                 }))
                 .into_any_element(),
         };
-        body = body.child(links).child(
-            column()
-                .pt(px(14.))
-                .gap(px(8.))
-                .child(div().text_color(rgb(MUTED)).child("Description"))
-                .child(description),
-        );
+        body = body
+            .child(links)
+            .child(
+                column()
+                    .pt(px(14.))
+                    .gap(px(8.))
+                    .child(div().text_color(rgb(MUTED)).child("Description"))
+                    .child(description),
+            )
+            .child(self.text_section(
+                issue,
+                Field::DoneCriteria,
+                "Done when",
+                "Add what must be true for this to be done…",
+                &issue.details.done_criteria,
+                cx,
+            ))
+            .child(self.text_section(
+                issue,
+                Field::OutOfScope,
+                "Out of scope",
+                "Add what this issue leaves alone…",
+                &issue.details.out_of_scope,
+                cx,
+            ));
         let mut filters = row().gap(px(6.));
         for (filter, name) in [(0, "All"), (1, "Comments"), (2, "Agents & bots")] {
             filters = filters.child(
@@ -1538,7 +1615,7 @@ impl IssuePanel {
         {
             let (actor, text) = self.activity_text(issue, event);
             let (glyph, color) = activity_glyph(event);
-            if event.kind != "comment" && event.kind != "workerReport" {
+            if !matches!(event.kind.as_str(), "comment" | "workerReport" | "question") {
                 // One line: glyph, who, what, when. Long text truncates
                 // instead of wrapping, so every row keeps the same rhythm.
                 body = body.child(
@@ -1603,6 +1680,48 @@ impl IssuePanel {
             },
         )
         .into_any_element()
+    }
+    /// A titled block of issue text that edits in place on click.
+    fn text_section(
+        &self,
+        issue: &ZotIssue,
+        field: Field,
+        label: &'static str,
+        placeholder: &'static str,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let id = issue.id.clone();
+        let content = match self.editing(&issue.id, field) {
+            Some(input) => inline_field(input, false, true, cx).into_any_element(),
+            None => div()
+                .id(SharedString::from(format!("issue-{label}")))
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("Edit {label}")))
+                .mx(px(-6.))
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(px(6.))
+                .cursor_text()
+                .hover(|d| d.bg(rgb(0x181818)))
+                .text_size(px(13.))
+                .line_height(px(19.))
+                .when(value.is_empty(), |d| d.text_color(rgb(0x6a6a6a)))
+                .child(if value.is_empty() {
+                    placeholder.to_owned()
+                } else {
+                    value.to_owned()
+                })
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    this.open(EditorKind::Field(id.clone(), field), w, cx)
+                }))
+                .into_any_element(),
+        };
+        column()
+            .pt(px(14.))
+            .gap(px(8.))
+            .child(div().text_color(rgb(MUTED)).child(label))
+            .child(content)
     }
     /// A face for comments: this Zapper's, or the signed-in person's initial.
     /// Worker threads keep their activity glyph.
@@ -1678,7 +1797,13 @@ impl IssuePanel {
     ) -> AnyElement {
         // A routine "Worker update" label repeats the header; failures and
         // questions stay visible as a tag.
-        let mut tag = None;
+        let mut tag = (event.kind == "question").then(|| {
+            if issue.details.status == ZotIssueStatus::NeedsYou {
+                "Needs your answer".to_owned()
+            } else {
+                "Question".to_owned()
+            }
+        });
         if event.kind == "workerReport" {
             if let Some((first, rest)) = text.split_once('\n') {
                 if first == "Worker update" {
@@ -1882,13 +2007,13 @@ impl IssuePanel {
             .gap(px(14.))
             .child(div().text_size(px(20.)).child(title));
         let labels: &[&str] = match editor.kind {
-            EditorKind::Create => &["Title", "Description"],
+            EditorKind::Create => &["Title", "Description", "Done when"],
             EditorKind::Field(..) | EditorKind::Comment(_) | EditorKind::Reply(..) => &[],
             EditorKind::PullRequest(_) => &["Pull request URL", "Title"],
             EditorKind::Delegate(_) => &["Assignment", "Base branch"],
         };
         for (index, input) in editor.fields.iter().enumerate() {
-            let multiline = matches!(editor.kind, EditorKind::Create) && index == 1
+            let multiline = matches!(editor.kind, EditorKind::Create) && index >= 1
                 || matches!(editor.kind, EditorKind::Delegate(_)) && index == 0;
             body = body.child(
                 column()
@@ -2127,8 +2252,11 @@ fn input_box(input: Entity<TextInput>, height: f32) -> Div {
         .border_color(rgb(BORDER))
         .child(input)
 }
+/// The Needs-you amber, shared by its status, question cards and badges.
+pub const NEEDS_YOU: u32 = 0xf2a14a;
 pub fn status_color(status: ZotIssueStatus) -> u32 {
     match status {
+        ZotIssueStatus::NeedsYou => NEEDS_YOU,
         ZotIssueStatus::InProgress | ZotIssueStatus::InReview | ZotIssueStatus::Done => 0x00b80a,
         ZotIssueStatus::Blocked => 0xd9bf60,
         _ => MUTED,
@@ -2144,7 +2272,10 @@ pub fn status_icon(status: ZotIssueStatus) -> Div {
         .when(
             matches!(
                 status,
-                ZotIssueStatus::InProgress | ZotIssueStatus::InReview | ZotIssueStatus::Done
+                ZotIssueStatus::InProgress
+                    | ZotIssueStatus::InReview
+                    | ZotIssueStatus::Done
+                    | ZotIssueStatus::NeedsYou
             ),
             |d| d.child(div().size(px(5.)).bg(rgb(color))),
         )
@@ -2363,6 +2494,9 @@ fn activity_glyph(event: &ZotIssueActivity) -> (&'static [&'static str], u32) {
         "thread" if text.starts_with("Unlinked") => (GLYPH_CHAT, 0x6a6a6a),
         "thread" => (GLYPH_CHAT, 0x7aa2f7),
         "comment" => (GLYPH_CHAT, 0x9aa3b2),
+        "question" => (GLYPH_PERSON, NEEDS_YOU),
+        "closed" if text.starts_with("Merged") => (GLYPH_DOT, 0x00b80a),
+        "closed" => (GLYPH_DOT, 0x6a6a6a),
         "workerReport" if text.starts_with("Worker failed") => (GLYPH_PROMPT, 0xe5736b),
         "workerReport" if text.starts_with("Worker needs input") => (GLYPH_PROMPT, 0xd9bf60),
         "workerReport" => (GLYPH_PROMPT, 0x4fc1b0),

@@ -54,6 +54,14 @@ fn issue(number: u32, title: &str, status: ZotIssueStatus, assigned: bool, pr: b
                 ZotIssuePriority::Normal
             },
             assigned,
+            owner: Some(match status {
+                ZotIssueStatus::NeedsYou => ZotIssueOwner::User,
+                ZotIssueStatus::InProgress | ZotIssueStatus::InReview => ZotIssueOwner::Thread {
+                    chat_id: format!("zot-worker-{number}"),
+                },
+                _ => ZotIssueOwner::Zapper,
+            }),
+            done_criteria: "Works end to end on staging with a passing smoke test.".into(),
             ..Default::default()
         },
         created_at: now - 54_000_000,
@@ -198,8 +206,8 @@ fn main() -> anyhow::Result<()> {
                 ),
                 issue(
                     3,
-                    "Test the new machine image end to end on staging",
-                    ZotIssueStatus::Blocked,
+                    "Pick the staging machine image to test",
+                    ZotIssueStatus::NeedsYou,
                     false,
                     false,
                 ),

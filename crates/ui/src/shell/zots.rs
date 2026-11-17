@@ -306,7 +306,13 @@ impl Shell {
                     .previous_coordinator_chats
                     .iter()
                     .any(|c| Some(c) == selected.as_ref());
-            let needs = zot.decisions.iter().filter(|d| d.answer.is_none()).count();
+            // Open decisions plus issues the Zapper handed to the user.
+            let needs = zot.decisions.iter().filter(|d| d.answer.is_none()).count()
+                + zot
+                    .issues
+                    .iter()
+                    .filter(|i| i.details.status == ZotIssueStatus::NeedsYou)
+                    .count();
             let (coordinator, _) = self.zot_thread_phase(&id, cx);
             // Finished threads leave the sidebar and stay under the Threads tab.
             let threads: Vec<_> = zot
@@ -326,9 +332,9 @@ impl Shell {
             // only spins for the coordinator itself.
             let working = matches!(coordinator, ThreadPhase::Working);
             let waiting = if needs == 1 {
-                "1 decision waiting for you".to_owned()
+                "1 thing waiting for you".to_owned()
             } else {
-                format!("{needs} decisions waiting for you")
+                format!("{needs} things waiting for you")
             };
             // Stays lit while its right-click menu is open.
             let menu_open = self
@@ -1355,7 +1361,13 @@ impl Shell {
                 )
             },
         );
-        if !decisions.is_empty() || !events.is_empty() {
+        let asked: Vec<ZotIssue> = zot
+            .issues
+            .iter()
+            .filter(|i| i.details.status == ZotIssueStatus::NeedsYou)
+            .cloned()
+            .collect();
+        if !decisions.is_empty() || !events.is_empty() || !asked.is_empty() {
             let mut needs = div()
                 .flex()
                 .flex_col()
@@ -1384,6 +1396,27 @@ impl Shell {
                     theme,
                     move |this, _, _, cx| {
                         this.open_zot_dialog(z.clone(), Kind::Decision(decision.clone()), cx);
+                    },
+                    cx,
+                ));
+            }
+            // Issues handed to the user come first: their answer unblocks work.
+            for issue in asked {
+                let id = issue.id.clone();
+                needs = needs.child(list_row(
+                    format!("zot-asked-{}", issue.id),
+                    icons::STATUS_QUESTION,
+                    theme.warning,
+                    format!("{} · {}", issue.code(), issue.details.title),
+                    Some("Answer".into()),
+                    theme,
+                    move |this, _, _, cx| {
+                        if let Some(panel) = &this.zot_ui.issues {
+                            panel.update(cx, |p, cx| p.show_issue(id.clone(), cx));
+                        }
+                        if this.zot_ui.tabs.select(ZotTab::Issues) {
+                            cx.notify();
+                        }
                     },
                     cx,
                 ));
