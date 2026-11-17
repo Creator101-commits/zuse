@@ -576,6 +576,11 @@ async fn deliver(
             let events: Vec<_> = batch.drain(..).map(|(_, event)| event).collect();
             // A finite retry budget, identical UUIDs, and cancellable backoff.
             for attempt in 0..3 {
+                // A change signalled before this check is already reflected in
+                // the generation read below. Clear its stored permit so it
+                // cannot cancel a batch that is still current; a change after
+                // the check stores a fresh permit and cancels as intended.
+                std::pin::pin!(owner.changed.notified()).enable();
                 let current = {
                     let state = owner.state.lock().unwrap();
                     state.preference.enabled && state.generation == generation
