@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.*
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
 import sh.zuse.core.*
 
@@ -75,6 +76,11 @@ fun CloudSheet(
     var method by rememberSaveable { mutableStateOf("api-key") }
     var credential by remember { mutableStateOf("") }
     LaunchedEffect(Unit) { cloud.load() }
+    // Sign-in polling pauses while the app is in the background or the sheet is closed.
+    LifecycleStartEffect(cloud) {
+        cloud.setVisible(true)
+        onStopOrDispose { cloud.setVisible(false) }
+    }
     LaunchedEffect(cloud.pendingRepository) {
         if (cloud.pendingRepository != kotlinx.serialization.json.JsonNull) {
             repository = cloud.pendingRepository.text("repositoryUrl").orEmpty()

@@ -216,12 +216,14 @@ private fun HomePane(
         // Returning to the list refreshes in place; only pulling shows the indicator.
         workspace.refreshComputerInboxes(quiet = true)
     }
-    // Keep previews and run status fresh while the list is on screen.
+    // Keep previews and run status fresh while the list is on screen, easing off while it sits
+    // idle. Returning to the list or pulling to refresh starts the schedule over.
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    LaunchedEffect(lifecycle) {
+    LaunchedEffect(lifecycle, workspace.inboxRefreshing) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            var attempt = 0
             while (true) {
-                kotlinx.coroutines.delay(30_000)
+                kotlinx.coroutines.delay(PollSchedule.backoff(attempt++, 30_000, 60_000))
                 workspace.refreshComputerInboxes(quiet = true)
             }
         }

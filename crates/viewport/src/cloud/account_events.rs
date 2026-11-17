@@ -143,6 +143,13 @@ impl WorkspaceView {
             }
             match kind {
                 "connected" => {
+                    // Billing hints sent while disconnected were missed.
+                    if !self.cloud.account_events.live
+                        && self.settings
+                        && self.settings_section == crate::settings_view::Section::Cloud
+                    {
+                        self.refresh_billing(false);
+                    }
                     self.cloud.account_events.live = true;
                     self.cloud.account_events.dirty = true;
                     self.cloud.poll = None;
@@ -150,6 +157,13 @@ impl WorkspaceView {
                     self.cloud.repair.poll = None;
                 }
                 "reset" | "revalidate" => {
+                    // Joined a feed that is already connected.
+                    if data["live"] == true {
+                        self.cloud.account_events.live = true;
+                        self.cloud.poll = None;
+                        self.cloud.sync.poll = None;
+                        self.cloud.repair.poll = None;
+                    }
                     self.cloud.account_events.dirty = true;
                     // A resumed cursor may have lost conversation invalidations.
                     // Revalidate the visible saved head through account HTTP;
@@ -215,7 +229,11 @@ impl WorkspaceView {
                         if self.settings
                             && self.settings_section == crate::settings_view::Section::Cloud
                         {
-                            if let Some(kind) = event["kind"]
+                            if event["kind"] == "billing" {
+                                // Plan, period or usage changed: the open
+                                // usage and billing view reads it again.
+                                self.refresh_billing(false);
+                            } else if let Some(kind) = event["kind"]
                                 .as_str()
                                 .filter(|kind| *kind != "authentication")
                             {

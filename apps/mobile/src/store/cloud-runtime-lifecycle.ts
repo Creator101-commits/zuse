@@ -2,12 +2,14 @@ import { useAtomValue } from "@effect/atom-react";
 import { useEffect } from "react";
 import { AppState } from "react-native";
 import { cloudLifecycle } from "~/lib/cloud-lifecycle";
+import { catalogPollDelay } from "~/lib/poll-schedule";
 import { resetCloudRuntime } from "~/rpc/cloud-runtime";
 import { disposeConnection } from "~/rpc/connection";
 import { authAccountAtom } from "./auth";
 import {
 	cloudCatalogAtom,
 	cloudConnectionsAtom,
+	onCloudCatalogUserRefresh,
 	refreshCloudCatalog,
 	setCloudCatalogAccount,
 } from "./cloud-catalog";
@@ -31,29 +33,62 @@ export function useCloudRuntimeLifecycle(): void {
 		setCloudCatalogAccount(accountId);
 		if (accountId === null) return;
 		let active = AppState.currentState !== "background";
-		let lastRefresh = 0;
-		const refresh = () => {
-			if (!active) return;
-			lastRefresh = Date.now();
-			void refreshCloudCatalog();
+		let disposed = false;
+		let idleAttempt = 0;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const transitioning = () =>
+			appAtomRegistry.get(cloudCatalogAtom).chats.some((summary) => {
+				const lifecycle = cloudLifecycle(summary);
+				return lifecycle === "starting" || lifecycle === "resuming";
+			});
+		// Fast while a workspace changes; idle polls back off until something happens.
+		const schedule = () => {
+			clearTimeout(timer);
+			if (disposed || !active) return;
+			timer = setTimeout(
+				() => {
+					idleAttempt = transitioning() ? 0 : idleAttempt + 1;
+					void refreshCloudCatalog({ background: true }).then(
+						schedule,
+						schedule,
+					);
+				},
+				catalogPollDelay(transitioning(), idleAttempt),
+			);
 		};
-		refresh();
+		const refreshNow = () => {
+			idleAttempt = 0;
+			if (!active) return;
+			void refreshCloudCatalog({ background: true });
+			schedule();
+		};
+		refreshNow();
 
-		const timer = setInterval(() => {
-			const starting = appAtomRegistry
-				.get(cloudCatalogAtom)
-				.chats.some((summary) => {
-					const lifecycle = cloudLifecycle(summary);
-					return lifecycle === "starting" || lifecycle === "resuming";
-				});
-			if (starting || Date.now() - lastRefresh >= 10_000) refresh();
-		}, 2_000);
+		const removeUserRefresh = onCloudCatalogUserRefresh(() => {
+			idleAttempt = 0;
+			schedule();
+		});
+		// A wake started elsewhere (for example by sending a message) should not wait out an idle delay.
+		let wasTransitioning = transitioning();
+		const removeCatalog = appAtomRegistry.subscribe(cloudCatalogAtom, () => {
+			const changing = transitioning();
+			if (changing && !wasTransitioning) {
+				idleAttempt = 0;
+				schedule();
+			}
+			wasTransitioning = changing;
+		});
 		const subscription = AppState.addEventListener("change", (state) => {
+			const wasActive = active;
 			active = state === "active";
-			refresh();
+			if (!active) clearTimeout(timer);
+			else if (!wasActive) refreshNow();
 		});
 		return () => {
-			clearInterval(timer);
+			disposed = true;
+			clearTimeout(timer);
+			removeUserRefresh();
+			removeCatalog();
 			subscription.remove();
 			const previousConnections = appAtomRegistry.get(cloudConnectionsAtom);
 			setCloudCatalogAccount(null);

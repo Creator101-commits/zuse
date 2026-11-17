@@ -49,9 +49,9 @@ class DatabaseBootstrapTest(unittest.TestCase):
         self.url = f"postgresql://zuse_test@127.0.0.1:{self.port}/{name}?sslmode=disable"
 
     def test_release_manifest_contains_command_and_recreation_after_admission(self):
-        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql","0044_worker_due_index.sql","0045_auth_wakeups.sql","0046_plugin_wakeups.sql","0048_executor_wakeups.sql")
-        self.assertEqual(database.FILES[-12:],expected)
-        self.assertEqual(len(database.FILES),43)
+        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql","0044_worker_due_index.sql","0045_auth_wakeups.sql","0046_plugin_wakeups.sql","0048_executor_wakeups.sql","0049_change_hints.sql")
+        self.assertEqual(database.FILES[-13:],expected)
+        self.assertEqual(len(database.FILES),44)
         self.assertIn("0026_task_command_admission.sql",database.FILES)
         self.assertNotIn("0022_computer_recreations.sql",database.FILES)
         self.assertNotIn("0022_recreation.sql",database.FILES)
@@ -98,6 +98,26 @@ SELECT 'after-auth-claim';
         # notification arrives once, after commit.
         self.assertLess(lines.index(notices[0]), lines.index("after-claim"))
         self.assertLess(lines.index("inside-transaction"), lines.index(notices[1]))
+
+    def test_billing_and_machine_image_changes_append_one_hint_per_transaction(self):
+        database.execute(self.url, database.render("production"))
+        sql = """SET search_path TO zuse_production;
+BEGIN;
+INSERT INTO api_cloud_billing_ledger(entry_id,period_id,account_id,kind,amount_micros,source_id,occurred_at,created_at) VALUES('l1','p1','owner','provider-cost',1,'s1',1,1),('l2','p1','owner','provider-cost',1,'s2',1,1);
+INSERT INTO api_entitlements(entitlement_id,account_id,kind,provider,status,created_at,updated_at) VALUES('e1','owner','cloud-workspace','polar','active',1,1);
+COMMIT;
+UPDATE api_entitlements SET updated_at=2 WHERE entitlement_id='e1';
+UPDATE api_entitlements SET status='grace' WHERE entitlement_id='e1';
+INSERT INTO cloud_machine_versions(owner_id,revision,actor_id,recipe,digest,created_at) VALUES('owner',1,'owner','{}',repeat('a',64),1);
+SELECT kind||':'||resource_id||':'||payload::text FROM zuse_rust_account_event_outbox ORDER BY outbox_id;
+"""
+        result = subprocess.run(["psql", "-X", "--no-align", "--tuples-only", "-v", "ON_ERROR_STOP=1"], input=sql,
+                                env=database.connection_environment(self.url), capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line for line in result.stdout.splitlines() if ":" in line]
+        # One billing hint for the batch, none for a timestamp-only update,
+        # one for the status change; hints never carry payloads.
+        self.assertEqual(rows, ["billing:p1:{}", "billing:e1:{}", "machine-image:owner:{}"], result.stdout)
 
     def test_fresh_staging_and_production_are_empty_isolated_and_idempotent(self):
         for environment in ("staging", "production"):

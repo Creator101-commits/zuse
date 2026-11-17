@@ -31,6 +31,14 @@ gpui::actions!(
     [CloseRepositoryPicker, CloseImageHistory]
 );
 pub type Owner = (String, Option<String>);
+/// Delay before the `attempt`th fallback status read while the account feed
+/// is disconnected: doubles from `first`, capped at a minute. While the feed
+/// is connected, `machine-image` hints replace these reads entirely.
+pub(crate) fn fallback_delay(first: std::time::Duration, attempt: u32) -> std::time::Duration {
+    first
+        .saturating_mul(1u32 << attempt.min(6))
+        .min(std::time::Duration::from_secs(60))
+}
 /// Which part of Cloud setup the panel renders. `All` stacks every group, as
 /// the browser's single Cloud page does; the desktop gives each its own page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -452,6 +460,61 @@ mod owner_reset_tests {
                     .update(cx, |input, cx| input.set_value("ABCD-EFGH".into(), cx));
                 panel.bind_owner(Some(("account-b".into(), None)), cx);
                 assert!(panel.github_code.read(cx).value(cx).is_empty());
+            })
+            .unwrap();
+    }
+    #[test]
+    fn fallback_reads_back_off_to_a_minute() {
+        let waits: Vec<_> = (0..7)
+            .map(|n| fallback_delay(std::time::Duration::from_secs(2), n).as_secs())
+            .collect();
+        assert_eq!(waits, vec![2, 4, 8, 16, 32, 60, 60]);
+        assert_eq!(
+            fallback_delay(std::time::Duration::from_secs(10), 40).as_secs(),
+            60
+        );
+    }
+    #[gpui::test]
+    fn a_connected_feed_replaces_machine_build_polling_with_hinted_reads(cx: &mut TestAppContext) {
+        cx.update(crate::initialize);
+        let window = cx.add_window(RepositoryPanel::new);
+        window
+            .update(cx, |panel, _, cx| {
+                panel.bind_owner(Some(("account".into(), None)), cx);
+                panel.loaded = true;
+                let building = |panel: &mut RepositoryPanel, cx: &mut Context<RepositoryPanel>| {
+                    panel.receive_machine(
+                        json!({"revision":1,"recipe":{"setupScript":"true"},"createdAt":1,"imageState":"building"}),
+                        cx,
+                    );
+                };
+                let reads = |panel: &RepositoryPanel| {
+                    let mut kinds: Vec<_> = panel.pending.values().map(|p| p.kind).collect();
+                    kinds.sort();
+                    kinds
+                };
+                // Disconnected: a running build is polled.
+                building(panel, cx);
+                assert!(panel.machine.poll.is_some());
+                // Connecting stops the timer and reads once, for missed hints.
+                panel.set_account_feed_live(true, cx);
+                assert!(panel.machine.poll.is_none());
+                assert_eq!(reads(panel), vec!["image", "machine-read"]);
+                panel.pending.clear();
+                // While connected a running build schedules no timer…
+                building(panel, cx);
+                assert!(panel.machine.poll.is_none());
+                assert!(reads(panel).is_empty());
+                // …and other kinds don't read it either.
+                panel.account_event("conversation", "w", cx);
+                assert!(reads(panel).is_empty());
+                // A hint reads both views once.
+                panel.account_event("machine-image", "uimg", cx);
+                assert_eq!(reads(panel), vec!["image", "machine-read"]);
+                panel.pending.clear();
+                // Losing the feed brings the fallback poll back.
+                panel.set_account_feed_live(false, cx);
+                assert!(panel.machine.poll.is_some());
             })
             .unwrap();
     }

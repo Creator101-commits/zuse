@@ -14,10 +14,13 @@ struct CloudSettingsView: View {
   }
   @Environment(\.dismiss) private var dismiss
   @Environment(\.openURL) private var openURL
+  @Environment(\.scenePhase) private var scenePhase
   @State private var status: JSONValue = .null
   @State private var statusRequest = UUID()
   @State private var operation: JSONValue = .null
   @State private var loginRevision = UUID()
+  @State private var loginPollOperation = ""
+  @State private var loginPollStarted = ContinuousClock.now
   @State private var providers: [String] = []
   @State private var methods: [String] = []
   @State private var loginProviders: [String] = []
@@ -123,7 +126,10 @@ struct CloudSettingsView: View {
         .toolbar { ToolbarItem(placement: .sheetClose) { SheetCloseButton { dismiss() } } }
         .task { await load() }
         .onDisappear { credential = "" }
-        .task(id: (operation["operationId"].string ?? "") + loginRevision.uuidString) {
+        .task(
+          id: (operation["operationId"].string ?? "") + loginRevision.uuidString
+            + (scenePhase == .active ? "" : "-background")
+        ) {
           await poll()
         }
         .confirmationDialog(
@@ -248,12 +254,25 @@ struct CloudSettingsView: View {
   }
   private func poll() async {
     guard let id = operation["operationId"].string, let key = operationKey else { return }
+    // Polling pauses in the background; returning (often from the browser) checks right away.
+    guard scenePhase == .active else { return }
+    var immediate = loginPollOperation == id
+    if !immediate {
+      loginPollOperation = id
+      loginPollStarted = .now
+    }
     let generation = accountGeneration
     let revision = loginRevision
-    var retryDelay = 3
+    var failures = 0
     do {
       while operation["state"].string == "authorizing" {
-        try await Task.sleep(for: .seconds(retryDelay))
+        let elapsed = Double(loginPollStarted.duration(to: .now).components.seconds)
+        let delay =
+          failures == 0
+          ? PollSchedule.loginDelay(elapsed: elapsed)
+          : PollSchedule.backoff(attempt: failures, initial: 3, maximum: 30)
+        if !immediate { try await Task.sleep(for: .seconds(delay)) }
+        immediate = false
         guard authorizing else { break }
         if busy { continue }
         guard generation == workspace.account.generation, loginRevision == revision,
@@ -266,7 +285,7 @@ struct CloudSettingsView: View {
             operation["operationId"].string == id
           else { return }
           try acceptOperation(result, key: key)
-          retryDelay = 3
+          failures = 0
           failure = nil
         } catch is CancellationError {
           return
@@ -276,7 +295,7 @@ struct CloudSettingsView: View {
           else { return }
           report(error)
           if (error as? ClientError)?.requiresUserAction == true { return }
-          retryDelay = min(retryDelay * 2, 30)
+          failures += 1
         }
       }
       if operation["state"].string == "error" {
