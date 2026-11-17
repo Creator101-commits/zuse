@@ -46,8 +46,9 @@ fn open_draft(
             .unwrap_or_else(|| "setup".into()),
         initial_session: String::new(),
     };
-    let origin = std::env::var("ZUSE_CLOUD_API_URL")
-        .unwrap_or_else(|_| zuse_engine::cloud::DEFAULT_API_URL.into());
+    // Resolved exactly as the engine resolves its own origin. The view still
+    // treats this as provisional and adopts the first reply's `apiOrigin`.
+    let origin = zuse_engine::cloud::configured_api_origin();
     let _ = cx.open_window(
         gpui::WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
