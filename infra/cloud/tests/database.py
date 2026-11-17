@@ -162,6 +162,9 @@ SELECT 'after-auth-claim';
         result=database.execute(self.url,"SET search_path=zuse_staging,pg_catalog; SELECT json_build_object('count',(SELECT count(*) FROM zuse_cloud_schema_migrations WHERE name='0032_brokeboy.sql'),'migrations',(SELECT json_agg(json_build_object('name',name,'sha256',sha256)) FROM zuse_cloud_schema_migrations));")[-1]
         self.assertEqual(result["count"],1)
         self.assertIn("0033_shared_credits.sql", [m["name"] for m in result["migrations"]])
+        self.assertIn("0047_billing_wakeups.sql", [m["name"] for m in result["migrations"]])
+        trigger=database.execute(self.url,"SELECT json_build_object('present',EXISTS(SELECT 1 FROM pg_trigger WHERE tgname='zuse_cloud_billing_hold_wake' AND tgrelid='zuse_staging.api_cloud_billing_periods'::regclass));")[-1]
+        self.assertTrue(trigger["present"])
         self.assertTrue(database.manifest_matches("staging",result["migrations"]))
         grants=database.execute(self.url,"SELECT json_build_object('billing',has_table_privilege('zuse_cloud_staging','zuse_staging.brokeboy_customers','INSERT,UPDATE,DELETE'),'compute',has_table_privilege('zuse_cloud_staging','zuse_staging.zuse_brokeboy_compute_charges','INSERT,UPDATE,DELETE'),'requests',has_table_privilege('zuse_cloud_staging','zuse_staging.zuse_brokeboy_model_requests','INSERT,UPDATE,DELETE'),'ledger',has_table_privilege('zuse_cloud_staging','zuse_staging.zuse_cloud_schema_migrations','UPDATE'));")[-1]
         self.assertEqual(grants,{"billing":True,"compute":True,"requests":True,"ledger":False})

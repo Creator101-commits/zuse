@@ -24,7 +24,7 @@ FILES = ("0000_application.sql", "0001_control_plane.sql", "0002_gateway_leases.
 
 # Accepted only when separately installed by its explicit operator workflow.
 # Ordinary bootstrap never executes or backfills an optional migration.
-OPTIONAL_FILES = ("0028_project_environment_caches.sql", "0029_runtime_statement_batch.sql", "0030_transcript_write_intents.sql", "0032_brokeboy.sql", "0033_shared_credits.sql")
+OPTIONAL_FILES = ("0028_project_environment_caches.sql", "0029_runtime_statement_batch.sql", "0030_transcript_write_intents.sql", "0032_brokeboy.sql", "0033_shared_credits.sql", "0047_billing_wakeups.sql")
 
 
 def optional_migrations(root=MIGRATIONS):
@@ -149,7 +149,7 @@ def render_brokeboy(environment):
     permitted = base + optional_migrations()
     matches = " OR ".join(f"(name={literal(item['name'])} AND sha256={literal(item['sha256'])})" for item in permitted)
     required = " OR ".join(f"(name={literal(item['name'])} AND sha256={literal(item['sha256'])})" for item in base)
-    selected=[item for item in permitted if item["name"] in (name,"0033_shared_credits.sql")]
+    selected=[item for item in permitted if item["name"] in (name,"0033_shared_credits.sql","0047_billing_wakeups.sql")]
     install="\n".join(f"SELECT {literal(item['sql'])} WHERE NOT EXISTS(SELECT 1 FROM zuse_cloud_schema_migrations WHERE name={literal(item['name'])})\n\\gexec\nINSERT INTO zuse_cloud_schema_migrations(name,sha256) VALUES({literal(item['name'])},{literal(item['sha256'])}) ON CONFLICT DO NOTHING;" for item in selected)
     return f'''BEGIN;
 SET LOCAL search_path TO "{schema}", pg_catalog;

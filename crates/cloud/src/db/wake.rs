@@ -33,6 +33,9 @@ pub enum Work {
     /// Credential worker: a sign-in or proposal became claimable, a refresh
     /// started, or a refresh result went stale (migration 0045).
     Auth,
+    /// An account's shared-credit hold turned on; its online computers should
+    /// be paused (trigger from optional migration `0047_billing_wakeups.sql`).
+    IdleSleep,
     /// Notifications may have been missed (listener reconnected or lagged).
     All,
 }
@@ -48,6 +51,7 @@ impl Work {
             "account_events" => Self::AccountEvents,
             "mailbox" => Self::Mailbox,
             "auth" => Self::Auth,
+            "idle_sleep" => Self::IdleSleep,
             _ => return None,
         })
     }
@@ -61,6 +65,7 @@ impl Work {
             Self::AccountEvents => "account_events",
             Self::Mailbox => "mailbox",
             Self::Auth => "auth",
+            Self::IdleSleep => "idle_sleep",
             Self::All => "all",
         }
     }
@@ -396,6 +401,7 @@ mod tests {
             Work::AccountEvents,
             Work::Mailbox,
             Work::Auth,
+            Work::IdleSleep,
         ] {
             assert_eq!(Work::parse(kind.as_str()), Some(kind));
         }
