@@ -348,17 +348,9 @@ impl CloudConversation {
         }
         let computer = self.computer_activity(cx);
         let agent = self.agent_activity(cx);
-        // Issues (a failed stage, a message that needs checking) stay in the
-        // status line; routine progress is the working line's.
-        let status = computer
-            .as_ref()
-            .map(|stage| (stage.label.clone(), stage.busy))
-            .or_else(|| {
-                agent
-                    .as_ref()
-                    .filter(|activity| !activity.busy)
-                    .map(|activity| (activity.label.clone(), false))
-            });
+        // Only issues (a failed stage, a message that needs checking) reach
+        // the status line; startup phases are the environment card's.
+        let status = activity::status_line(computer.as_ref(), agent.as_ref());
         let line = if computer.as_ref().is_some_and(|stage| stage.busy) {
             Some(SharedString::from("Waiting for computer…"))
         } else {
@@ -1246,8 +1238,8 @@ mod tests {
             ));
             assert_eq!(
                 view.composer.read(cx).cloud_status(),
-                Some(&("Starting computer".to_owned(), true)),
-                "the computer's stage is the composer's one status line"
+                None,
+                "routine startup phases stay out of the composer's status line"
             );
         });
         assert!(view.read_with(cx, |view, _| view.computer.open));
