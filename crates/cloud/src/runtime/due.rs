@@ -6,9 +6,10 @@
 //! claim predicate (the stage then finds nothing and the worker backs off to
 //! its busy floor), but it is never later. In-flight attempts are due at
 //! their lease expiry, so a crashed attempt is retried exactly when its lease
-//! ends. Work whose readiness is condition-based rather than timed
-//! (retirement sweeps, recovery admission after days of archive retention)
-//! runs on the worker's maintenance and idle safety timers instead.
+//! ends. An archived computer is due for deletion at its persisted
+//! `machine_delete_due_at` (migration 0050). Work whose readiness is
+//! condition-based rather than timed (retirement sweeps) runs on the worker's
+//! maintenance and idle safety timers instead.
 use super::{RuntimeControl, allocation, deletion, lifecycle, recovery, repair, restore};
 use crate::error::ApiError;
 
@@ -25,6 +26,9 @@ pub struct WorkerDue {
     pub recreation: Option<i64>,
     pub user_images: Option<i64>,
     pub project_cache: Option<i64>,
+    /// Archived computers whose retention ended: recovery admission backs
+    /// them up and deletes the machine.
+    pub archive_retention: Option<i64>,
 }
 
 impl WorkerDue {
@@ -41,6 +45,7 @@ impl WorkerDue {
             self.recreation,
             self.user_images,
             self.project_cache,
+            self.archive_retention,
         ])
     }
     fn set(&mut self, source: &str, at: Option<i64>) {
@@ -55,6 +60,7 @@ impl WorkerDue {
             "recreation" => &mut self.recreation,
             "user_images" => &mut self.user_images,
             "project_cache" => &mut self.project_cache,
+            "archive_retention" => &mut self.archive_retention,
             _ => return,
         };
         *slot = crate::db::wake::earliest([*slot, at]);
@@ -95,10 +101,25 @@ const WORKER_JOB_KINDS: [&str; 6] = [
     restore::JOB_KIND,
 ];
 
-fn statement(project_cache: bool) -> String {
-    let mut parts = vec![JOBS, TASK_DRAINS, RECREATIONS, USER_IMAGES];
+fn archive_retention_source() -> String {
+    format!(
+        "SELECT 'archive_retention', min(w.machine_delete_due_at)::bigint FROM api_cloud_workspaces w WHERE {}",
+        recovery::ARCHIVE_RETENTION_DUE
+    )
+}
+
+fn statement(project_cache: bool, archive_retention: bool) -> String {
+    let mut parts = vec![
+        JOBS.to_owned(),
+        TASK_DRAINS.to_owned(),
+        RECREATIONS.to_owned(),
+        USER_IMAGES.to_owned(),
+    ];
     if project_cache {
-        parts.push(PROJECT_CACHE);
+        parts.push(PROJECT_CACHE.to_owned());
+    }
+    if archive_retention {
+        parts.push(archive_retention_source());
     }
     parts.join(" UNION ALL ")
 }
@@ -107,13 +128,11 @@ impl RuntimeControl {
     /// One round trip: the earliest due time of every worker stage.
     pub async fn worker_due(&self) -> Result<WorkerDue, ApiError> {
         let project_cache = self.project_cache_control.available().await?;
-        static WITH_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        static WITHOUT_CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let sql = if project_cache {
-            WITH_CACHE.get_or_init(|| statement(true))
-        } else {
-            WITHOUT_CACHE.get_or_init(|| statement(false))
-        };
+        let archive_retention = self.archive_retention_scheduled().await?;
+        static STATEMENTS: [std::sync::OnceLock<String>; 4] =
+            [const { std::sync::OnceLock::new() }; 4];
+        let slot = usize::from(project_cache) | usize::from(archive_retention) << 1;
+        let sql = STATEMENTS[slot].get_or_init(|| statement(project_cache, archive_retention));
         let rows: Vec<(String, Option<i64>)> = sqlx::query_as(sql)
             .bind(&WORKER_JOB_KINDS[..])
             .fetch_all(&self.pool)
@@ -149,9 +168,22 @@ mod tests {
 
     #[test]
     fn statement_includes_optional_sources_only_when_present() {
-        assert!(!statement(false).contains("zuse_rust_project_cache_operations"));
-        assert!(statement(true).contains("zuse_rust_project_cache_operations"));
-        assert_eq!(statement(false).matches(" UNION ALL ").count(), 3);
+        assert!(!statement(false, false).contains("zuse_rust_project_cache_operations"));
+        assert!(statement(true, false).contains("zuse_rust_project_cache_operations"));
+        assert_eq!(statement(false, false).matches(" UNION ALL ").count(), 3);
+        assert!(!statement(false, false).contains("machine_delete_due_at"));
+        assert!(statement(false, true).contains("machine_delete_due_at"));
+        assert_eq!(statement(true, true).matches(" UNION ALL ").count(), 5);
+    }
+
+    #[test]
+    fn archive_retention_due_feeds_the_recovery_kick() {
+        let mut due = WorkerDue::default();
+        due.set("archive_retention", Some(700));
+        assert_eq!(due.archive_retention, Some(700));
+        assert_eq!(due.earliest(), Some(700));
+        assert!(!should_run(Some(&due), |d| d.archive_retention, 699));
+        assert!(should_run(Some(&due), |d| d.archive_retention, 700));
     }
 }
 

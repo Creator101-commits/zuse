@@ -83,12 +83,30 @@ pub struct ArchivedPage {
     cloud_epoch: u64,
     cloud_action: Option<cloud_cards::Action>,
     cloud_commands: std::collections::HashMap<String, String>,
+    /// Last cloud task list revision this page loaded against.
+    cloud_revision: u64,
 }
 
 impl ArchivedPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let owner = cloud_owner(state.read(cx));
+        let cloud_revision = state.read(cx).cloud_sidebar_workspaces_revision();
         let observe = cx.observe(&state, |page: &mut Self, state, cx| {
+            // A `workspace` account event refreshed the cloud task list (or a
+            // task was archived from the sidebar): reload archived tasks on
+            // the next paint instead of polling for them.
+            let revision = state.read(cx).cloud_sidebar_workspaces_revision();
+            if revision != page.cloud_revision {
+                page.cloud_revision = revision;
+                if page.cloud_loaded
+                    && !page.cloud.loading
+                    && !page.cloud.busy
+                    && page.cloud_action.is_none()
+                    && page.cloud_history.is_none()
+                {
+                    page.cloud_loaded = false;
+                }
+            }
             let owner = cloud_owner(state.read(cx));
             if owner != page.cloud_owner {
                 page.cloud_owner = owner;
@@ -135,6 +153,7 @@ impl ArchivedPage {
             cloud_epoch: 0,
             cloud_action: None,
             cloud_commands: Default::default(),
+            cloud_revision,
         }
     }
 
@@ -1168,6 +1187,43 @@ mod tests {
         let rows = archived_chats(&chats);
         let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["b", "c"]);
+    }
+
+    #[gpui::test]
+    fn cloud_archives_reload_when_the_task_list_changes(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext;
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            crate::settings::init(Default::default(), dir.path(), cx);
+            gpui_base::init(cx);
+            cx.set_global(crate::theme::Theme::default());
+        });
+        let state = cx.new(|_| AppState::new());
+        let page = cx.new(|cx| ArchivedPage::new(state.clone(), cx));
+        page.update(cx, |page, _| page.cloud_loaded = true);
+        // An unrelated state change keeps the loaded archive.
+        state.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert!(page.read_with(cx, |page, _| page.cloud_loaded));
+        // A task archived from the sidebar (or a `workspace` account event
+        // refreshing the list) reloads it on the next paint.
+        state.update(cx, |state, cx| {
+            state.hide_cloud_sidebar_workspace("task");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!page.read_with(cx, |page, _| page.cloud_loaded));
+        // A cloud action in flight keeps what the page shows.
+        page.update(cx, |page, _| {
+            page.cloud_loaded = true;
+            page.cloud.busy = true;
+        });
+        state.update(cx, |state, cx| {
+            state.hide_cloud_sidebar_workspace("task");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(page.read_with(cx, |page, _| page.cloud_loaded));
     }
 
     #[gpui::test]

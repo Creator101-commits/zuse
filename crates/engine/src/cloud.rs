@@ -246,6 +246,7 @@ pub(crate) fn forget_native_workspace_history(workspace: &str) {
 pub const CLEANUP_MIRROR: &str = zuse_protocol::methods::CLOUD_CLEANUP_MIRROR;
 pub const DELETE: &str = zuse_protocol::methods::CLOUD_DELETE;
 pub const UNARCHIVE: &str = zuse_protocol::methods::CLOUD_UNARCHIVE;
+pub const ARCHIVE: &str = zuse_protocol::methods::CLOUD_ARCHIVE;
 pub fn handles(method: &str) -> bool {
     matches!(
         method,
@@ -301,6 +302,7 @@ pub fn handles(method: &str) -> bool {
             | zuse_protocol::methods::CLOUD_BILLING_CHECKOUT
             | zuse_protocol::methods::CLOUD_BILLING_PORTAL
             | UNARCHIVE
+            | ARCHIVE
             | DELETE
             | CLEANUP_MIRROR
             | zuse_protocol::methods::CLOUD_ENVIRONMENT
@@ -858,6 +860,7 @@ impl CloudApi {
                 LIST | READ
                     | DELETE
                     | UNARCHIVE
+                    | ARCHIVE
                     | CLEANUP_MIRROR
                     | zuse_protocol::methods::CLOUD_WORKSPACE
             )
@@ -1824,27 +1827,22 @@ impl CloudApi {
                 value["localMirrorCleanup"] = serde_json::to_value(row.local_mirror_cleanup)?;
                 json!({"accountId": account, "workspace": value})
             }
-            UNARCHIVE | DELETE => {
+            UNARCHIVE | ARCHIVE | DELETE => {
                 let id = params["workspaceId"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Select a workspace."))?;
                 let command = params["commandId"]
                     .as_str()
                     .ok_or_else(|| anyhow::anyhow!("Restore request is missing."))?;
+                let action = match method {
+                    DELETE => "delete",
+                    ARCHIVE => "archive",
+                    _ => "unarchive",
+                };
                 let value = self
                     .request_scoped(
                         &token,
-                        &[
-                            "v1",
-                            "cloud",
-                            "workspaces",
-                            id,
-                            if method == DELETE {
-                                "delete"
-                            } else {
-                                "unarchive"
-                            },
-                        ],
+                        &["v1", "cloud", "workspaces", id, action],
                         Some(json!({"workspaceId":id,"commandId":command})),
                         organization.as_deref(),
                         &[],

@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 pub const STARTUP_BIND_CAPABILITY: &str = "rust-startup-bind-v2";
 pub const STARTUP_BIND_HEADER: &str = "x-zuse-runtime-storage";
 
-pub const ARCHIVE_RETENTION_MS: i64 = 10 * 24 * 60 * 60 * 1000;
+/// How long an archived chat keeps its sleeping computer before the computer
+/// is backed up and deleted. The chat, transcript and project stay; opening
+/// the chat again restores a fresh computer from the backup.
+pub const ARCHIVE_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 pub const DELETION_TOMBSTONE_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Public runtime keys only; reusable credentials are never part of enrollment input.

@@ -1109,9 +1109,10 @@ async fn main() -> Result<()> {
                             tracing::warn!(code = error.code, "Restore stage deferred");
                         }
                         // Kicked by the worker loop when recovery/restore jobs are
-                        // due (including expired leases of crashed attempts);
-                        // recovery admission (archive retention, days long) runs
-                        // on the idle safety timer.
+                        // due (including expired leases of crashed attempts) or
+                        // an archived computer's deletion is due
+                        // (`machine_delete_due_at`); the idle timer is only a
+                        // safety net.
                         let wait = if failed {
                             failures = failures.saturating_add(1);
                             zuse_cloud::db::failure_backoff(
@@ -1220,6 +1221,7 @@ async fn main() -> Result<()> {
                 Work::MachineImages,
                 Work::ProjectCache,
                 Work::IdleSleep,
+                Work::ArchiveRetention,
             ];
             let mut asset_cleanup_at = 0;
             let mut idle_sleep_at = 0;
@@ -1359,8 +1361,9 @@ async fn main() -> Result<()> {
                         anyhow::bail!("{}", error.code);
                     }
                 }
-                // The recovery task also runs admission scans on its own idle timer.
-                if run(|d| d.recovery) || run(|d| d.restore) {
+                // Archived computers whose retention ended are admitted by the
+                // recovery task; the idle timer there is only a safety net.
+                if run(|d| d.recovery) || run(|d| d.restore) || run(|d| d.archive_retention) {
                     recovery_kick.notify_one();
                 }
                 if run(|d| d.repair) {

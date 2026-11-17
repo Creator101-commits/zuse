@@ -4827,7 +4827,7 @@ for line in sys.stdin:
         assert_eq!(paused["state"], "paused");
         assert_eq!(paused["desiredState"], "paused");
         assert_eq!(provider.wakes.load(Ordering::SeqCst), 0);
-        // Re-archive asleep starts a new ten-day window without launching anything.
+        // Re-archive asleep starts a new retention window without launching anything.
         let (status, _) = runtime_post_for_url(
             &endpoint,
             "bob",

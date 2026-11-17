@@ -7,6 +7,8 @@ use crate::{
     providers::{Machine, MachineState, ProviderError},
 };
 use async_trait::async_trait;
+#[cfg(test)]
+mod archive_retention_tests;
 mod retirement;
 #[cfg(test)]
 mod retirement_tests;
@@ -25,6 +27,15 @@ pub const JOB_KIND: &str = "workspace-recovery";
 pub const WIRE_LIMIT: usize = 6 * 1024 * 1024;
 const TTL: i64 = 60 * 60 * 1000;
 const LEASE: i64 = 120000;
+/// After an admission attempt the worker looks at that archived computer
+/// again no sooner than this. A started backup is excluded while it runs; an
+/// ineligible or failing computer is retried here instead of every round.
+pub(super) const ARCHIVE_ADMISSION_RETRY_MS: i64 = 60 * 60 * 1000;
+/// Archived computers that are retained and due for backup-then-delete
+/// (`w` is `api_cloud_workspaces`). Shared by admission and the worker's
+/// due-time query so the due time is never earlier than claimable work.
+pub(super) const ARCHIVE_RETENTION_DUE: &str = "w.machine_delete_due_at IS NOT NULL AND w.state='archived' AND w.desired_state='archived' AND w.provider_sandbox_id IS NOT NULL AND EXISTS(SELECT 1 FROM zuse_rust_control_owners o WHERE o.resource_kind='workspace' AND o.resource_id=w.workspace_id AND o.backend='rust') AND NOT EXISTS(SELECT 1 FROM zuse_rust_recovery_operations r WHERE r.workspace_id=w.workspace_id AND r.phase NOT IN ('cancelled','restored'))";
+const ARCHIVE_DUE_COLUMN: &str = "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='api_cloud_workspaces' AND column_name='machine_delete_due_at')";
 fn failed() -> ApiError {
     ApiError::unavailable("cloud_archive_operation_failed")
 }
@@ -725,14 +736,56 @@ impl RuntimeControl {
         };
         self.recovery_run_job(provider, &job, now).await
     }
+    /// Whether archived computers are deleted at a persisted due time
+    /// (migration 0050 installed and recovery enabled).
+    pub(super) async fn archive_retention_scheduled(&self) -> Result<bool, ApiError> {
+        Ok(self.recovery_enabled
+            && crate::db::schema::present(
+                &self.pool,
+                "SELECT to_regclass('zuse_rust_recovery_operations') IS NOT NULL",
+            )
+            .await?
+            && crate::db::schema::present(&self.pool, ARCHIVE_DUE_COLUMN).await?)
+    }
+    /// Starts backup-then-delete for archived computers whose retention ended.
     pub(super) async fn recovery_admit_due(&self, now: i64) -> Result<(), ApiError> {
-        if self.recovery_enabled {
-            let ids:Vec<String>=sqlx::query_scalar("SELECT w.workspace_id FROM api_cloud_workspaces w JOIN zuse_rust_control_owners o ON o.resource_kind='workspace' AND o.resource_id=w.workspace_id AND o.backend='rust' WHERE w.state='archived' AND w.desired_state='archived' AND w.provider_sandbox_id IS NOT NULL AND (w.archive_requested_at+864000000 <= $1 OR w.archive_requested_at IS NULL AND w.archive_delete_at<=$1) AND NOT EXISTS(SELECT 1 FROM zuse_rust_recovery_operations r WHERE r.workspace_id=w.workspace_id AND r.phase NOT IN ('cancelled','restored')) ORDER BY w.archive_delete_at LIMIT 10").bind(now).fetch_all(&self.pool).await?;
+        if !self.recovery_enabled {
+            return Ok(());
+        }
+        if !crate::db::schema::present(&self.pool, ARCHIVE_DUE_COLUMN).await? {
+            // Before migration 0050: the original retention scan.
+            let ids:Vec<String>=sqlx::query_scalar("SELECT w.workspace_id FROM api_cloud_workspaces w JOIN zuse_rust_control_owners o ON o.resource_kind='workspace' AND o.resource_id=w.workspace_id AND o.backend='rust' WHERE w.state='archived' AND w.desired_state='archived' AND w.provider_sandbox_id IS NOT NULL AND (w.archive_requested_at+$2 <= $1 OR w.archive_requested_at IS NULL AND w.archive_delete_at<=$1) AND NOT EXISTS(SELECT 1 FROM zuse_rust_recovery_operations r WHERE r.workspace_id=w.workspace_id AND r.phase NOT IN ('cancelled','restored')) ORDER BY w.archive_delete_at LIMIT 10").bind(now).bind(zuse_protocol::cloud::ARCHIVE_RETENTION_MS).fetch_all(&self.pool).await?;
             for id in ids {
                 self.begin_recovery(&id, now).await?;
             }
+            return Ok(());
         }
-        Ok(())
+        static DUE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let sql = DUE.get_or_init(|| {
+            format!("SELECT w.workspace_id FROM api_cloud_workspaces w WHERE {ARCHIVE_RETENTION_DUE} AND w.machine_delete_due_at <= $1 ORDER BY w.machine_delete_due_at LIMIT 10")
+        });
+        let ids: Vec<String> = sqlx::query_scalar(sql)
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut failure = None;
+        for id in ids {
+            let result = self.begin_recovery(&id, now).await;
+            // Started, ineligible or failed: look again only after the retry
+            // window. A started backup is excluded from the due query while
+            // it runs; if it is later cancelled while still archived, it is
+            // admitted again then. Archive/unarchive rewrite the due time.
+            sqlx::query("UPDATE api_cloud_workspaces SET machine_delete_due_at=$2 WHERE workspace_id=$1 AND machine_delete_due_at <= $3")
+                .bind(&id)
+                .bind(clock_ms().max(now).saturating_add(ARCHIVE_ADMISSION_RETRY_MS))
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+            if let Err(error) = result {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
     pub(super) async fn recovery_run_job(
         &self,
