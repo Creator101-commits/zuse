@@ -9386,7 +9386,11 @@ impl Shell {
         // menu and hover pill only archive (through the account control
         // plane); the local-only actions (rename, pin, copy) don't apply.
         let cloud = id.starts_with(CLOUD_ROW_PREFIX);
+        // Archived organization tasks have no restore list yet (Settings →
+        // Archived lists personal computers), so they are not offered.
+        let cloud_locked = cloud && self.state.read(cx).cloud_organization_id().is_some();
         let corner_hovered = !preview
+            && !cloud_locked
             && !(cloud && archived)
             && self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
@@ -9758,6 +9762,9 @@ impl Shell {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        if cloud_locked {
+                            return;
+                        }
                         this.chat_menu.open(ChatMenuState {
                             tab: None,
                             chat_id: menu_id.clone(),

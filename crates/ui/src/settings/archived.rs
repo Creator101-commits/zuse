@@ -85,6 +85,9 @@ pub struct ArchivedPage {
     cloud_commands: std::collections::HashMap<String, String>,
     /// Last cloud task list revision this page loaded against.
     cloud_revision: u64,
+    /// The task list changed while the page could not reload (an operation
+    /// in flight or saved history open); reload once it can.
+    cloud_stale: bool,
 }
 
 impl ArchivedPage {
@@ -98,15 +101,9 @@ impl ArchivedPage {
             let revision = state.read(cx).cloud_sidebar_workspaces_revision();
             if revision != page.cloud_revision {
                 page.cloud_revision = revision;
-                if page.cloud_loaded
-                    && !page.cloud.loading
-                    && !page.cloud.busy
-                    && page.cloud_action.is_none()
-                    && page.cloud_history.is_none()
-                {
-                    page.cloud_loaded = false;
-                }
+                page.cloud_stale = true;
             }
+            page.apply_cloud_staleness();
             let owner = cloud_owner(state.read(cx));
             if owner != page.cloud_owner {
                 page.cloud_owner = owner;
@@ -154,9 +151,22 @@ impl ArchivedPage {
             cloud_action: None,
             cloud_commands: Default::default(),
             cloud_revision,
+            cloud_stale: false,
         }
     }
 
+    /// Turn a pending task-list change into a reload once nothing in flight
+    /// or on screen depends on the current rows.
+    fn apply_cloud_staleness(&mut self) {
+        if self.cloud_stale
+            && !self.cloud.loading
+            && !self.cloud.busy
+            && self.cloud_history.is_none()
+        {
+            self.cloud_stale = false;
+            self.cloud_loaded = false;
+        }
+    }
     fn load_cloud(&mut self, cx: &mut Context<Self>) {
         if self.cloud_loaded
             || self.cloud.loading
@@ -894,6 +904,7 @@ impl popover::ScrollRailHost for ArchivedPage {
 
 impl Render for ArchivedPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.apply_cloud_staleness();
         self.load_cloud(cx);
         if let Some(preview) = &self.preview {
             return preview.clone().into_any_element();
@@ -1213,7 +1224,8 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(!page.read_with(cx, |page, _| page.cloud_loaded));
-        // A cloud action in flight keeps what the page shows.
+        // A cloud action in flight keeps what the page shows, but the change
+        // stays pending and reloads once the action ends.
         page.update(cx, |page, _| {
             page.cloud_loaded = true;
             page.cloud.busy = true;
@@ -1224,6 +1236,22 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(page.read_with(cx, |page, _| page.cloud_loaded));
+        page.update(cx, |page, _| {
+            page.cloud.busy = false;
+            page.apply_cloud_staleness();
+            assert!(!page.cloud_loaded, "the pending change reloads afterwards");
+        });
+        // A failed Open leaves its action recorded; it must not block reloads.
+        page.update(cx, |page, _| {
+            page.cloud_loaded = true;
+            page.cloud_action = Some(cloud_cards::Action::Open("task".into()));
+        });
+        state.update(cx, |state, cx| {
+            state.hide_cloud_sidebar_workspace("task");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(!page.read_with(cx, |page, _| page.cloud_loaded));
     }
 
     #[gpui::test]
