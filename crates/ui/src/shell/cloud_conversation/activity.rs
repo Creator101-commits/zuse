@@ -14,6 +14,21 @@ pub(super) fn preparation(row: &Value, initial: bool) -> Option<Activity> {
         busy: progress.busy,
     })
 }
+/// The composer's status line. Routine startup progress (starting the
+/// computer, syncing the repository, preparing the environment or agent
+/// access) never shows there: the environment summary card carries the
+/// current phase and the transcript's working line stays neutral. Only what
+/// the user must act on or know stays: a failed or blocked stage, a lost
+/// connection, a credential, capacity or billing block, or an agent issue.
+pub(super) fn status_line(
+    computer: Option<&Activity>,
+    agent: Option<&Activity>,
+) -> Option<(String, bool)> {
+    computer
+        .filter(|stage| !stage.busy)
+        .or(agent.filter(|activity| !activity.busy))
+        .map(|activity| (activity.label.clone(), false))
+}
 pub(super) fn command(
     rows: &Value,
     messages: &[zuse_model::SessionMessageEntry],
@@ -125,6 +140,43 @@ pub(super) fn pending_initial_prompt(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn status_line_hides_routine_startup_phases_and_keeps_issues() {
+        let line = |row: Value| status_line(preparation(&row, false).as_ref(), None);
+        for routine in [
+            json!({"state":"provisioning"}),
+            json!({"state":"provisioning","startupPhase":"syncing-repository",
+                "preparation":{"repository":{"state":"running"}}}),
+            json!({"state":"provisioning","preparation":{
+                "repository":{"state":"completed"},"environment":{"state":"running"}}}),
+            json!({"state":"provisioning","preparation":{
+                "repository":{"state":"completed"},"credentials":{"state":"running"}}}),
+            json!({"state":"ready","connectionState":"reconnecting"}),
+        ] {
+            assert_eq!(line(routine.clone()), None, "{routine}");
+        }
+        for issue in [
+            json!({"state":"failed"}),
+            json!({"state":"provisioning","preparation":{"repository":{"state":"failed"}}}),
+            json!({"state":"provisioning","statusCode":"credential_preparation_failed"}),
+            json!({"state":"ready","connectionState":"blocked"}),
+        ] {
+            let (text, busy) = line(issue.clone()).expect("issues stay visible");
+            assert!(!text.is_empty() && !busy, "{issue}");
+        }
+        // A finished message that needs checking still shows; a busy agent
+        // turn belongs to the working line instead.
+        let agent = |busy| Activity {
+            label: "Needs checking".into(),
+            next: None,
+            busy,
+        };
+        assert_eq!(
+            status_line(None, Some(&agent(false))),
+            Some(("Needs checking".into(), false))
+        );
+        assert_eq!(status_line(None, Some(&agent(true))), None);
+    }
     fn command(rows: &Value) -> Option<Activity> {
         super::command(rows, &[])
     }

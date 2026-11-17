@@ -198,12 +198,12 @@ impl Shell {
                 .and_then(|engine| engine.cloud_workspace())
                 .as_deref()
                 == Some(workspace.as_str());
-        let title = transcript::single_line(
+        let title = transcript::single_line(&zuse_protocol::file_mentions::mention_display_text(
             row["title"]
                 .as_str()
                 .filter(|title| !title.trim().is_empty())
                 .unwrap_or("New session"),
-        );
+        ));
         let now = Utc::now();
         let updated = row["updatedAt"]
             .as_i64()

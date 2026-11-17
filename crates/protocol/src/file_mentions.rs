@@ -47,6 +47,48 @@ pub(crate) fn escape_mention_label(label: &str) -> String {
         .replace('`', "\\`")
 }
 
+/// Text for a title or one-line preview: every chip link (`[label](zuse-…)`,
+/// whatever it points at: file, plugin, chat, attachment or invocation)
+/// reads as its label. A link cut off by a length limit still reads as its
+/// label instead of raw markup.
+pub fn mention_display_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        match mention_label(after) {
+            Some((label, close)) if after[close..].starts_with("](zuse-") => {
+                let destination = &after[close + 2..];
+                let end = destination.find(')').map_or(destination.len(), |at| at + 1);
+                out.push_str(&label);
+                rest = &destination[end..];
+            }
+            _ => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A chip label's unescaped text and the byte offset of its closing `]`.
+fn mention_label(text: &str) -> Option<(String, usize)> {
+    let mut label = String::new();
+    let mut chars = text.char_indices();
+    while let Some((at, ch)) = chars.next() {
+        match ch {
+            '\\' => label.push(chars.next()?.1),
+            ']' => return Some((label, at)),
+            '[' | '\n' => return None,
+            _ => label.push(ch),
+        }
+    }
+    None
+}
+
 pub fn local_file_link(path: &str, is_dir: bool) -> String {
     let path = path.trim_end_matches('/');
     let basename = path
@@ -141,6 +183,40 @@ pub fn file_mention_prompt(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn titles_show_chip_labels_instead_of_link_markup() {
+        let plugin = crate::plugin_mentions::plugin_mention_link("linear", "Linear").unwrap();
+        assert_eq!(
+            mention_display_text(&format!("can you read {plugin}")),
+            "can you read Linear"
+        );
+        let chat = crate::chat_mentions::chat_mention_link("chat-1", "Fix login").unwrap();
+        let file = local_file_link("src/my [notes].md", false);
+        assert_eq!(
+            mention_display_text(&format!("compare {chat} with {file} please")),
+            "compare Fix login with my [notes].md please"
+        );
+        assert_eq!(
+            mention_display_text(&crate::attachment_mentions::attachment_mention_link(
+                2, None
+            )),
+            "Image 2"
+        );
+        // A title cut off inside a chip still reads as its label.
+        assert_eq!(
+            mention_display_text("can you read [Linear](zuse-plu"),
+            "can you read Linear"
+        );
+        // Ordinary brackets and other links are left alone.
+        for plain in [
+            "fix [the] bug",
+            "see [docs](https://example.com)",
+            "array[0]",
+            "open [",
+        ] {
+            assert_eq!(mention_display_text(plain), plain);
+        }
+    }
     #[test]
     fn provider_text_preserves_paths_and_literal_examples() {
         let file = local_file_link("src/a file#[x].rs", false);
