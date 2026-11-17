@@ -129,7 +129,7 @@ pub(crate) fn workspace_tab(
             tab.hover(|style| {
                 style
                     .bg(tab_chip_hover_background(theme))
-                    .border_color(theme.ink(0.06))
+                    .border_color(theme.ink(0.025))
                     .text_color(theme.text)
             })
         })
@@ -247,36 +247,20 @@ pub(crate) const TAB_CHIP_SLOT: f32 = TAB_CHIP_WIDTH + CONTROL_GAP;
 pub(crate) const TAB_STRIP_FADE: f32 = 36.0;
 
 pub(crate) fn tab_chip_background(selected: bool, theme: &Theme) -> gpui::Background {
-    if !selected {
-        return theme.ink(0.045).into();
-    }
-    let base = theme
-        .accent_fill()
-        .blend(gpui::white().opacity(if theme.appearance.is_dark() {
-            0.04
-        } else {
-            0.0
-        }));
-    gpui::linear_gradient(
-        180.0,
-        gpui::linear_color_stop(
-            base.blend(gpui::white().opacity(if theme.appearance.is_dark() {
-                0.035
-            } else {
-                0.18
-            })),
-            0.0,
-        ),
-        gpui::linear_color_stop(base, 1.0),
-    )
+    let opacity = match (selected, theme.appearance.is_dark()) {
+        (true, true) => 0.11,
+        (true, false) => 0.08,
+        (false, _) => 0.035,
+    };
+    theme.ink(opacity).into()
 }
 
 pub(crate) fn tab_chip_border(selected: bool, theme: &Theme) -> gpui::Hsla {
-    theme.ink(if selected { 0.10 } else { 0.035 })
+    theme.ink(if selected { 0.035 } else { 0.012 })
 }
 
 pub(crate) fn tab_chip_hover_background(theme: &Theme) -> gpui::Hsla {
-    theme.ink(0.075)
+    theme.ink(0.065)
 }
 
 /// One pane tab chip, as drawn in the titlebar band above a side pane.
@@ -344,7 +328,7 @@ pub(crate) fn tab_chip(
             chip.hover(|style| {
                 style
                     .bg(tab_chip_hover_background(theme))
-                    .border_color(theme.ink(0.06))
+                    .border_color(theme.ink(0.025))
                     .text_color(theme.text)
             })
         })

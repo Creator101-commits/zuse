@@ -739,34 +739,49 @@ impl Shell {
                 .when(!active, |d| {
                     d.text_color(theme.text_muted).hover(|d| {
                         d.bg(crate::surface_chrome::tab_chip_hover_background(&theme))
-                            .border_color(theme.ink(0.06))
+                            .border_color(theme.ink(0.025))
                             .text_color(theme.text)
                     })
                 })
         };
         // The × every closable tab shares: shown on the active tab, revealed
         // on hover for the rest.
-        let close_button =
-            |id: SharedString, label: &'static str, active: bool, group: SharedString| {
-                div()
-                    .id(id)
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .size(px(16.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .when(!active, |d| d.invisible())
-                    .group_hover(group, |d| d.visible())
-                    .hover(|d| d.bg(theme.muted_fill()))
-                    .child(
-                        icon(icons::CLOSE)
-                            .size(px(10.))
-                            .text_color(theme.text_muted),
-                    )
-            };
+        let close_button = |id: SharedString,
+                            label: &'static str,
+                            active: bool,
+                            dirty: bool,
+                            group: SharedString| {
+            div()
+                .id(id)
+                .role(gpui::Role::Button)
+                .aria_label(label)
+                .size(px(16.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .when(!active, |d| d.invisible())
+                .group_hover(group.clone(), |d| d.visible())
+                .hover(|d| d.bg(theme.muted_fill()))
+                .child(
+                    div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(dirty, |glyph| {
+                            glyph
+                                .opacity(0.)
+                                .group_hover(group, |glyph| glyph.opacity(1.))
+                        })
+                        .child(
+                            icon(icons::CLOSE)
+                                .size(px(10.))
+                                .text_color(theme.text_muted),
+                        ),
+                )
+        };
         let main_chips = main_tabs
             .into_iter()
             .map(|row| {
@@ -814,6 +829,7 @@ impl Shell {
                     SharedString::from(format!("main-tab-close-{key}")),
                     close_label,
                     active || dirty,
+                    dirty,
                     group.clone(),
                 )
                 .relative()
@@ -825,11 +841,6 @@ impl Shell {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .bg(if active {
-                                crate::surface_chrome::tab_chip_background(true, &theme)
-                            } else {
-                                theme.surface.into()
-                            })
                             .rounded(px(4.))
                             .group_hover(group.clone(), |d| d.opacity(0.))
                             .child(div().size(px(6.)).rounded_full().bg(theme.text_muted)),
@@ -903,6 +914,7 @@ impl Shell {
                                 SharedString::from(format!("thread-conversation-close-{id}")),
                                 "Close chat",
                                 active,
+                                false,
                                 group,
                             )
                             .on_click(cx.listener(
