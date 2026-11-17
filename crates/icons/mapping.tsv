@@ -146,3 +146,6 @@ browser-code	CodeIcon
 browser-cookie	CookieIcon
 browser-brush	CleanIcon
 browser-camera	Camera01Icon
+cloud-cpu	CpuIcon
+cloud-memory	RamMemoryIcon
+cloud-activity	Activity01Icon
