@@ -1,5 +1,6 @@
 //! Encrypted command delivery into the existing engine queue and SQLite receipts.
 pub mod cold_recovery;
+mod pacing;
 use crate::{Authority, authority::Failure, now_ms};
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
@@ -309,6 +310,7 @@ pub struct Mailbox {
     generation: i64,
     organization: Option<String>,
     canonical: bool,
+    push: Arc<zuse_rpc::cloud::CommandPush>,
 }
 impl Mailbox {
     pub fn new(
@@ -342,7 +344,13 @@ impl Mailbox {
                 .zuse_account_id
                 .strip_prefix("organization:")
                 .map(str::to_owned),
+            push: zuse_rpc::cloud::command_push().clone(),
         })
+    }
+    /// Take lease hints from `push` instead of this process's gateway.
+    pub fn with_command_push(mut self, push: Arc<zuse_rpc::cloud::CommandPush>) -> Self {
+        self.push = push;
+        self
     }
     async fn admit(
         &self,
@@ -535,6 +543,7 @@ impl Mailbox {
             return self.run_concurrent(authority, bootstrap, cancel).await;
         }
 
+        let mut pacer = pacing::Pacer::new(self.push.clone());
         loop {
             if cancel.is_cancelled() {
                 return Ok(());
@@ -562,13 +571,20 @@ impl Mailbox {
                     Err(error) => return Err(error),
                 }
             }
-            let request = json!({"storageIncarnationId":self.incarnation,"waitMs":5000});
+            let mut plan = pacer.plan();
+            if let Some(duration) = plan.sleep {
+                plan.wait_ms = pacer.sleep(&cancel, duration).await;
+                if cancel.is_cancelled() {
+                    return Ok(());
+                }
+            }
+            let request = json!({"storageIncarnationId":self.incarnation,"waitMs":plan.wait_ms});
             let page = tokio::select! {_=cancel.cancelled()=>return Ok(()),page=authority.post(&self.workspace,&["runtime","commands","lease"],&boot.runtime_credential,&request)=>page};
             let page: LeasePage = match page {
                 Ok(page) => serde_json::from_value(page)
                     .map_err(|_| anyhow::anyhow!("runtime-mailbox-page-invalid"))?,
                 Err(error) if retry(&error) => {
-                    crate::supervisor::wait(&cancel, 1).await;
+                    pacer.failed();
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -576,6 +592,7 @@ impl Mailbox {
             if page.fence_required {
                 bail!("runtime_mailbox_fence_required");
             }
+            pacer.leased(page.leases.len());
             for lease in page.leases {
                 if cancel.is_cancelled() {
                     return Ok(());
@@ -624,9 +641,12 @@ impl Mailbox {
         use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
         let mut pending: FuturesUnordered<BoxFuture<'_, Result<String>>> = FuturesUnordered::new();
         let mut preparing: BTreeMap<String, (String, CancellationToken)> = BTreeMap::new();
+        let mut pacer = pacing::Pacer::new(self.push.clone());
         loop {
             while let Some(Some(done)) = pending.next().now_or_never() {
                 preparing.remove(&done?);
+                // A finished command frees a slot and may unblock its session's next one.
+                pacer.wake();
             }
             if cancel.is_cancelled() {
                 return Ok(());
@@ -652,6 +672,7 @@ impl Mailbox {
             }
             if pending.len() >= 8 {
                 tokio::select! { _=cancel.cancelled()=>return Ok(()), done=pending.next()=> { if let Some(done)=done {preparing.remove(&done?);} } }
+                pacer.wake();
                 continue;
             }
             let control_only = pending.len() >= 4;
@@ -660,7 +681,25 @@ impl Mailbox {
             } else {
                 4 - pending.len()
             };
-            let request = json!({"storageIncarnationId":self.incarnation,"waitMs":5000,"controlOnly":control_only,"maxItems":available});
+            let mut plan = pacer.plan();
+            if let Some(duration) = plan.sleep {
+                let finished = tokio::select! {
+                    _=cancel.cancelled()=>return Ok(()),
+                    done=pending.next(), if !pending.is_empty()=>Some(done),
+                    wait_ms=pacer.sleep(&cancel, duration)=>{plan.wait_ms=wait_ms;None},
+                };
+                if let Some(done) = finished {
+                    if let Some(done) = done {
+                        preparing.remove(&done?);
+                    }
+                    pacer.wake();
+                    continue;
+                }
+                if cancel.is_cancelled() {
+                    return Ok(());
+                }
+            }
+            let request = json!({"storageIncarnationId":self.incarnation,"waitMs":plan.wait_ms,"controlOnly":control_only,"maxItems":available});
             // Keep the same lease HTTP future alive while preparing earlier
             // commands: dropping its response could lose a committed lease.
             let page = authority.post(
@@ -670,10 +709,11 @@ impl Mailbox {
                 &request,
             );
             tokio::pin!(page);
+            let mut finished_meanwhile = false;
             let response = loop {
                 tokio::select! {
                     _=cancel.cancelled()=>return Ok(()),
-                    done=pending.next(), if !pending.is_empty()=>{if let Some(done)=done {preparing.remove(&done?);}},
+                    done=pending.next(), if !pending.is_empty()=>{if let Some(done)=done {preparing.remove(&done?);} finished_meanwhile=true;},
                     response=&mut page=>break response,
                 }
             };
@@ -681,11 +721,15 @@ impl Mailbox {
                 Ok(page) => serde_json::from_value(page)
                     .map_err(|_| anyhow::anyhow!("runtime-mailbox-page-invalid"))?,
                 Err(error) if retry(&error) => {
-                    crate::supervisor::wait(&cancel, 1).await;
+                    pacer.failed();
                     continue;
                 }
                 Err(error) => return Err(error),
             };
+            pacer.leased(page.leases.len());
+            if finished_meanwhile {
+                pacer.wake();
+            }
             ensure!(
                 page.leases.len() <= available,
                 "runtime_mailbox_page_unbounded"
@@ -966,6 +1010,7 @@ mod tests {
             generation: 1,
             organization: None,
             canonical: false,
+            push: Default::default(),
         };
         assert!(matches!(
             mailbox.decode(&envelope),
@@ -996,3 +1041,6 @@ mod control_tests;
 
 #[cfg(test)]
 mod rejection_tests;
+
+#[cfg(test)]
+mod push_tests;
