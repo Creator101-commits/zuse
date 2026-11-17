@@ -514,12 +514,15 @@ pub(crate) fn tab_provider_icon(
     } else {
         gpui::white()
     };
-    tab_icon_tile(
-        crate::icons::brand_icon(path, TAB_GLYPH_SIZE, foreground),
-        Some(tint),
-        active,
-        theme,
-    )
+    let glyph = if path == crate::icons::CODEX_MARK {
+        crate::icons::icon(path)
+            .size(px(TAB_GLYPH_SIZE))
+            .text_color(gpui::white())
+            .into_any_element()
+    } else {
+        crate::icons::brand_icon(path, TAB_GLYPH_SIZE, foreground)
+    };
+    tab_icon_tile(glyph, Some(tint), active, theme)
 }
 
 /// Neutral utility glyph in the same fixed tile as session and file icons.
