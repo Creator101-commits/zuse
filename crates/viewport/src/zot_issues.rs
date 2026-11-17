@@ -10,8 +10,8 @@ const TEXT: u32 = 0xe5e5e5;
 const MUTED: u32 = 0x777777;
 const BORDER: u32 = 0x343434;
 const FAINT: u32 = 0x5c5c5c;
-const HOVER: u32 = 0x1f1f1f;
-const MENU: u32 = 0x1c1c1c;
+const HOVER: u32 = 0x1f211f;
+const MENU: u32 = 0x1c1d19;
 #[derive(Clone)]
 pub enum IssueEvent {
     Command(ZotAction, u32),
@@ -724,9 +724,9 @@ impl IssuePanel {
                             .px(px(12.))
                             .py(px(0.))
                             .gap(px(6.))
-                            .bg(rgb(0xe8e8e8))
+                            .bg(rgb(0xe8e9e7))
                             .text_color(rgb(0x111111))
-                            .hover(|d| d.bg(rgb(0xffffff)))
+                            .hover(|d| d.bg(rgb(0xebebeb)))
                             .text_size(px(12.5))
                             .font_weight(FontWeight::MEDIUM)
                             .child(icon("plus").size(px(12.)).text_color(rgb(0x111111)))
@@ -2169,11 +2169,11 @@ fn section(
         .px(px(10.))
         .gap(px(8.))
         .rounded(px(6.))
-        .bg(rgb(0x161616))
+        .bg(rgb(0x151515))
         .cursor_pointer()
         .text_size(px(12.))
         .child(status_icon(status))
-        .child(div().text_color(rgb(0xbdbdbd)).child(status.label()))
+        .child(div().text_color(rgb(0xa4a8a3)).child(status.label()))
         .child(div().text_color(rgb(FAINT)).child(count.to_string()))
         .child(div().flex_1())
         .child(
@@ -2206,7 +2206,7 @@ fn menu_card(id: impl Into<SharedString>, width: f32) -> Stateful<Div> {
         .rounded(px(8.))
         .bg(rgb(MENU))
         .border_1()
-        .border_color(rgb(0x2c2c2c))
+        .border_color(rgb(0x2a2a2a))
         .shadow_lg()
 }
 /// One menu choice: its picture, label and a check on the current one.
@@ -2287,9 +2287,9 @@ fn pr_badge(pr: &ZotIssuePullRequest) -> Div {
         .h(px(20.))
         .px(px(6.))
         .rounded(px(5.))
-        .bg(rgb(0x1c1a12))
+        .bg(rgb(0x24251f))
         .text_size(px(11.5))
-        .text_color(rgb(0xcfcfcf))
+        .text_color(rgb(TEXT))
         .child(icon("git-branch").size(px(11.)).text_color(rgb(0xd9bf60)))
         .child(format!("#{}", pr.url.rsplit('/').next().unwrap_or("")))
 }
