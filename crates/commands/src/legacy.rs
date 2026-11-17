@@ -16,8 +16,8 @@ pub(crate) struct Args {
     language: String,
     #[command(subcommand)]
     command: Option<Command>,
-    #[arg(long, global = true, default_value_t = crate::DEFAULT_IPC_PORT)]
-    ipc_port: u16,
+    #[arg(long, global = true)]
+    ipc_port: Option<u16>,
     #[command(flatten)]
     serve: ServeArgs,
 }
@@ -105,7 +105,11 @@ pub fn main(arguments: Vec<OsString>, l10n: &Localizer) -> anyhow::Result<()> {
         Some(Command::Status) => remote::Action::Status,
     };
     crate::init_logging(crate::Logging::Brief);
-    crate::block_on(remote::run(action, args.ipc_port, l10n))
+    crate::block_on(remote::run(
+        action,
+        args.ipc_port.unwrap_or_else(crate::default_ipc_port),
+        l10n,
+    ))
 }
 
 #[cfg(test)]
@@ -181,7 +185,7 @@ mod tests {
             .try_get_matches_from(["zuse-server", "pair", "--ipc-port", "4000", "--app"])
             .unwrap();
         let args = Args::from_arg_matches(&matches).unwrap();
-        assert_eq!(args.ipc_port, 4000);
+        assert_eq!(args.ipc_port, Some(4000));
         assert!(matches!(
             args.command,
             Some(Command::Pair {

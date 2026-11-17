@@ -70,6 +70,7 @@ jobs:
       - run: python3 -m unittest discover -s scripts -p test_package.py -v
       - run: python3 -m unittest discover -s scripts -p test_release_prebuild.py -v
       - run: python3 -m unittest discover -s scripts -p test_distribution.py -v
+      - run: python3 -m unittest discover -s scripts -p test_install_cli.py -v
       - run: python3 -m unittest discover -s scripts -p test_release_notes.py -v
       - run: python3 -m unittest discover -s scripts -p test_cargo_dev.py -v
 
@@ -110,6 +111,7 @@ jobs:
       - run: cargo test --locked -p zuse-analytics
       - run: node --test scripts/analytics-dashboards.test.mjs
       - run: cargo test -p zuse-cli --test startup
+      - run: cargo test --locked -p zuse-engine --test desktop_shutdown
       - run: cargo test -p zuse-commands
       - run: cargo test -p zuse-relay --test startup
       - run: cargo test -p zuse-remote
@@ -193,6 +195,22 @@ jobs:
         run: |
           cargo test -p zuse-ui --lib state::account_connection::tests
           cargo test -p zuse-ui --lib native_paired_reconnect_uses_fresh_encryption
+      - name: macOS AppKit quit drains the engine before termination
+        if: runner.os == 'macOS'
+        run: |
+          cargo build --locked -p zuse-ui --example desktop-quit-fixture
+          python3 - <<'PY'
+          import fcntl
+          from pathlib import Path
+          import subprocess
+          import tempfile
+          with tempfile.TemporaryDirectory(prefix='zuse-appkit-quit-') as temporary:
+              profile = Path(temporary)
+              subprocess.run(['target/debug/examples/desktop-quit-fixture', str(profile)], check=True, timeout=20)
+              assert (profile / 'saved-before-termination').read_text() == 'settled'
+              with (profile / 'engine.lock').open('a') as lock:
+                  fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+          PY
       - name: Native bounded history, paging and resume
         run: |
           cargo test -p zuse-ui --lib state::history_window::tests

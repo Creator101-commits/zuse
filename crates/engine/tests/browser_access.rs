@@ -14,6 +14,42 @@ fn assets(root: &std::path::Path) -> std::path::PathBuf {
     assets
 }
 #[tokio::test]
+async fn non_loopback_browser_access_accepts_tls_without_a_public_origin() {
+    let root = tempfile::tempdir().unwrap();
+    let rcgen::CertifiedKey { cert, signing_key } =
+        rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()]).unwrap();
+    let cert_path = root.path().join("cert.pem");
+    let key_path = root.path().join("key.pem");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, signing_key.serialize_pem()).unwrap();
+    let core = EngineCore::assemble_with_profile(
+        EngineProfile::local(root.path()).unwrap(),
+        Arc::new(HarnessRegistry::new()),
+        HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let client = zuse_rpc::memory_client(core.rpc_service());
+    let status = client.call(methods::START_BROWSER_ACCESS, json!({
+        "listen":"0.0.0.0:0", "assets":assets(root.path()), "tlsCert":cert_path, "tlsKey":key_path,
+    })).await.unwrap();
+    assert_eq!(status["running"], true);
+    assert_eq!(status["localHttp"], false);
+    let address: std::net::SocketAddr = status["listen"].as_str().unwrap().parse().unwrap();
+    let response = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap()
+        .get(format!("https://127.0.0.1:{}/", address.port()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(response.text().await.unwrap().contains("Zuse test client"));
+    core.shutdown().await;
+}
+
+#[tokio::test]
 async fn settings_listener_serves_paired_rpc_and_stops_without_revoking_saved_devices() {
     let root = tempfile::tempdir().unwrap();
     let core = EngineCore::assemble_with_profile(

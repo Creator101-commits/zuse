@@ -172,15 +172,15 @@ impl BrowserAccess {
             state.running.is_none() && state.external.is_none(),
             "Browser access is already running"
         );
-        anyhow::ensure!(
-            options.listen.ip().is_loopback() || options.public_origin.is_some(),
-            "Enter a public HTTPS URL before allowing other devices to connect"
-        );
         let tls = match (&options.tls_cert, &options.tls_key) {
             (Some(cert), Some(key)) => Some(TlsConfig::from_pem_files(cert, key)?),
             (None, None) => None,
             _ => anyhow::bail!("Choose both a certificate and its private key"),
         };
+        anyhow::ensure!(
+            options.listen.ip().is_loopback() || tls.is_some() || options.public_origin.is_some(),
+            "Enter a public HTTPS URL or configure TLS before allowing other devices to connect"
+        );
         // A non-loopback HTTP listener is allowed only behind the explicitly
         // configured HTTPS reverse proxy, matching the foreground server.
         let assets = options.assets.or_else(discover_assets)
