@@ -71,6 +71,7 @@ pub(super) async fn run(config: Config, request: RunRequest, controls: RunContro
             config.kill_grace,
         )
         .await?;
+        turn.adopt_agent(host.child.id()).await;
         match open_session(&host, &request).await {
             Ok(opened) => Ok((host, opened)),
             Err(error) => {
