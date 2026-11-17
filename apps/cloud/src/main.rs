@@ -877,36 +877,80 @@ async fn main() -> Result<()> {
                 control = control.with_payment_providers(providers);
             }
             control = control.connect_native_from_env(&url).await?;
+            // Settlement and export run hourly, at the instant a closed day
+            // becomes settleable, and at the earliest known due time of
+            // outbox retries, engine work and reservation or grant expiries.
+            // Between those instants the worker runs no statements. Spending
+            // holds are recomputed by every event that changes them (see
+            // infra/cloud/DATABASE.md, "Billing schedule and spending caps").
+            use zuse_cloud::billing::schedule;
+            let mut pass: u64 = 0;
+            let mut retry: Option<u32> = None;
+            let mut next_settlement = i64::MIN; // settle at startup
+            let mut next_reconcile: Option<i64> = None;
             loop {
+                let started = now_ms();
+                if started >= next_settlement {
+                    let mut latest_pending = false;
+                    if let Some(config) = storage {
+                        match control.settle_snapshot_storage_once(config, now_ms()).await {
+                            Ok(report) => println!("{}", serde_json::to_string(&report)?),
+                            Err(error) if once => anyhow::bail!("{}", error.code),
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Snapshot storage settlement failed"
+                                )
+                            }
+                        }
+                    }
+                    if let (Some(provider), Some(config)) = (&provider, settlement) {
+                        match control
+                            .settle_boxd_once(provider, config, now_ms(), pass)
+                            .await
+                        {
+                            Ok(report) => {
+                                latest_pending = report.latest_pending;
+                                println!("{}", serde_json::to_string(&report)?)
+                            }
+                            Err(error) if once => anyhow::bail!("{}", error.code),
+                            Err(error) => {
+                                latest_pending = true;
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Provider settlement maintenance failed"
+                                )
+                            }
+                        }
+                    }
+                    pass = pass.wrapping_add(1);
+                    retry = latest_pending.then(|| retry.map_or(0, |n| n.saturating_add(1)));
+                    next_settlement = schedule::next_settlement(now_ms(), retry);
+                }
+                // Right after settlement: debit new compute charges from the
+                // shared wallet and recompute the spending hold.
+                let mut more = false;
                 match control.native_maintenance().await {
-                    Ok(report) => println!("{}", report),
+                    Ok(report) => {
+                        more = report["reports"]
+                            .as_array()
+                            .is_some_and(|r| r.iter().any(|r| r["more"] == true));
+                        println!("{}", report)
+                    }
                     Err(error) if once => anyhow::bail!("{}", error.code),
                     Err(error) => {
                         tracing::warn!(code = error.code, "Embedded billing maintenance deferred")
                     }
                 }
-                if let Some(config) = storage {
-                    match control.settle_snapshot_storage_once(config, now_ms()).await {
-                        Ok(report) => println!("{}", serde_json::to_string(&report)?),
-                        Err(error) if once => anyhow::bail!("{}", error.code),
-                        Err(error) => {
-                            tracing::warn!(code = error.code, "Snapshot storage settlement failed")
-                        }
-                    }
-                }
-
-                if let (Some(provider), Some(config)) = (&provider, settlement) {
-                    match control.settle_boxd_once(provider, config, now_ms()).await {
-                        Ok(report) => println!("{}", serde_json::to_string(&report)?),
-                        Err(error) if once => anyhow::bail!("{}", error.code),
-                        Err(error) => tracing::warn!(
-                            code = error.code,
-                            "Provider settlement maintenance failed"
-                        ),
-                    }
-                }
+                next_reconcile = next_reconcile.filter(|at| *at > started);
                 match control.export_once(now_ms(), 25).await {
-                    Ok(report) => println!("{}", serde_json::to_string(&report)?),
+                    Ok(report) => {
+                        next_reconcile = zuse_cloud::db::wake::earliest([
+                            next_reconcile,
+                            schedule::next_reconciliation(now_ms(), report.financial),
+                        ]);
+                        println!("{}", serde_json::to_string(&report)?)
+                    }
                     Err(error) if once => anyhow::bail!("{}", error.code),
                     Err(error) => {
                         tracing::warn!(code = error.code, "Billing export maintenance failed")
@@ -915,7 +959,30 @@ async fn main() -> Result<()> {
                 if once {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let native_due = control
+                    .native_next_due(started)
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(code = error.code, "Embedded billing due time unavailable");
+                        None
+                    });
+                let export_due = control.export_next_due().await.unwrap_or_else(|error| {
+                    tracing::warn!(code = error.code, "Billing export due time unavailable");
+                    None
+                });
+                let due = zuse_cloud::db::wake::earliest([
+                    Some(next_settlement),
+                    native_due,
+                    export_due,
+                    next_reconcile,
+                    more.then_some(started),
+                ]);
+                let wait = schedule::wait_until(now_ms(), due);
+                tracing::debug!(wait_ms = wait.as_millis() as u64, "Billing worker sleeping");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    _ = tokio::time::sleep(wait) => {}
+                }
             }
             control
                 .close_native_billing()
@@ -1494,9 +1561,12 @@ async fn main() -> Result<()> {
                 if let Some(providers) = zuse_cloud::billing::PaymentProviders::from_env()? {
                     billing = billing.with_payment_providers(providers);
                 }
+                // Payment notifications for embedded billing accounts are
+                // projected in this process right after they commit.
                 billing = billing
                     .connect_native_from_env(&config.database_url)
-                    .await?;
+                    .await?
+                    .with_native_follow_ups();
                 store = store.with_billing_control(billing);
             }
             let identity = WorkosIdentity::new(&config)?;

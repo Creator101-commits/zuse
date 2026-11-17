@@ -126,3 +126,67 @@ time and poll on the idle timer, so a lost notification, a reconnecting
 listener or `ZUSE_CLOUD_DB_LISTEN=false` delays work but never loses it.
 Set `RUST_LOG=zuse_cloud_api=debug,zuse_cloud::events=debug` to see why each
 loop woke (`notify`, `due`, `idle` or `hint`).
+
+## Billing schedule and spending caps
+
+`billing-worker` keeps its two connections and no `LISTEN` connection. It
+does not poll on a fixed interval. It runs a pass at startup, then sleeps until
+the earliest of these:
+
+- **Hourly tick.** Snapshot storage settlement, provider usage settlement for
+  closed UTC days (every closed day per pass, up to 420; beyond that,
+  consecutive passes take consecutive batches, so no day is skipped), and meter
+  export and reconciliation.
+- **A new closed day.** Each day becomes settleable at 00:30 UTC. The worker
+  wakes then, not up to an hour later. While the newest day's provider report
+  is unavailable or incomplete, it retries after 1, 2, 4 … minutes, at most
+  hourly.
+- **Known due times.** The earliest `next_attempt_at` of undelivered outbox
+  rows (deliveries keep their own backoff), five minutes after a delivery for
+  meter reconciliation, and for embedded billing accounts: engine work
+  `availableAt`, held model reservation expiry, credit grant expiry and
+  subscription period ends. One indexed query per source after each pass
+  reads these.
+
+Work that is still due after a pass waits at least 60 s, the old fixed
+interval. Between due times the worker runs no statements.
+
+Events run without waiting for the worker:
+
+- A verified payment notification (subscription change, top-up, payment) for
+  an embedded billing account is projected in the API process right after it
+  commits: engine work, subscription and period projection, compute debits
+  and the hold. Engine retries and expiries caused in the API process
+  (automatic top-ups, model reservations) run there at their due time. Each
+  account gets at most one such task. A restarted API process only loses
+  latency: the worker's next pass does the same work.
+- Model request reserve, increase, settle and release recompute the hold in
+  the same request.
+- Each settlement pass is followed at once by compute debits and a hold
+  recompute.
+
+**Why caps stay exact.** Spending only changes on events: a closed day's
+provider usage is settled, a storage interval is settled, a payment
+notification is projected, a model request changes state, an engine retry
+runs, or a reservation or grant expires. Legacy overage accounts are checked
+at admission against the settled ledger and unexpired reservations, so nothing
+there depends on elapsed time. For shared-credit accounts each of those events
+recomputes `api_cloud_billing_periods.shared_credit_hold`. Expiries are known
+in advance and scheduled exactly. Unchanged holds are not rewritten. When a
+hold turns on, the trigger from optional migration `0047_billing_wakeups.sql`
+(installed with the embedded billing migrations by `apply-brokeboy`) sends
+`NOTIFY idle_sleep`, so the runtime worker pauses that account's computers
+right away. Its idle scan remains the fallback.
+
+**What a projected-deadline cap would need.** Workspace cost is known only
+once provider usage for a closed day is settled, so a running machine's spend
+is not tracked live. Stopping machines before the cap is reached would need:
+
+- a per-running-machine price (`api_provider_price_schedule` rate × the
+  machine's vCPU and memory, plus markup),
+- a projected time-to-cap per account (remaining credit or cap ÷ summed hourly
+  rate of its running machines), scheduled like the due times above,
+- a product decision to stop machines on projected rather than settled spend,
+  and to reconcile any difference once usage settles.
+
+That would be new user-visible behavior, so it is not implemented.

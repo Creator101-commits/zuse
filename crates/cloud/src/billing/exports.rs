@@ -268,6 +268,23 @@ impl BillingControl {
         report.reconciled = self.reconcile_meters(now, limit, config, &accounts).await?;
         Ok(report)
     }
+    /// Earliest `next_attempt_at` among outbox rows [`Self::export_once`] would
+    /// deliver (same ownership filters), so failed deliveries retry on their own
+    /// backoff instead of on a fixed tick. `None` when export is off or empty.
+    pub async fn export_next_due(&self) -> Result<Option<i64>, ApiError> {
+        let Some(config) = self.meter_exports.as_ref().filter(|c| c.enabled()) else {
+            return Ok(None);
+        };
+        let accounts = self.accounts.filter();
+        Ok(sqlx::query_scalar("SELECT LEAST(\
+ (SELECT MIN(next_attempt_at) FROM api_cloud_billing_outbox o WHERE $1 AND acknowledged_at IS NULL AND ($3::text[] IS NULL OR account_id=ANY($3)) AND EXISTS(SELECT 1 FROM zuse_rust_control_owners WHERE resource_kind='billing' AND resource_id=o.account_id AND backend='rust') AND EXISTS(SELECT 1 FROM zuse_rust_control_owners WHERE resource_kind='billing-export' AND resource_id=o.account_id AND backend='rust')),\
+ (SELECT MIN(next_attempt_at) FROM api_cloud_usage_outbox o WHERE $2 AND acknowledged_at IS NULL AND ($3::text[] IS NULL OR payload->>'accountId'=ANY($3)) AND EXISTS(SELECT 1 FROM zuse_rust_control_owners WHERE resource_kind='billing' AND resource_id=o.payload->>'accountId' AND backend='rust') AND EXISTS(SELECT 1 FROM zuse_rust_control_owners WHERE resource_kind='billing-export' AND resource_id=o.payload->>'accountId' AND backend='rust')))")
+            .bind(config.financial)
+            .bind(config.telemetry)
+            .bind(&accounts)
+            .fetch_one(&self.pool)
+            .await?)
+    }
     async fn reconcile_meters(
         &self,
         now: i64,

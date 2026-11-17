@@ -293,11 +293,16 @@ impl Store {
         request: &str,
         total_micros: i64,
     ) -> Result<(), ApiError> {
-        self.billing
+        let control = self
+            .billing
             .as_ref()
-            .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?
+            .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?;
+        let result = control
             .increase_hosted_model(owner, request, total_micros)
-            .await
+            .await;
+        // Reservations expire and wallet debits can start automatic top-ups.
+        control.follow_up(owner, false);
+        result
     }
     /// Server integration point for Zuse-funded inference, never client-provided usage.
     pub async fn reserve_hosted_model(
@@ -306,11 +311,14 @@ impl Store {
         request: &ModelReservation,
         now: i64,
     ) -> Result<String, ApiError> {
-        self.billing
+        let control = self
+            .billing
             .as_ref()
-            .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?
-            .reserve_hosted_model(owner, request, now)
-            .await
+            .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?;
+        let result = control.reserve_hosted_model(owner, request, now).await;
+        // Reservations expire and wallet debits can start automatic top-ups.
+        control.follow_up(owner, false);
+        result
     }
     pub async fn settle_hosted_model(
         &self,
@@ -318,17 +326,25 @@ impl Store {
         request: &str,
         actual_micros: i64,
     ) -> Result<(), ApiError> {
-        self.billing
+        let control = self
+            .billing
             .as_ref()
-            .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?
+            .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?;
+        let result = control
             .settle_hosted_model(owner, request, actual_micros)
-            .await
+            .await;
+        // Reservations expire and wallet debits can start automatic top-ups.
+        control.follow_up(owner, false);
+        result
     }
     pub async fn release_hosted_model(&self, owner: &str, request: &str) -> Result<(), ApiError> {
-        self.billing
+        let control = self
+            .billing
             .as_ref()
-            .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?
-            .release_hosted_model(owner, request)
-            .await
+            .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?;
+        let result = control.release_hosted_model(owner, request).await;
+        // Reservations expire and wallet debits can start automatic top-ups.
+        control.follow_up(owner, false);
+        result
     }
 }

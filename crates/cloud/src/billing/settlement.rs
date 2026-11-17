@@ -38,15 +38,27 @@ pub struct SettlementReport {
     pub skipped: usize,
     pub deferred: usize,
     pub errors: Vec<String>,
+    /// The newest closed day still has an unavailable or incomplete provider
+    /// report, or a deferred machine; the worker retries it soon.
+    #[serde(skip)]
+    pub latest_pending: bool,
 }
+/// Windows visited per pass. Passes run hourly; this matches the hourly
+/// throughput of the earlier per-minute rotation (7 windows a minute), so a
+/// full sweep of all closed days never takes longer than it used to.
+pub(super) const WINDOWS_PER_PASS: usize = 7 * 60;
 fn pending() -> ApiError {
     ApiError::conflict("provider_cost_settlement_pending")
 }
-fn windows(cutover: i64, now: i64) -> Result<Vec<(i64, i64)>, ApiError> {
+/// Closed UTC-day windows to visit in pass number `pass`: every window when
+/// there are at most [`WINDOWS_PER_PASS`], otherwise consecutive passes visit
+/// consecutive batches, so no window is ever skipped. The newest closed day is
+/// always included.
+pub(super) fn windows(cutover: i64, now: i64, pass: u64) -> Result<Vec<(i64, i64)>, ApiError> {
     if cutover <= 0 || cutover % 1000 != 0 || now > MAX {
         return Err(invalid());
     }
-    let end = (now - 30 * 60_000).div_euclid(DAY) * DAY;
+    let end = (now - super::schedule::SETTLE_DELAY_MS).div_euclid(DAY) * DAY;
     let mut all = Vec::new();
     let mut start = cutover;
     while start < end {
@@ -57,11 +69,12 @@ fn windows(cutover: i64, now: i64) -> Result<Vec<(i64, i64)>, ApiError> {
     if all.is_empty() {
         return Ok(all);
     }
-    let batch = (now.max(0) / 60_000) as usize % all.len().div_ceil(7);
+    let batches = all.len().div_ceil(WINDOWS_PER_PASS) as u64;
+    let batch = (pass % batches) as usize;
     let mut selected = all
         .iter()
-        .skip(batch * 7)
-        .take(7)
+        .skip(batch * WINDOWS_PER_PASS)
+        .take(WINDOWS_PER_PASS)
         .copied()
         .collect::<Vec<_>>();
     let latest = *all.last().unwrap();
@@ -71,18 +84,25 @@ fn windows(cutover: i64, now: i64) -> Result<Vec<(i64, i64)>, ApiError> {
     Ok(selected)
 }
 impl BillingControl {
+    /// One settlement pass. `pass` counts passes of this process; it selects
+    /// the batch of older windows when there are too many for one pass.
     pub async fn settle_boxd_once(
         &self,
         provider: &Boxd,
         config: BoxdSettlementConfig,
         now: i64,
+        pass: u64,
     ) -> Result<SettlementReport, ApiError> {
         let mut report = SettlementReport::default();
-        for (start, end) in windows(config.cutover_at_ms, now)? {
+        let selected = windows(config.cutover_at_ms, now, pass)?;
+        let latest = selected.last().copied();
+        for (start, end) in selected {
             report.windows += 1;
+            let is_latest = Some((start, end)) == latest;
             let machines = match provider.organization_usage(start, end).await {
                 Ok(machines) => machines,
                 Err(_) => {
+                    report.latest_pending |= is_latest;
                     report.deferred += 1;
                     report
                         .errors
@@ -92,6 +112,7 @@ impl BillingControl {
             };
             for machine in machines {
                 if !machine.complete {
+                    report.latest_pending |= is_latest;
                     report.skipped += 1;
                     continue;
                 }
@@ -127,6 +148,7 @@ impl BillingControl {
                     Ok(true) => report.settled += 1,
                     Ok(false) => report.skipped += 1,
                     Err(error) => {
+                        report.latest_pending |= is_latest;
                         report.deferred += 1;
                         report.errors.push(format!("{event}:{}", error.code));
                     }
