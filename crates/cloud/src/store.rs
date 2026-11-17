@@ -832,7 +832,7 @@ mod archive_projection_tests {
         assert_eq!(public["archiveStatus"]["computeRetired"], false);
         assert_eq!(
             public["archiveStatus"]["retentionDeadline"],
-            100 + 10 * 86400000_i64
+            100 + zuse_protocol::cloud::ARCHIVE_RETENTION_MS
         );
         row["request_config"]["recoveryArchive"] = json!({"version":1,"id":"operation","sourceSandboxId":"PRIVATE-SOURCE",
             "archivedAtMs":100,"expiresAtMs":200,"phase":"retired","verifiedChunks":1,
