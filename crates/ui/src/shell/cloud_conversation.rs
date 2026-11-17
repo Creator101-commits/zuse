@@ -203,6 +203,7 @@ impl CloudConversation {
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned)
             .or_else(|| first_message.clone())
+            .map(|title| zuse_protocol::file_mentions::mention_display_text(&title))
             .unwrap_or_else(|| "Cloud chat".into());
         let initial_metadata = config.clone();
         let mut this = Self {
@@ -675,7 +676,7 @@ impl CloudConversation {
             .as_ref()
             .filter(|title| !title.trim().is_empty())
         {
-            self.title = title.clone();
+            self.title = zuse_protocol::file_mentions::mention_display_text(title);
         }
         self.first_message = None;
         self.error = None;
