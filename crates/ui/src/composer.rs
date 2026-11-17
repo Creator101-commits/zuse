@@ -9984,31 +9984,41 @@ impl Composer {
     /// New chats need a runnable agent, but may target the device's home
     /// directory without a project. Existing chats carry their own run config.
     pub(crate) fn send_blocked(&self, cx: &App) -> bool {
+        self.send_block(cx).is_some()
+    }
+
+    /// Why a send is refused: `None` when it may go ahead, `Some(None)` for a
+    /// momentary state that settles by itself (and is shown elsewhere), and
+    /// `Some(Some(reason))` for one the user must see. A submit refused for a
+    /// stated reason shows it inline instead of doing nothing.
+    pub(crate) fn send_block(&self, cx: &App) -> Option<Option<String>> {
         if self.pickers.read(cx).importing_chat(cx) {
-            return true;
+            return Some(None);
         }
         if self.queue_edit_finishing {
-            return true;
+            return Some(None);
         }
         if self.cloud_launch_pending(cx) {
-            return true;
+            return Some(Some(
+                "This tab is still starting a cloud thread. Check or retry that request before sending another. Your draft is preserved.".into(),
+            ));
         }
         if self.cached_cloud() {
-            return false;
+            return None;
         }
         let state = self.state.read(cx);
         if state
             .selected_project_creation()
             .is_some_and(|op| op.blocks_execution())
         {
-            return true;
+            return Some(None);
         }
         // A cloud task sends with its own saved settings and wakes a sleeping
         // computer itself; the chat configuration is read from the computer's
         // engine, which a sleeping computer never answers.
         // Until its saved choices load, a cloud task cannot build a message.
         if self.native_cloud_task() && self.pickers.read(cx).cloud_task_choice().is_none() {
-            return true;
+            return Some(None);
         }
         // A cloud task needs no configuration read from its (perhaps sleeping)
         // computer, but an access change still saving must land first, or the
@@ -10016,22 +10026,47 @@ impl Composer {
         if state.configuration_blocked()
             && (!self.native_cloud_task() || state.configuration_write_unsettled())
         {
-            return true;
+            return Some(None);
         }
         if state.review_comment_flush_pending(&self.current_key) {
-            return true;
+            return Some(None);
         }
         if state.selected_chat.is_some() {
-            return false;
+            return None;
         }
         if state.cloud_project.is_some() {
-            return !self.pickers.read(cx).cloud_model_ready(cx);
+            let pickers = self.pickers.read(cx);
+            if pickers.cloud_model_ready(cx) {
+                return None;
+            }
+            // The tray stays quiet while models load; a refused send must not.
+            let reason = pickers
+                .cloud_model_notice(cx)
+                .map(|(notice, _)| notice)
+                .unwrap_or_else(|| "Cloud models are still loading for this repository. Try again in a moment; your draft is preserved.".into());
+            return Some(Some(reason));
         }
         // New-chat canvas: needs a runnable agent. The
         // no-agents check only fires once the catalog is loaded — offline
         // and still-loading states must not block (the harness resolves from
         // the remembered default and the engine reports real failures).
-        self.pickers.read(cx).no_agents_available(cx)
+        self.pickers.read(cx).no_agents_available(cx).then(|| {
+            Some(
+                "No coding agent is available. Install or enable one in Settings → Coding agents."
+                    .into(),
+            )
+        })
+    }
+
+    /// Show (and log) why a submit with content did not send.
+    fn report_send_block(&mut self, cx: &mut Context<Self>) {
+        let Some(Some(reason)) = self.send_block(cx) else {
+            return;
+        };
+        tracing::warn!(%reason, "composer send refused");
+        self.failure = Some(reason.into());
+        self.failure_key = None;
+        cx.notify();
     }
 
     fn button_mode(&self, cx: &App) -> SendButtonMode {
@@ -10176,7 +10211,7 @@ impl Composer {
             // escape_stops_active_agent is enabled.
             SendButtonMode::Stop => {}
             _ if no_content => {}
-            _ if self.send_blocked(cx) => {}
+            _ if self.send_blocked(cx) => self.report_send_block(cx),
             SendButtonMode::Send => {
                 self.send(text, false, false, false, cx);
                 self.focus_pending = true;

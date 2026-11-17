@@ -5,6 +5,7 @@ use crate::state::CloudTarget;
 use serde_json::{Value, json};
 mod activity;
 mod computer;
+mod environment_card;
 
 pub(super) use computer::Tone;
 mod history;
@@ -437,7 +438,7 @@ impl CloudConversation {
             let panel = self.render_computer(cx);
             let card = popover::popover_card(&theme)
                 .id("native-cloud-computer-card")
-                .w(px(360.))
+                .w(px(320.))
                 .max_h(px(560.))
                 .overflow_y_scroll()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_computer(cx)))
@@ -1107,7 +1108,7 @@ impl Shell {
                 .find(|project| project["projectId"].as_str() == Some(id.as_str()))
         }) && let Some(object) = row.as_object_mut()
         {
-            for key in ["displayName", "repositoryIdentity"] {
+            for key in ["displayName", "repositoryIdentity", "repositoryUrl"] {
                 if let Some(value) = project.get(key).filter(|value| value.is_string()) {
                     let field = if key == "displayName" {
                         "repositoryDisplayName"
