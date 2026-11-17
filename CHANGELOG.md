@@ -10,6 +10,10 @@
 
 - Render Markdown tables with compact rows, rounded borders, clearer headers, and better wrapping.
 
+### Fixed
+
+- Keep the Settings Back to app button clickable on Windows by excluding it from the window-drag region.
+
 ## 0.26.1 - 2026-11-15
 
 ### Added
