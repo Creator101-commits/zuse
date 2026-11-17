@@ -3998,7 +3998,15 @@ impl Shell {
                     .get(id)
                     // Contextual title (user request): the pane's scope
                     // label, or the pinned commit's subject.
-                    .map(|changes| (*surface, changes.read(cx).tab_title(), false, None)),
+                    .map(|changes| {
+                        let changes = changes.read(cx);
+                        let title = if changes.is_review() {
+                            "Diff".into()
+                        } else {
+                            changes.tab_title()
+                        };
+                        (*surface, title, false, None)
+                    }),
                 RightSurface::Terminal(tab) => terminals
                     .iter()
                     .find(|(k, _, _)| k == tab)
@@ -4608,9 +4616,7 @@ impl Shell {
         });
     }
 
-    /// A right-pane diff tab with its own scope/base selection. The picker's
-    /// Diffs card and the `+` menu open the main-area review instead (see
-    /// [`Self::open_review_tab`]); tests still drive the pane's diff tabs.
+    /// A right-pane diff tab with its own scope/base selection.
     #[cfg(test)]
     fn add_diff_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let changes = cx.new(|cx| Changes::new(self.state.clone(), cx));
@@ -9005,6 +9011,7 @@ impl Shell {
         let outlet = self.settings_outlet(section, window, cx);
         let back = div()
             .id("settings-back")
+            .debug_selector(|| "settings-back".into())
             .role(gpui::Role::Button)
             .aria_label(tr(cx, msg::settings::settings_page_back_to_app))
             .tab_index(0)
@@ -9014,6 +9021,9 @@ impl Shell {
             .p(px(4.))
             .rounded(px(4.))
             .cursor_pointer()
+            // Keep this control out of the native titlebar drag hit-test.
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .text_size(crate::typography::text_xs())
             .text_color(theme.text_muted)
             .hover(|style| {
@@ -9021,7 +9031,10 @@ impl Shell {
                     .bg(theme.settings_frame_bg().opacity(0.4))
                     .text_color(theme.text)
             })
-            .on_click(cx.listener(|this, _, _, cx| this.close_settings(cx)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                cx.stop_propagation();
+                this.close_settings(cx);
+            }))
             .child(
                 icon(icons::ALT_ARROW_LEFT)
                     .size(px(14.))
@@ -15946,9 +15959,11 @@ impl Render for Shell {
                     let page = div()
                         .size_full()
                         .relative()
+                        // Interactive header controls must paint above the drag strip
+                        // so their occluding hitboxes exclude it on Windows/Linux.
+                        .child(drag)
                         .child(settings_page)
                         .children(voice_stage)
-                        .child(drag)
                         .children(overlays);
                     break 'ready root.child(motion::fade_in("phase-app", page));
                 }
@@ -16033,7 +16048,7 @@ impl Render for Shell {
                         cx,
                     )
                 });
-                // A review or commit-diff tab stands in for the conversation.
+                // A commit-diff tab stands in for the conversation.
                 let main = match matches!(self.route, Route::Chat)
                     .then(|| self.active_main_tab(cx))
                     .flatten()
@@ -20881,8 +20896,8 @@ impl Shell {
     }
     /// Right-pane and main-area tab states for review captures:
     /// `panel/launcher` (the empty pane's surface list), `panel/files` (the
-    /// explorer over a synthetic tree) and `main/review` (the review tab in
-    /// the main area, beside a side chat's tab).
+    /// explorer over a synthetic tree) and `main/review` (the review in
+    /// the right pane, beside a side chat's tab).
     pub fn fixture_open_panel(&mut self, route: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.fixture_reset_panels(cx);
         self.state.update(cx, |state, cx| {
@@ -20917,7 +20932,7 @@ impl Shell {
                         {"path": "README.md", "oldPath": null, "index": "unchanged", "worktree": "modified"},
                     ],
                 }});
-                if let Some(id) = self.active_main_diff(cx)
+                if let Some(id) = self.review_surface(cx)
                     && let Some(changes) = self.diffs.get(&id).cloned()
                 {
                     changes.update(cx, |changes, cx| {
@@ -20991,11 +21006,11 @@ impl Shell {
                     }
                     cx.notify();
                 });
-                // The review needs the room: fold the pane and the tree.
+                // Start the review with the file tree folded.
                 self.close_files_panel(window, cx);
                 self.set_surfaces_open(false, cx);
                 self.open_review_tab(window, cx);
-                if let Some(id) = self.active_main_diff(cx)
+                if let Some(id) = self.review_surface(cx)
                     && let Some(changes) = self.diffs.get(&id).cloned()
                 {
                     changes.update(cx, |changes, cx| {
@@ -22356,6 +22371,51 @@ mod settings_modal_regressions {
             },
             cx,
         )
+    }
+
+    #[gpui::test]
+    fn settings_back_button_excludes_window_drag_and_returns_to_app(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let (shell, cx) = cx.add_window_view(|_, cx| test_shell(dir.path(), cx));
+        cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        shell.update(cx, |shell, cx| {
+            shell.debug_gate = Some(GatePhase::Ready);
+            shell.splash = SplashPhase::Gone;
+            shell.reduced_motion = true;
+            shell.open_settings(SettingsSection::General, cx);
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let back = cx
+            .debug_bounds("settings-back")
+            .expect("Back to app button");
+        cx.simulate_mouse_down(back.center(), MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                !shell.titlebar_should_move,
+                "Back to app must receive input without arming the window drag strip"
+            );
+        });
+        cx.simulate_mouse_up(back.center(), MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| assert_eq!(shell.route, Route::Chat));
+
+        shell.update(cx, |shell, cx| {
+            shell.open_settings(SettingsSection::General, cx)
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let empty_header = gpui::point(px(600.), back.center().y);
+        cx.simulate_mouse_down(empty_header, MouseButton::Left, gpui::Modifiers::default());
+        shell.read_with(cx, |shell, _| {
+            assert!(
+                shell.titlebar_should_move,
+                "empty header still drags the window"
+            );
+        });
+        cx.simulate_mouse_up(empty_header, MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_keystrokes("escape");
+        shell.read_with(cx, |shell, _| assert_eq!(shell.route, Route::Chat));
     }
 
     #[test]
