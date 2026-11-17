@@ -245,8 +245,12 @@ impl Executor {
         if let Some(ca) = sslrootcert(url) {
             command.env("NODE_EXTRA_CA_CERTS", ca);
         }
+        // Validated with the process budget at startup (`db::Budget`).
+        let connections =
+            crate::db::executor_connections(|name| std::env::var(name).ok()).unwrap_or(1);
         command
             .env("ZUSE_EXECUTOR_DATABASE_URL", url)
+            .env("ZUSE_EXECUTOR_DB_MAX_CONNECTIONS", connections.to_string())
             .env("ZUSE_EXECUTOR_ENCRYPTION_KEY", key.executor_key().as_str())
             .env("ZUSE_EXECUTOR_TOKEN", token)
             .env("ZUSE_EXECUTOR_EGRESS", proxy)

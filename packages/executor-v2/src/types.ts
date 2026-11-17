@@ -1,8 +1,12 @@
-/** Host storage uses the same PostgreSQL database as the Rust API. */
-export interface StateStorage {
-	get<T>(key: string): Promise<T | undefined>;
-	put(key: string, value: unknown): Promise<void>;
-	delete(key: string): Promise<void>;
+/**
+ * Seals `zuse_executor_state` rows. The engine stores them in the same
+ * PostgreSQL database as the Rust API, on its own connection pool.
+ */
+export interface StateCodec {
+	/** Encrypts one row's JSON text, bound to its id. */
+	seal(id: string, plaintext: string): string;
+	/** Decrypts and authenticates one row; throws when it does not verify. */
+	open(id: string, sealed: string): string;
 }
 
 /** `header` sends a saved key in the plugin's header on every request. */
@@ -20,15 +24,29 @@ export interface EnginePlugin {
 	readonly header?: string;
 }
 export interface EngineOptions {
-	readonly storage: StateStorage;
+	readonly state: StateCodec;
 	readonly databaseUrl: string;
+	/** Database connections for the SDK and state rows together (default 1). */
+	readonly maxConnections?: number;
 	readonly migrate?: boolean;
 	readonly allowLoopbackHttp?: boolean;
 	readonly encryptionKey: string;
 	readonly credentialScope: string;
-	/** Server-owned catalog and workspace-added servers. Definitions are registered lazily per (plugin, auth). */
+	/**
+	 * Server-owned catalog and workspace-added servers, by tenant-qualified id.
+	 * Definitions are registered lazily per (definition, auth).
+	 */
 	readonly plugin: (id: string) => EnginePlugin | undefined;
 	readonly fetch: typeof fetch;
+	/**
+	 * The calling request's network budget. `capture` runs when an operation
+	 * starts; `enter` runs SDK network work inside the captured budget, since
+	 * shared connections can resume work in another request's context.
+	 */
+	readonly requestScope: {
+		capture(): unknown;
+		enter<A>(scope: unknown, work: () => A): A;
+	};
 }
 export interface EngineConnection {
 	readonly app: string;
@@ -86,5 +104,7 @@ export interface PluginEngine {
 		tool: string,
 		input: unknown,
 	): Promise<unknown>;
+	/** One cheap statement on the engine's pool. */
+	ready(): Promise<void>;
 	close(): Promise<void>;
 }

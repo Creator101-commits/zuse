@@ -45,11 +45,13 @@ import {
 import { createAppHandler, hostContext } from "apps/host";
 import { mcpRouter } from "apps/mcp";
 import {
+	Context,
 	Effect,
 	Layer,
 	ManagedRuntime,
 	Option,
 	Redacted,
+	Scheduler,
 	Schema,
 	Stream,
 } from "effect";
@@ -61,6 +63,7 @@ import type {
 	EnginePlugin,
 	PluginEngine,
 	PluginEngineErrorCode,
+	StateCodec,
 } from "./types.ts";
 
 /** A failure the caller can explain; other failures stay opaque. */
@@ -104,6 +107,111 @@ const oauthSetupError = (error: unknown) => {
 	return error;
 };
 
+/** The network budget of the request an engine operation runs for. */
+const RequestScope = Context.Reference<unknown>("zuse/executor/RequestScope", {
+	defaultValue: () => undefined,
+});
+const STATE_CACHE_ENTRIES = 1024;
+const STATE_CACHE_CHARS = 8 * 1024 * 1024;
+/**
+ * Immutable rows: content-addressed sources and per-deployment blobs. Workspace
+ * heads are compare-and-set, so they are always read from the database.
+ */
+const cacheable = (id: string) =>
+	id.startsWith("v2:blob:") || id.startsWith("v2:source:");
+const encodeState = (value: unknown) =>
+	JSON.stringify(value, (_key, item) =>
+		item instanceof Uint8Array
+			? { __executorBytes: Buffer.from(item).toString("base64") }
+			: item,
+	);
+const decodeState = (text: string): unknown =>
+	JSON.parse(text, (_key, value) =>
+		value &&
+		typeof value === "object" &&
+		Object.keys(value).length === 1 &&
+		typeof value.__executorBytes === "string"
+			? new Uint8Array(Buffer.from(value.__executorBytes, "base64"))
+			: value,
+	);
+
+/**
+ * Sealed `zuse_executor_state` rows on the engine's SQL client, so a state
+ * statement inside an SDK transaction uses that transaction's connection.
+ * This process is the table's only writer. Immutable rows are read once and
+ * kept (bounded); an unchanged immutable row is never rewritten. Nothing is
+ * kept from inside a transaction, which may still roll back.
+ */
+export const sealedState = (sql: PgClient.PgClient, codec: StateCodec) => {
+	const kept = new Map<string, string>();
+	let keptChars = 0;
+	/** Bumped by every write, so a read that raced one never keeps its row. */
+	let writes = 0;
+	const forget = (id: string) => {
+		const text = kept.get(id);
+		if (text === undefined) return;
+		kept.delete(id);
+		keptChars -= text.length;
+	};
+	const keep = (id: string, text: string) => {
+		forget(id);
+		if (!cacheable(id) || text.length > STATE_CACHE_CHARS / 8) return;
+		kept.set(id, text);
+		keptChars += text.length;
+		for (const oldest of kept.keys()) {
+			if (kept.size <= STATE_CACHE_ENTRIES && keptChars <= STATE_CACHE_CHARS)
+				break;
+			forget(oldest);
+		}
+	};
+	const inTransaction = Effect.map(
+		Effect.serviceOption(sql.transactionService),
+		Option.isSome,
+	);
+	return {
+		get: (id: string) =>
+			Effect.gen(function* () {
+				const transaction = yield* inTransaction;
+				const hit = transaction ? undefined : kept.get(id);
+				if (hit !== undefined) {
+					kept.delete(id);
+					kept.set(id, hit);
+					return decodeState(hit);
+				}
+				const before = writes;
+				const rows = yield* sql<{
+					sealed: string;
+				}>`SELECT sealed FROM zuse_executor_state WHERE id=${id}`;
+				const row = rows[0];
+				if (row === undefined) return undefined;
+				const text = codec.open(id, row.sealed);
+				if (!transaction && before === writes) keep(id, text);
+				return decodeState(text);
+			}),
+		put: (id: string, value: unknown) =>
+			Effect.gen(function* () {
+				const text = encodeState(value);
+				const transaction = yield* inTransaction;
+				if (!transaction && kept.get(id) === text) return;
+				writes++;
+				forget(id);
+				const sealed = codec.seal(id, text);
+				yield* sql`INSERT INTO zuse_executor_state(id,sealed) VALUES(${id},${sealed}) ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed`;
+				if (!transaction) {
+					writes++;
+					keep(id, text);
+				}
+			}),
+		delete: (id: string) =>
+			Effect.gen(function* () {
+				writes++;
+				forget(id);
+				yield* sql`DELETE FROM zuse_executor_state WHERE id=${id}`;
+				writes++;
+			}),
+	};
+};
+
 /**
  * Only these bundled declarations can execute: a remote MCP endpoint with one
  * auth method. Endpoints come from the host's lookup; no user source, eval, or
@@ -112,21 +220,63 @@ const oauthSetupError = (error: unknown) => {
 export async function createPluginEngine(
 	options: EngineOptions,
 ): Promise<PluginEngine> {
-	const sql = PgClient.layer({
+	// One pool for the SDK tables and the sealed state rows. Statements of a
+	// transaction reuse its connection, so one connection cannot deadlock.
+	const pool = PgClient.layer({
 		url: Redacted.make(options.databaseUrl),
-		maxConnections: 2,
+		maxConnections: Math.max(1, Math.floor(options.maxConnections ?? 1)),
+		idleTimeout: "60 seconds",
+		connectionTTL: "30 minutes",
 		connectTimeout: "5 seconds",
+		applicationName: "zuse-cloud-executor",
 	});
-	const managed = ManagedRuntime.make(
-		Layer.mergeAll(
-			sql,
-			BrowserCrypto.layer,
-			FetchHttpClient.layer.pipe(
-				Layer.provide(Layer.succeed(FetchHttpClient.Fetch, options.fetch)),
-			),
+	const services = Layer.mergeAll(
+		pool,
+		BrowserCrypto.layer,
+		FetchHttpClient.layer.pipe(
+			Layer.provide(Layer.succeed(FetchHttpClient.Fetch, options.fetch)),
 		),
 	);
-	const run = managed.runPromise;
+	const managed = ManagedRuntime.make(services);
+	/**
+	 * The engine and its pool outlive requests, so a fiber can be resumed by a
+	 * database connection another request opened, in that request's async
+	 * context. Each operation therefore pins its caller's network budget: its
+	 * fibers yield and continue inside the budget whenever they find
+	 * themselves outside it, the SDK's HTTP client gets a fetch bound to it,
+	 * and app handlers run re-entered in it.
+	 */
+	const run = <A, E, R extends Layer.Success<typeof services>>(
+		effect: Effect.Effect<A, E, R>,
+	) => {
+		const scope = options.requestScope.capture();
+		const enter = <T>(work: () => T) =>
+			options.requestScope.enter(scope, work);
+		const base = new Scheduler.MixedScheduler();
+		const pinned: Scheduler.Scheduler = {
+			executionMode: base.executionMode,
+			shouldYield: (fiber) =>
+				base.shouldYield(fiber) ||
+				(scope !== undefined && options.requestScope.capture() !== scope),
+			makeDispatcher: () => {
+				const dispatcher = base.makeDispatcher();
+				return {
+					scheduleTask: (task, priority) =>
+						dispatcher.scheduleTask(() => enter(task), priority),
+					flush: () => dispatcher.flush(),
+				};
+			},
+		};
+		const fetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+			enter(() => options.fetch(input, init))) as typeof globalThis.fetch;
+		return managed.runPromise(
+			effect.pipe(
+				Effect.provideService(RequestScope, scope),
+				Effect.provideService(FetchHttpClient.Fetch, fetch),
+				Effect.provideService(Scheduler.Scheduler, pinned),
+			),
+		);
+	};
 	const io = <A>(work: () => Promise<A>) =>
 		Effect.tryPromise({ try: work, catch: () => new RuntimeProtocolFailed() });
 	type Entry = {
@@ -146,13 +296,30 @@ export async function createPluginEngine(
 	const sourceOf = (plugin: EnginePlugin, auth: EngineAuth) =>
 		`export default ${JSON.stringify({ protocol: 1, id: plugin.id, name: plugin.name, endpoint: plugin.endpoint, auth, scopes: plugin.scopes ?? [], ...(plugin.oauthDiscovery ? { oauthDiscovery: plugin.oauthDiscovery } : {}), ...(auth === "header" ? { header: headerOf(plugin) } : {}) })};\n`;
 
+	// The engine outlives requests: entries are keyed by the generated source,
+	// which embeds the tenant-qualified id and every endpoint field, so an
+	// edited definition is a new entry. Both maps stay bounded.
+	const MAX_ENTRIES = 512;
+	const bounded = <K, V>(map: Map<K, V>) => {
+		for (const oldest of map.keys()) {
+			if (map.size <= MAX_ENTRIES) break;
+			map.delete(oldest);
+		}
+	};
 	const register = (pluginId: string, auth: EngineAuth): Promise<Entry> => {
-		const key = JSON.stringify([pluginId, auth]);
-		const existing = entries.get(key);
-		if (existing) return existing;
+		const source = sourceOf(definition(pluginId), auth);
+		const existing = entries.get(source);
+		if (existing)
+			return existing.then((entry) => {
+				if (builds.get(entry.build) !== entry) {
+					builds.delete(entry.build);
+					builds.set(entry.build, entry);
+					bounded(builds);
+				}
+				return entry;
+			});
 		const created = (async () => {
 			const plugin = definition(pluginId);
-			const source = sourceOf(plugin, auth);
 			const digest = await crypto.subtle.digest(
 				"SHA-256",
 				new TextEncoder().encode(source),
@@ -216,11 +383,14 @@ export async function createPluginEngine(
 								}),
 							);
 			const entry = { source, build, handler: createAppHandler(app) };
+			builds.delete(build);
 			builds.set(build, entry);
+			bounded(builds);
 			return entry;
 		})();
-		entries.set(key, created);
-		created.catch(() => entries.delete(key));
+		entries.set(source, created);
+		bounded(entries);
+		created.catch(() => entries.delete(source));
 		return created;
 	};
 
@@ -248,23 +418,25 @@ export async function createPluginEngine(
 		error: Schema.Decoder<E>,
 		context: HostContext = hostContext({}),
 	) =>
-		io(async () => {
-			const item = builds.get(BuildId.make(build));
-			if (!item) throw new Error("Unknown plugin build");
-			const response = await item.handler(
-				new Request("https://zuse.invalid/", {
-					method: "POST",
-					body: JSON.stringify(command),
-					headers: { "content-type": "application/json" },
-					signal: AbortSignal.timeout(30_000),
+		Effect.flatMap(Effect.service(RequestScope), (scope) =>
+			// Re-enter the caller's budget: the app's MCP client uses global fetch.
+			io(() =>
+				options.requestScope.enter(scope, async () => {
+					const item = builds.get(BuildId.make(build));
+					if (!item) throw new Error("Unknown plugin build");
+					const response = await item.handler(
+						new Request("https://zuse.invalid/", {
+							method: "POST",
+							body: JSON.stringify(command),
+							headers: { "content-type": "application/json" },
+							signal: AbortSignal.timeout(30_000),
+						}),
+						context,
+					);
+					return Schema.decodeUnknownSync(HostResponse)(await response.json());
 				}),
-				context,
-			);
-			const result = Schema.decodeUnknownSync(HostResponse)(
-				await response.json(),
-			);
-			return result;
-		}).pipe(
+			),
+		).pipe(
 			Effect.flatMap((result) => {
 				if (!result.ok)
 					return Schema.decodeUnknownEffect(error)(result.error).pipe(
@@ -340,74 +512,83 @@ export async function createPluginEngine(
 		checkAccount: unsupported,
 		changes: () => Stream.empty,
 	};
-	const blobs: BlobStorage = {
-		get: (key) =>
-			Effect.tryPromise({
-				try: async () =>
-					Option.fromNullishOr(
-						await options.storage.get<Uint8Array>(`v2:blob:${key}`),
-					),
-				catch: () => new BlobStoreError({ operation: "get" }),
-			}),
-		put: (key, body) =>
-			Effect.tryPromise({
-				try: () => options.storage.put(`v2:blob:${key}`, body),
-				catch: () => new BlobStoreError({ operation: "put" }),
-			}),
-		remove: (key) =>
-			Effect.tryPromise({
-				try: async () => {
-					await options.storage.delete(`v2:blob:${key}`);
-				},
-				catch: () => new BlobStoreError({ operation: "remove" }),
-			}),
-	};
-	const sourceIo = <A>(work: () => Promise<A>) =>
-		Effect.tryPromise({
-			try: work,
-			catch: () => new SourceError({ reason: "storage" }),
-		});
-	const retain: AppSourceStorage["retain"] = (code, files) =>
-		sourceIo(async () => {
-			const digest = await crypto.subtle.digest(
-				"SHA-1",
-				new TextEncoder().encode(JSON.stringify(files)),
-			);
-			const commit = Array.from(new Uint8Array(digest), (b) =>
-				b.toString(16).padStart(2, "0"),
-			).join("");
-			await options.storage.put(`v2:source:${code}:${commit}`, files);
-			return { code, commit };
-		});
-	const sources: AppSourceStorage = {
-		retain,
-		read: ({ code, commit }) =>
-			sourceIo(async () =>
-				Schema.decodeUnknownSync(SourceFiles)(
-					await options.storage.get(`v2:source:${code}:${commit}`),
-				),
-			),
-		workspace: (code) =>
-			sourceIo(async () => {
-				const value = await options.storage.get(`v2:head:${code}`);
-				return value === undefined
-					? null
-					: Schema.decodeUnknownSync(SourceSnapshot)(value);
-			}),
-		commit: (input) =>
-			Effect.gen(function* () {
-				const old = yield* sources.workspace(input.code);
-				if ((old?.revision.commit ?? null) !== input.expected)
-					return yield* new SourceError({ reason: "conflict" });
-				const revision = yield* retain(input.code, input.files);
-				const next = { revision, files: input.files };
-				yield* sourceIo(() =>
-					options.storage.put(`v2:head:${input.code}`, next),
-				);
-				return next;
-			}),
-	};
 	try {
+		const sql = await run(PgClient.PgClient);
+		const state = sealedState(sql, options.state);
+		const blobs: BlobStorage = {
+			get: (key) =>
+				state.get(`v2:blob:${key}`).pipe(
+					Effect.map((value) => Option.fromNullishOr(value as Uint8Array)),
+					Effect.mapError(() => new BlobStoreError({ operation: "get" })),
+				),
+			put: (key, body) =>
+				state
+					.put(`v2:blob:${key}`, body)
+					.pipe(Effect.mapError(() => new BlobStoreError({ operation: "put" }))),
+			remove: (key) =>
+				state
+					.delete(`v2:blob:${key}`)
+					.pipe(
+						Effect.mapError(() => new BlobStoreError({ operation: "remove" })),
+					),
+		};
+		const sourceError = () => new SourceError({ reason: "storage" });
+		const retain: AppSourceStorage["retain"] = (code, files) =>
+			Effect.gen(function* () {
+				const digest = yield* Effect.tryPromise({
+					try: () =>
+						crypto.subtle.digest(
+							"SHA-1",
+							new TextEncoder().encode(JSON.stringify(files)),
+						),
+					catch: sourceError,
+				});
+				const commit = Array.from(new Uint8Array(digest), (b) =>
+					b.toString(16).padStart(2, "0"),
+				).join("");
+				yield* state
+					.put(`v2:source:${code}:${commit}`, files)
+					.pipe(Effect.mapError(sourceError));
+				return { code, commit };
+			});
+		const sources: AppSourceStorage = {
+			retain,
+			read: ({ code, commit }) =>
+				state.get(`v2:source:${code}:${commit}`).pipe(
+					Effect.flatMap((value) =>
+						Effect.try({
+							try: () => Schema.decodeUnknownSync(SourceFiles)(value),
+							catch: sourceError,
+						}),
+					),
+					Effect.mapError(sourceError),
+				),
+			workspace: (code) =>
+				state.get(`v2:head:${code}`).pipe(
+					Effect.flatMap((value) =>
+						Effect.try({
+							try: () =>
+								value === undefined
+									? null
+									: Schema.decodeUnknownSync(SourceSnapshot)(value),
+							catch: sourceError,
+						}),
+					),
+					Effect.mapError(sourceError),
+				),
+			commit: (input) =>
+				Effect.gen(function* () {
+					const old = yield* sources.workspace(input.code);
+					if ((old?.revision.commit ?? null) !== input.expected)
+						return yield* new SourceError({ reason: "conflict" });
+					const revision = yield* retain(input.code, input.files);
+					const next = { revision, files: input.files };
+					yield* state
+						.put(`v2:head:${input.code}`, next)
+						.pipe(Effect.mapError(sourceError));
+					return next;
+				}),
+		};
 		const db = await run(makeExecutorStorage({ provider: "postgresql" }));
 		if (options.migrate) await run(db.migrate);
 		else await run(db.checkMigration);
@@ -447,6 +628,14 @@ export async function createPluginEngine(
 				blobs,
 				credentials,
 				runtime: runtimeAdapter(runtime),
+				// Evaluate every listing, as when each request opened its own
+				// engine: a long-lived engine must not serve remembered catalogs.
+				toolListings: {
+					freshMillis: 0,
+					maxStaleMillis: 0,
+					loadMillis: 0,
+					slowFailureMillis: 1_000,
+				},
 				oauth: {
 					httpClient: client,
 					clientName: "Zuse",
@@ -460,12 +649,29 @@ export async function createPluginEngine(
 		await run(e.apps.list({ owner: OwnerId.make("__readiness__") }));
 		const ownerOf = (owner: string) => OwnerId.make(owner);
 
-		const target = async (owner: string, ref: EngineConnection) => {
+		/**
+		 * (owner, app, profile) triples whose ownership was verified. An app's
+		 * owner and a profile's app never change, and every tool read loads the
+		 * app and profile again (removed or disabled ones fail there), so tool
+		 * reads verify ownership once per process. Bounded; setup always checks.
+		 */
+		const owned = new Map<string, string>();
+		const target = async (
+			owner: string,
+			ref: EngineConnection,
+			read = false,
+		) => {
 			await register(ref.plugin, ref.auth);
 			const app = AppId.make(ref.app),
 				profile = ProfileId.make(ref.profile);
+			const key = JSON.stringify([owner, ref.app, ref.profile]);
+			if (read && owned.has(key)) return { app, profile };
 			await run(e.apps.get({ app, owner: ownerOf(owner) }));
 			await run(e.apps.profiles.get({ app, profile, owner: ownerOf(owner) }));
+			if (read) {
+				owned.set(key, ref.app);
+				bounded(owned);
+			}
 			return { app, profile };
 		};
 		return {
@@ -574,14 +780,17 @@ export async function createPluginEngine(
 					if (cancelled.state.status === "completed")
 						account = cancelled.state.account.id;
 				}
-				if (app) await run(e.apps.remove({ app: AppId.make(app), owner: own }));
+				if (app) {
+					for (const [key, kept] of owned) if (kept === app) owned.delete(key);
+					await run(e.apps.remove({ app: AppId.make(app), owner: own }));
+				}
 				if (account)
 					await run(
 						e.accounts.remove({ account: AccountId.make(account), owner: own }),
 					);
 			},
 			async list(owner, ref) {
-				const t = await target(owner, ref);
+				const t = await target(owner, ref, true);
 				const result = await run(e.tools.index(t));
 				return result.items.map((tool) => ({
 					name: tool.name,
@@ -591,7 +800,7 @@ export async function createPluginEngine(
 			async schema(owner, ref, tool) {
 				return run(
 					e.tools.get({
-						...(await target(owner, ref)),
+						...(await target(owner, ref, true)),
 						tool: ToolName.make(tool),
 					}),
 				);
@@ -599,7 +808,7 @@ export async function createPluginEngine(
 			async call(owner, ref, tool, input) {
 				const result = await run(
 					e.tools.call({
-						...(await target(owner, ref)),
+						...(await target(owner, ref, true)),
 						tool: ToolName.make(tool),
 						input: Schema.decodeUnknownSync(JsonValue)(input),
 					}),
@@ -608,6 +817,8 @@ export async function createPluginEngine(
 					throw new Error("Plugin requires additional approval");
 				return result.value;
 			},
+			ready: () =>
+				run(sql`SELECT 1 FROM zuse_executor_state LIMIT 1`).then(() => undefined),
 			close: () => managed.dispose(),
 		};
 	} catch (error) {

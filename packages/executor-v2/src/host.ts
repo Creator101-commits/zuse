@@ -8,7 +8,6 @@ import {
 	createDecipheriv,
 	timingSafeEqual,
 } from "node:crypto";
-import { Pool } from "pg";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import {
@@ -17,7 +16,12 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createPluginEngine } from "../vendor/runtime.mjs";
 import { PLUGIN_MCP_TOOLS as tools } from "./tools.ts";
-import type { EngineConnection, EnginePlugin } from "./types.ts";
+import type {
+	EngineConnection,
+	EnginePlugin,
+	PluginEngine,
+	StateCodec,
+} from "./types.ts";
 
 process.on("uncaughtException", () => {
 	console.error("executor_process_failed");
@@ -33,25 +37,32 @@ const token = process.env.ZUSE_EXECUTOR_TOKEN!;
 const proxy = process.env.ZUSE_EXECUTOR_EGRESS!;
 if (!databaseUrl || !encryptionKey || !token || !proxy)
 	throw new Error("Executor configuration missing");
-const pool = new Pool({
-	connectionString: databaseUrl,
-	max: 4,
-	connectionTimeoutMillis: 5000,
-});
+// Every SDK and state statement shares this many connections (default 1).
+const rawMaxConnections = process.env.ZUSE_EXECUTOR_DB_MAX_CONNECTIONS ?? "1";
+const maxConnections = Number(rawMaxConnections);
+if (
+	!/^[0-9]+$/.test(rawMaxConnections) ||
+	maxConnections < 1 ||
+	maxConnections > 16
+)
+	throw new Error("Invalid executor connection limit");
 const key = Buffer.from(encryptionKey, "base64url");
 const nativeFetch = globalThis.fetch;
-const budget = new AsyncLocalStorage<{
+type Budget = {
 	bytes: number;
 	requests: number;
 	signal: AbortSignal;
-}>();
+	/** False once the request settled; its budget never pays for later work. */
+	open: boolean;
+};
+const budget = new AsyncLocalStorage<Budget>();
 const MAX_BYTES = 8 * 1024 * 1024;
 
 // Bound all HTTP (including SDK transports using global fetch) through the Rust
 // resolver. Credentials never reach an unchecked URL or environment proxy.
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	const state = budget.getStore();
-	if (!state || ++state.requests > 1100)
+	if (!state || !state.open || ++state.requests > 1100)
 		throw new Error("Executor network budget exceeded");
 	const request = new Request(input, init);
 	const headers = [...request.headers.entries()];
@@ -108,80 +119,78 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 	});
 }) as typeof fetch;
 
-const storage = {
-	async get<T>(id: string): Promise<T | undefined> {
-		const rows = await pool.query(
-			"SELECT sealed FROM zuse_executor_state WHERE id=$1",
-			[id],
-		);
-		if (!rows.rows.length) return undefined;
-		const envelope = Buffer.from(rows.rows[0].sealed, "base64");
+const aad = (id: string) => Buffer.from(`zuse-executor-state:v1:${id}`);
+const state: StateCodec = {
+	seal(id, plaintext) {
+		const iv = randomBytes(12),
+			cipher = createCipheriv("aes-256-gcm", key, iv);
+		cipher.setAAD(aad(id));
+		const body = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+		return Buffer.concat([iv, cipher.getAuthTag(), body]).toString("base64");
+	},
+	open(id, sealed) {
+		const envelope = Buffer.from(sealed, "base64");
 		const cipher = createDecipheriv(
 			"aes-256-gcm",
 			key,
 			envelope.subarray(0, 12),
 		);
-		cipher.setAAD(Buffer.from(`zuse-executor-state:v1:${id}`));
+		cipher.setAAD(aad(id));
 		cipher.setAuthTag(envelope.subarray(12, 28));
-		return JSON.parse(
-			Buffer.concat([
-				cipher.update(envelope.subarray(28)),
-				cipher.final(),
-			]).toString(),
-			(_key, value) =>
-				value &&
-				typeof value === "object" &&
-				Object.keys(value).length === 1 &&
-				typeof value.__executorBytes === "string"
-					? new Uint8Array(Buffer.from(value.__executorBytes, "base64"))
-					: value,
-		);
-	},
-	async put(id: string, value: unknown) {
-		const iv = randomBytes(12),
-			cipher = createCipheriv("aes-256-gcm", key, iv);
-		cipher.setAAD(Buffer.from(`zuse-executor-state:v1:${id}`));
-		const body = Buffer.concat([
-			cipher.update(
-				JSON.stringify(value, (_key, value) =>
-					value instanceof Uint8Array
-						? { __executorBytes: Buffer.from(value).toString("base64") }
-						: value,
-				),
-			),
+		return Buffer.concat([
+			cipher.update(envelope.subarray(28)),
 			cipher.final(),
-		]);
-		const sealed = Buffer.concat([iv, cipher.getAuthTag(), body]).toString(
-			"base64",
-		);
-		await pool.query(
-			"INSERT INTO zuse_executor_state(id,sealed) VALUES($1,$2) ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed",
-			[id, sealed],
-		);
-	},
-	async delete(id: string) {
-		await pool.query("DELETE FROM zuse_executor_state WHERE id=$1", [id]);
+		]).toString();
 	},
 };
-async function openEngine(
-	definitions: Map<string, EnginePlugin>,
-	migrate = false,
-) {
-	return createPluginEngine({
-		storage,
+/**
+ * Definitions by tenant-qualified id (sha256 of owner and definition id), so
+ * one tenant's id never names another tenant's definition. Each request sets
+ * the definition Rust resolved for it before using it. Bounded; an evicted
+ * definition is set again by the next request that needs it.
+ */
+const definitions = new Map<string, EnginePlugin>();
+const MAX_DEFINITIONS = 1024;
+const define = (id: string, plugin: EnginePlugin) => {
+	definitions.delete(id);
+	definitions.set(id, plugin);
+	for (const oldest of definitions.keys()) {
+		if (definitions.size <= MAX_DEFINITIONS) break;
+		definitions.delete(oldest);
+	}
+};
+const openEngine = (migrate = false) =>
+	createPluginEngine({
+		state,
 		databaseUrl,
+		maxConnections,
 		encryptionKey,
 		credentialScope: "zuse-native-postgres-v1",
 		plugin: (id) => definitions.get(id),
 		fetch: globalThis.fetch,
+		requestScope: {
+			capture: () => budget.getStore(),
+			enter: (scope, work) =>
+				scope === undefined ? work() : budget.run(scope as Budget, work),
+		},
 		migrate,
 		allowLoopbackHttp: process.env.ZUSE_EXECUTOR_TEST_LOOPBACK === "1",
 	});
-}
+/** One engine, and so one connection pool, for the life of the process. */
+let shared: Promise<PluginEngine> | undefined;
+const sharedEngine = () => {
+	if (!shared) {
+		const opening = openEngine();
+		shared = opening;
+		opening.catch(() => {
+			if (shared === opening) shared = undefined;
+		});
+	}
+	return shared;
+};
 if (process.argv.includes("--migrate")) {
-	const engine = await openEngine(new Map(), true);
-	await engine.close();
-	await pool.end();
+	const migrated = await openEngine(true);
+	await migrated.close();
 	process.exit(0);
 }
 
@@ -263,55 +272,48 @@ async function serveMcp(input: any) {
 async function dispatch(input: any) {
 	if (input.operation === "mcp") return serveMcp(input);
 	if (input.operation === "ready") {
-		await pool.query("SELECT 1 FROM zuse_executor_state LIMIT 1");
-		const engine = await openEngine(new Map());
-		await engine.close();
+		await (await sharedEngine()).ready();
 		return { ready: true };
 	}
 	const owner = input.owner;
 	if (typeof owner !== "string" || !owner) throw new Error("Invalid owner");
 	// Registration uses a tenant-qualified opaque ID. The immutable definition
 	// fingerprint is included in the Rust connection record and checked there.
-	const definitions = new Map<string, EnginePlugin>();
 	const definition: EnginePlugin = input.definition;
 	if (definition) {
 		const id = createHash("sha256")
 			.update(JSON.stringify([owner, definition.id]))
 			.digest("hex");
-		definitions.set(id, { ...definition, id });
+		define(id, { ...definition, id });
 		input.plugin = id;
 	}
 	const ref: EngineConnection = input.ref;
-	const engine = await openEngine(definitions);
-	try {
-		switch (input.operation) {
-			case "prepare":
-				return await engine.prepare(
-					owner,
-					input.subject,
-					input.id,
-					input.plugin,
-					input.auth,
-				);
-			case "start":
-				return await engine.start(owner, ref, input.label, input.redirectUri);
-			case "submit":
-				return await engine.submit(owner, ref, input.label, input.value);
-			case "complete":
-				return await engine.complete(owner, ref, input.callbackUrl);
-			case "remove":
-				return await engine.remove(owner, input.id, ref).then(() => null);
-			case "list":
-				return await engine.list(owner, ref);
-			case "schema":
-				return await engine.schema(owner, ref, input.tool);
-			case "call":
-				return await engine.call(owner, ref, input.tool, input.arguments);
-			default:
-				throw new Error("Unknown operation");
-		}
-	} finally {
-		await engine.close();
+	const engine = await sharedEngine();
+	switch (input.operation) {
+		case "prepare":
+			return await engine.prepare(
+				owner,
+				input.subject,
+				input.id,
+				input.plugin,
+				input.auth,
+			);
+		case "start":
+			return await engine.start(owner, ref, input.label, input.redirectUri);
+		case "submit":
+			return await engine.submit(owner, ref, input.label, input.value);
+		case "complete":
+			return await engine.complete(owner, ref, input.callbackUrl);
+		case "remove":
+			return await engine.remove(owner, input.id, ref).then(() => null);
+		case "list":
+			return await engine.list(owner, ref);
+		case "schema":
+			return await engine.schema(owner, ref, input.tool);
+		case "call":
+			return await engine.call(owner, ref, input.tool, input.arguments);
+		default:
+			throw new Error("Unknown operation");
 	}
 }
 let active = 0;
@@ -340,6 +342,12 @@ const server = createServer(async (req, res) => {
 	res.once("close", () => {
 		if (!res.writableEnded) abort.abort();
 	});
+	const scope: Budget = {
+		bytes: 0,
+		requests: 0,
+		signal: abort.signal,
+		open: true,
+	};
 	try {
 		let bytes = 0;
 		const chunks: Buffer[] = [];
@@ -363,10 +371,7 @@ const server = createServer(async (req, res) => {
 		].includes(input.operation)
 			? input.operation
 			: "unknown";
-		const value = await budget.run(
-			{ bytes: 0, requests: 0, signal: abort.signal },
-			() => dispatch(input),
-		);
+		const value = await budget.run(scope, () => dispatch(input));
 		const output = JSON.stringify({ ok: true, value });
 		if (Buffer.byteLength(output) > MAX_BYTES)
 			throw new Error("Response too large");
@@ -399,6 +404,7 @@ const server = createServer(async (req, res) => {
 		res.writeHead(400, { "content-type": "application/json" });
 		res.end(JSON.stringify({ ok: false, code }));
 	} finally {
+		scope.open = false;
 		clearTimeout(timeout);
 		active--;
 	}
@@ -409,6 +415,6 @@ server.listen(0, "127.0.0.1", () => {
 for (const signal of ["SIGTERM", "SIGINT"] as const)
 	process.on(signal, async () => {
 		server.close();
-		await pool.end();
+		await shared?.then((current) => current.close()).catch(() => undefined);
 		process.exit(0);
 	});

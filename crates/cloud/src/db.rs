@@ -28,6 +28,29 @@ pub const MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
 /// An idle connection is pinged before reuse only after this long.
 const PING_AFTER_IDLE: Duration = Duration::from_secs(15);
 const MAX_CONFIGURED_CONNECTIONS: u32 = 64;
+/// Upper bound for `ZUSE_CLOUD_EXECUTOR_DB_MAX_CONNECTIONS`.
+const MAX_EXECUTOR_CONNECTIONS: u32 = 16;
+
+/// Connections the plugin executor (a child process of `serve`) may open:
+/// `ZUSE_CLOUD_EXECUTOR_DB_MAX_CONNECTIONS`, 1–16, default 1. The executor
+/// runs every SDK and state statement on one pool of this size.
+pub fn executor_connections(lookup: impl Fn(&str) -> Option<String>) -> anyhow::Result<u32> {
+    match lookup("ZUSE_CLOUD_EXECUTOR_DB_MAX_CONNECTIONS")
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+    {
+        None => Ok(1),
+        Some(raw) => raw
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (1..=MAX_EXECUTOR_CONNECTIONS).contains(n))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid ZUSE_CLOUD_EXECUTOR_DB_MAX_CONNECTIONS (expected 1..={MAX_EXECUTOR_CONNECTIONS})"
+                )
+            }),
+    }
+}
 
 /// The long-running process a pool belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +123,9 @@ pub struct Budget {
     pub connections: u32,
     /// Whether the process holds one extra dedicated `LISTEN` connection.
     pub listen: bool,
+    /// Connections of the plugin executor child process (`serve` with
+    /// plugins enabled), outside this process's pools.
+    pub executor: u32,
     pub acquire_timeout: Duration,
 }
 
@@ -138,6 +164,12 @@ impl Budget {
             Some("false") => false,
             Some(_) => anyhow::bail!("Invalid ZUSE_CLOUD_DB_LISTEN (expected true or false)"),
         };
+        let executor = match role {
+            Role::Serve if value("ZUSE_CLOUD_PLUGIN_ENCRYPTION_KEY").is_some() => {
+                executor_connections(&lookup)?
+            }
+            _ => 0,
+        };
         let acquire_timeout = match value("ZUSE_CLOUD_DB_ACQUIRE_TIMEOUT_MS") {
             None => Duration::from_secs(5),
             Some(raw) => raw
@@ -151,6 +183,7 @@ impl Budget {
             role,
             connections,
             listen,
+            executor,
             acquire_timeout,
         })
     }
@@ -177,6 +210,10 @@ impl Budget {
     /// Every connection this process can open, including `LISTEN`.
     pub fn total(&self) -> u32 {
         self.connections + u32::from(self.listen)
+    }
+    /// [`Self::total`] plus the plugin executor child's connections.
+    pub fn total_with_executor(&self) -> u32 {
+        self.total() + self.executor
     }
 }
 
@@ -211,6 +248,8 @@ impl ProcessDb {
             receipts = budget.receipt_connections(),
             listen = budget.listen,
             total = budget.total(),
+            executor = budget.executor,
+            total_with_executor = budget.total_with_executor(),
             acquire_timeout_ms = budget.acquire_timeout.as_millis() as u64,
             "Database connection budget"
         );
@@ -370,6 +409,7 @@ mod tests {
             [true, true, false, true]
         );
         assert_eq!(budgets.iter().map(Budget::total).sum::<u32>(), 15);
+        assert!(budgets.iter().all(|b| b.executor == 0));
         for b in &budgets {
             assert_eq!(b.acquire_timeout, Duration::from_secs(5));
             assert_eq!(
@@ -444,6 +484,26 @@ mod tests {
         );
         assert!(budget(Role::Worker, &[("ZUSE_CLOUD_DB_LISTEN", "yes")]).is_err());
         assert!(budget(Role::Worker, &[("ZUSE_CLOUD_DB_ACQUIRE_TIMEOUT_MS", "10")]).is_err());
+        // The plugin executor counts only for serve with plugins enabled.
+        let key = ("ZUSE_CLOUD_PLUGIN_ENCRYPTION_KEY", "configured");
+        let serve = budget(Role::Serve, &[key]).unwrap();
+        assert_eq!((serve.executor, serve.total_with_executor()), (1, 8));
+        let serve = budget(
+            Role::Serve,
+            &[key, ("ZUSE_CLOUD_EXECUTOR_DB_MAX_CONNECTIONS", "2")],
+        )
+        .unwrap();
+        assert_eq!((serve.executor, serve.total()), (2, 7));
+        assert_eq!(budget(Role::Worker, &[key]).unwrap().executor, 0);
+        for bad in ["0", "17", "x"] {
+            assert!(
+                budget(
+                    Role::Serve,
+                    &[key, ("ZUSE_CLOUD_EXECUTOR_DB_MAX_CONNECTIONS", bad)]
+                )
+                .is_err()
+            );
+        }
         // Empty values mean "use the default".
         assert_eq!(
             budget(Role::Worker, &[("ZUSE_CLOUD_DB_MAX_CONNECTIONS", "")])
