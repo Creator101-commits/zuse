@@ -133,10 +133,11 @@ impl RuntimeControl {
             [const { std::sync::OnceLock::new() }; 4];
         let slot = usize::from(project_cache) | usize::from(archive_retention) << 1;
         let sql = STATEMENTS[slot].get_or_init(|| statement(project_cache, archive_retention));
-        let rows: Vec<(String, Option<i64>)> = sqlx::query_as(sql)
-            .bind(&WORKER_JOB_KINDS[..])
-            .fetch_all(&self.pool)
-            .await?;
+        let mut query = sqlx::query_as::<_, (String, Option<i64>)>(sql).bind(&WORKER_JOB_KINDS[..]);
+        if archive_retention {
+            query = query.bind(self.recovery_policy());
+        }
+        let rows = query.fetch_all(&self.pool).await?;
         let mut due = WorkerDue::default();
         for (source, at) in rows {
             due.set(&source, at);

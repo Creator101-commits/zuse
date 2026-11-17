@@ -176,7 +176,7 @@ impl RuntimeControl {
     /// path restores a fresh computer from the verified backup (it takes the
     /// ownership lock a restore needs, which command admission does not). The
     /// message is then admitted as usual and waits for that computer.
-    async fn restore_archived_computer_for_task(
+    pub(in crate::runtime) async fn restore_archived_computer_for_task(
         &self,
         id: &str,
         access: &Access,
@@ -191,6 +191,16 @@ impl RuntimeControl {
         .await?;
         let Some(row) = row else { return Ok(()) };
         if !needs_archive_restore(&row) {
+            return Ok(());
+        }
+        // A replayed command returns its stored acceptance (or its conflict)
+        // from admission; only a new message may start a restore.
+        let replay: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM zuse_rust_task_command_actions WHERE workspace_id=$1 AND command_id=$2)")
+            .bind(id)
+            .bind(command)
+            .fetch_one(&self.pool)
+            .await?;
+        if replay {
             return Ok(());
         }
         let resume = format!("task-restore:{}", hash(command));

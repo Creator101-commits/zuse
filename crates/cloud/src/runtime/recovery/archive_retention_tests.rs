@@ -19,6 +19,9 @@ CREATE TABLE zuse_rust_computer_recreations(operation_id text PRIMARY KEY, phase
 CREATE TABLE cloud_machine_images(image_id text PRIMARY KEY, state text NOT NULL, next_attempt_at bigint NOT NULL, lease_expires_at bigint);
 ";
 const MIGRATION_0050: &str = include_str!("../../../migrations/0050_archive_machine_deletion.sql");
+const MIGRATION_0051: &str = include_str!("../../../migrations/0051_archive_machine_due_cap.sql");
+/// Both archive deletion migrations, as installed in production.
+const ARCHIVE_DUE: &[&str] = &[MIGRATION_0050, MIGRATION_0051];
 
 async fn scoped_pool(url: &str, schema: &str, max: u32) -> PgPool {
     let scope = schema.to_owned();
@@ -39,7 +42,7 @@ async fn scoped_pool(url: &str, schema: &str, max: u32) -> PgPool {
 }
 
 /// `ws-alice` is an archived, retained computer owned by the Rust backend.
-async fn fixture(with_0050: bool) -> (PgPool, String, String) {
+async fn fixture(archive_due: &[&str]) -> (PgPool, String, String) {
     let url = std::env::var("ZUSE_CLOUD_TEST_DATABASE_URL").unwrap();
     assert!(matches!(
         reqwest::Url::parse(&url).unwrap().host_str(),
@@ -55,14 +58,21 @@ async fn fixture(with_0050: bool) -> (PgPool, String, String) {
     for sql in [
         include_str!("../../../tests/fixtures/legacy-catalog.sql"),
         jobs::MIGRATION,
+        crate::gateway::MIGRATION,
+        super::super::mailbox::MIGRATION,
+        super::super::lifecycle::MIGRATION,
         MIGRATION,
+        super::super::restore::MIGRATION,
+        include_str!("../../../migrations/0012_provider_receipts.sql"),
+        include_str!("../../../migrations/0013_recovery_receipts.sql"),
+        include_str!("../../../migrations/0014_restore_receipts.sql"),
         NOTIFY_FUNCTION,
         DUE_SOURCES,
     ] {
         sqlx::raw_sql(sql).execute(&pool).await.unwrap();
     }
-    if with_0050 {
-        sqlx::raw_sql(MIGRATION_0050).execute(&pool).await.unwrap();
+    for sql in archive_due {
+        sqlx::raw_sql(sql).execute(&pool).await.unwrap();
     }
     sqlx::query("INSERT INTO zuse_rust_control_owners VALUES('workspace','ws-alice','rust',2,1)")
         .execute(&pool)
@@ -110,7 +120,7 @@ async fn archive(pool: &PgPool, at: i64) {
 #[tokio::test]
 #[ignore = "requires explicit isolated localhost PostgreSQL"]
 async fn archive_schedules_machine_deletion_and_unarchive_cancels_it() {
-    let (pool, schema, url) = fixture(true).await;
+    let (pool, schema, url) = fixture(ARCHIVE_DUE).await;
     let now = chrono::Utc::now().timestamp_millis();
     let listen = scoped_pool(&url, &schema, 1).await;
     let wakeups = Wakeups::listen_with(listen).await.unwrap();
@@ -191,7 +201,7 @@ async fn archive_schedules_machine_deletion_and_unarchive_cancels_it() {
 #[tokio::test]
 #[ignore = "requires explicit isolated localhost PostgreSQL"]
 async fn due_admission_backs_off_instead_of_waking_every_round() {
-    let (pool, _, _) = fixture(true).await;
+    let (pool, _, _) = fixture(ARCHIVE_DUE).await;
     let now = chrono::Utc::now().timestamp_millis();
     let archived_at = now - zuse_protocol::cloud::ARCHIVE_RETENTION_MS - 1000;
     archive(&pool, archived_at).await;
@@ -201,9 +211,10 @@ async fn due_admission_backs_off_instead_of_waking_every_round() {
         Some(now - 1000)
     );
     // This fixture cannot start a backup (no archive store): the attempt
-    // reports its error and the computer is looked at again in an hour.
+    // reports exactly that and the computer is looked at again in an hour.
+    enabled.recovery_ready().await.unwrap();
     let error = enabled.recovery_admit_due(now).await.unwrap_err();
-    assert!(error.code.starts_with("cloud_"), "{}", error.code);
+    assert_eq!(error.code, "cloud_archive_store_unavailable");
     let retry = due_at(&pool).await.unwrap();
     assert!(retry >= now + ARCHIVE_ADMISSION_RETRY_MS);
     let due = enabled.worker_due().await.unwrap();
@@ -250,7 +261,7 @@ async fn due_admission_backs_off_instead_of_waking_every_round() {
 #[tokio::test]
 #[ignore = "requires explicit isolated localhost PostgreSQL"]
 async fn before_migration_0050_the_original_retention_scan_still_admits() {
-    let (pool, _, _) = fixture(false).await;
+    let (pool, _, _) = fixture(&[]).await;
     let enabled = control(&pool, true);
     assert_eq!(enabled.worker_due().await.unwrap().archive_retention, None);
     let now = chrono::Utc::now().timestamp_millis();
@@ -262,7 +273,11 @@ async fn before_migration_0050_the_original_retention_scan_still_admits() {
         .unwrap();
     // The legacy scan reaches begin_recovery, which reports the fixture's
     // missing archive store.
-    assert!(enabled.recovery_admit_due(now).await.is_err());
+    enabled.recovery_ready().await.unwrap();
+    assert_eq!(
+        enabled.recovery_admit_due(now).await.unwrap_err().code,
+        "cloud_archive_store_unavailable"
+    );
     sqlx::query("UPDATE api_cloud_workspaces SET archive_requested_at=$1,archive_delete_at=$2 WHERE workspace_id='ws-alice'")
         .bind(now)
         .bind(now + zuse_protocol::cloud::ARCHIVE_RETENTION_MS)
@@ -270,4 +285,117 @@ async fn before_migration_0050_the_original_retention_scan_still_admits() {
         .await
         .unwrap();
     enabled.recovery_admit_due(now).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires explicit isolated localhost PostgreSQL"]
+async fn due_time_never_exceeds_seven_days_and_in_flight_archives_are_backfilled() {
+    // Installed with 0050 only, then an archive is still completing (its due
+    // time was never set) when 0051 arrives.
+    let (pool, _, _) = fixture(&[MIGRATION_0050]).await;
+    let now = chrono::Utc::now().timestamp_millis();
+    let ten_days = 10 * 24 * 60 * 60 * 1000;
+    sqlx::query("UPDATE api_cloud_workspaces SET state='archiving',desired_state='archived',archive_requested_at=$1,archive_delete_at=$2 WHERE workspace_id='ws-alice'")
+        .bind(now)
+        .bind(now + ten_days)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE api_cloud_workspaces SET machine_delete_due_at=NULL WHERE workspace_id='ws-alice'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(MIGRATION_0051).execute(&pool).await.unwrap();
+    let seven = now + zuse_protocol::cloud::ARCHIVE_RETENTION_MS;
+    assert_eq!(
+        due_at(&pool).await,
+        Some(seven),
+        "in-flight archive backfilled and capped"
+    );
+    // A previous-release API writes a ten-day deadline: still due at seven.
+    sqlx::query("UPDATE api_cloud_workspaces SET state='archived',archive_requested_at=$1,archive_delete_at=$2 WHERE workspace_id='ws-alice'")
+        .bind(now + 1)
+        .bind(now + 1 + ten_days)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(due_at(&pool).await, Some(seven + 1));
+    // An earlier stored deadline (legacy rows) is kept.
+    sqlx::query(
+        "UPDATE api_cloud_workspaces SET archive_delete_at=$1 WHERE workspace_id='ws-alice'",
+    )
+    .bind(now + 5)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(due_at(&pool).await, Some(now + 5));
+    // Unarchive still cancels.
+    sqlx::query("UPDATE api_cloud_workspaces SET state='paused',desired_state='paused',archive_requested_at=NULL,archive_delete_at=NULL WHERE workspace_id='ws-alice'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(due_at(&pool).await, None);
+}
+
+#[tokio::test]
+#[ignore = "requires explicit isolated localhost PostgreSQL"]
+async fn a_worker_never_selects_or_postpones_workspaces_outside_its_allow_list() {
+    let (pool, _, _) = fixture(ARCHIVE_DUE).await;
+    let now = chrono::Utc::now().timestamp_millis();
+    archive(
+        &pool,
+        now - zuse_protocol::cloud::ARCHIVE_RETENTION_MS - 1000,
+    )
+    .await;
+    let other = control(&pool, true).with_recovery_policy(true, vec!["ws-someone-else".into()]);
+    assert_eq!(other.worker_due().await.unwrap().archive_retention, None);
+    other.recovery_admit_due(now).await.unwrap();
+    assert_eq!(
+        due_at(&pool).await,
+        Some(now - 1000),
+        "not postponed by a worker that cannot admit it"
+    );
+    let listed = control(&pool, true).with_recovery_policy(true, vec!["ws-alice".into()]);
+    assert_eq!(
+        listed.worker_due().await.unwrap().archive_retention,
+        Some(now - 1000)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires explicit isolated localhost PostgreSQL"]
+async fn only_a_new_message_restores_a_retired_computer_never_a_replay() {
+    let (pool, _, _) = fixture(ARCHIVE_DUE).await;
+    // Unarchived after its computer was retired.
+    sqlx::query("UPDATE api_cloud_workspaces SET state='paused',desired_state='paused',provider_sandbox_id=NULL,archive_requested_at=NULL,archive_delete_at=NULL,request_config=jsonb_set(request_config,'{recoveryArchive}','{\"phase\":\"retired\"}') WHERE workspace_id='ws-alice'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE TABLE zuse_rust_task_command_actions(workspace_id text, command_id text, PRIMARY KEY(workspace_id, command_id)); INSERT INTO zuse_rust_task_command_actions VALUES('ws-alice','admitted-before')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let alice = crate::access::Access {
+        actor: crate::auth::Principal {
+            account_id: "user-alice".into(),
+        },
+        scope: crate::access::Scope::Personal,
+        owner_id: "user-alice".into(),
+        membership: None,
+    };
+    let c = control(&pool, true);
+    let now = chrono::Utc::now().timestamp_millis();
+    // A replay returns its stored acceptance from admission: no Resume.
+    c.restore_archived_computer_for_task("ws-alice", &alice, "admitted-before", now)
+        .await
+        .unwrap();
+    // A new message takes the lifecycle Resume path; this fixture's computer
+    // has no runtime enrollment, so Resume itself refuses (proof it ran).
+    let error = c
+        .restore_archived_computer_for_task("ws-alice", &alice, "new-message", now)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "cloud_lifecycle_runtime_update_required");
 }

@@ -49,9 +49,9 @@ class DatabaseBootstrapTest(unittest.TestCase):
         self.url = f"postgresql://zuse_test@127.0.0.1:{self.port}/{name}?sslmode=disable"
 
     def test_release_manifest_contains_command_and_recreation_after_admission(self):
-        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql","0044_worker_due_index.sql","0045_auth_wakeups.sql","0046_plugin_wakeups.sql","0048_executor_wakeups.sql","0049_change_hints.sql","0050_archive_machine_deletion.sql")
-        self.assertEqual(database.FILES[-14:],expected)
-        self.assertEqual(len(database.FILES),45)
+        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql","0044_worker_due_index.sql","0045_auth_wakeups.sql","0046_plugin_wakeups.sql","0048_executor_wakeups.sql","0049_change_hints.sql","0050_archive_machine_deletion.sql","0051_archive_machine_due_cap.sql")
+        self.assertEqual(database.FILES[-15:],expected)
+        self.assertEqual(len(database.FILES),46)
         self.assertIn("0026_task_command_admission.sql",database.FILES)
         self.assertNotIn("0022_computer_recreations.sql",database.FILES)
         self.assertNotIn("0022_recreation.sql",database.FILES)
@@ -114,6 +114,8 @@ UPDATE api_cloud_workspaces SET status_code='archived' WHERE workspace_id='w1';
 SELECT 'unrelated:'||machine_delete_due_at FROM api_cloud_workspaces;
 UPDATE api_cloud_workspaces SET state='paused',desired_state='paused',archive_requested_at=NULL,archive_delete_at=NULL WHERE workspace_id='w1';
 SELECT 'unarchived:'||coalesce(machine_delete_due_at::text,'none') FROM api_cloud_workspaces;
+UPDATE api_cloud_workspaces SET state='archived',desired_state='archived',archive_requested_at=200,archive_delete_at=864000200 WHERE workspace_id='w1';
+SELECT 'ten-day-writer:'||machine_delete_due_at||':'||archive_delete_at FROM api_cloud_workspaces;
 """
         result = subprocess.run(["psql", "-X", "--no-align", "--tuples-only", "-v", "ON_ERROR_STOP=1"], input=sql,
                                 env=database.connection_environment(self.url), capture_output=True, text=True, timeout=60)
@@ -123,9 +125,11 @@ SELECT 'unarchived:'||coalesce(machine_delete_due_at::text,'none') FROM api_clou
         self.assertIn("backoff:604900000", lines)
         self.assertIn("unrelated:604900000", lines)
         self.assertIn("unarchived:none", lines)
+        # A previous-release writer's ten-day deadline is capped at seven days.
+        self.assertIn("ten-day-writer:604800200:864000200", lines)
         wakes = [line for line in lines if 'payload "archive_retention"' in line]
-        # Archiving wakes the worker once; its own later back-off stays silent.
-        self.assertEqual(len(wakes), 1, result.stdout)
+        # Each archive wakes the worker once; its own back-off stays silent.
+        self.assertEqual(len(wakes), 2, result.stdout)
         self.assertLess(lines.index(wakes[0]), lines.index("archived:604800100"))
 
     def test_billing_and_machine_image_changes_append_one_hint_per_transaction(self):

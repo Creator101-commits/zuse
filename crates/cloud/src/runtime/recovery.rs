@@ -34,7 +34,9 @@ pub(super) const ARCHIVE_ADMISSION_RETRY_MS: i64 = 60 * 60 * 1000;
 /// Archived computers that are retained and due for backup-then-delete
 /// (`w` is `api_cloud_workspaces`). Shared by admission and the worker's
 /// due-time query so the due time is never earlier than claimable work.
-pub(super) const ARCHIVE_RETENTION_DUE: &str = "w.machine_delete_due_at IS NOT NULL AND w.state='archived' AND w.desired_state='archived' AND w.provider_sandbox_id IS NOT NULL AND EXISTS(SELECT 1 FROM zuse_rust_control_owners o WHERE o.resource_kind='workspace' AND o.resource_id=w.workspace_id AND o.backend='rust') AND NOT EXISTS(SELECT 1 FROM zuse_rust_recovery_operations r WHERE r.workspace_id=w.workspace_id AND r.phase NOT IN ('cancelled','restored'))";
+/// `$2` is this worker's recovery workspace allow-list (NULL: every
+/// workspace), so a worker never selects or postpones one it cannot admit.
+pub(super) const ARCHIVE_RETENTION_DUE: &str = "w.machine_delete_due_at IS NOT NULL AND w.state='archived' AND w.desired_state='archived' AND w.provider_sandbox_id IS NOT NULL AND ($2::text[] IS NULL OR w.workspace_id = ANY($2::text[])) AND EXISTS(SELECT 1 FROM zuse_rust_control_owners o WHERE o.resource_kind='workspace' AND o.resource_id=w.workspace_id AND o.backend='rust') AND NOT EXISTS(SELECT 1 FROM zuse_rust_recovery_operations r WHERE r.workspace_id=w.workspace_id AND r.phase NOT IN ('cancelled','restored'))";
 const ARCHIVE_DUE_COLUMN: &str = "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='api_cloud_workspaces' AND column_name='machine_delete_due_at')";
 fn failed() -> ApiError {
     ApiError::unavailable("cloud_archive_operation_failed")
@@ -239,6 +241,10 @@ impl RuntimeControl {
             return Err(ApiError::unavailable("cloud_recovery_schema_not_ready"));
         }
         Ok(())
+    }
+    /// The recovery allow-list as a query parameter; `None` admits every workspace.
+    pub(super) fn recovery_policy(&self) -> Option<Vec<String>> {
+        (!self.recovery_workspaces.is_empty()).then(|| self.recovery_workspaces.clone())
     }
     fn recovery_allowed(&self, id: &str) -> bool {
         self.recovery_enabled
@@ -766,6 +772,7 @@ impl RuntimeControl {
         });
         let ids: Vec<String> = sqlx::query_scalar(sql)
             .bind(now)
+            .bind(self.recovery_policy())
             .fetch_all(&self.pool)
             .await?;
         let mut failure = None;
