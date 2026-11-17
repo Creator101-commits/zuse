@@ -14344,7 +14344,7 @@ impl Shell {
                 )
             } else if let Some(favicon) = browser_favicon {
                 crate::surface_chrome::tab_icon_tile(
-                    gpui::img(favicon).size(px(12.0)).into_any_element(),
+                    gpui::img(favicon).size(px(13.0)).into_any_element(),
                     None,
                     is_active,
                     &theme,
@@ -14357,7 +14357,7 @@ impl Shell {
                     .unwrap_or((icons::PULL_REQUEST, theme.text_muted));
                 crate::surface_chrome::tab_icon_tile(
                     icons::icon(glyph)
-                        .size(px(12.0))
+                        .size(px(13.0))
                         .flex_none()
                         .text_color(color)
                         .into_any_element(),
@@ -14371,7 +14371,7 @@ impl Shell {
                         crate::file_icons::FileIconIdentity::file(file_identity_path.as_ref()),
                         theme.appearance,
                     )
-                    .size(px(12.0))
+                    .size(px(13.0))
                     .when(!is_active, |icon| icon.opacity(0.78))
                     .into_any_element(),
                     None,

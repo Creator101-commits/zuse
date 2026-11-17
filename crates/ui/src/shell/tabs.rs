@@ -727,22 +727,12 @@ impl Shell {
                 .flex()
                 .items_center()
                 .gap(px(crate::surface_chrome::TAB_CHIP_CONTENT_GAP))
-                .rounded(px(7.))
-                .border_1()
-                .bg(crate::surface_chrome::tab_chip_background(active, &theme))
-                .border_color(crate::surface_chrome::tab_chip_border(active, &theme))
                 .text_size(crate::typography::text_md())
                 .when(active, |d| {
                     d.text_color(active_tab_text_color(&theme))
                         .font_weight(gpui::FontWeight::MEDIUM)
                 })
-                .when(!active, |d| {
-                    d.text_color(theme.text_muted).hover(|d| {
-                        d.bg(crate::surface_chrome::tab_chip_hover_background(&theme))
-                            .border_color(theme.ink(0.025))
-                            .text_color(theme.text)
-                    })
-                })
+                .when(!active, |d| d.text_color(theme.text_muted))
         };
         // The × every closable tab shares: shown on the active tab, revealed
         // on hover for the rest.
@@ -811,7 +801,7 @@ impl Shell {
                             crate::file_icons::FileIconIdentity::file(path.as_ref()),
                             theme.appearance,
                         )
-                        .size(px(12.))
+                        .size(px(13.))
                         .flex_none()
                         .into_any_element(),
                         None,

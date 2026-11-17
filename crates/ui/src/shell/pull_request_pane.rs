@@ -751,22 +751,27 @@ impl Shell {
                 None => title.clone(),
             }
             .into();
-            let leading = if loading {
-                loaders::mini_glyph_spinner(
-                    format!("pull-request-tab-{ix}"),
-                    2.0,
-                    theme.loader_glyph(),
-                    cx.entity_id(),
-                    cx,
-                )
-                .into_any_element()
-            } else {
-                icons::icon(glyph)
-                    .size(px(14.0))
-                    .flex_none()
-                    .text_color(color)
+            let leading = crate::surface_chrome::tab_icon_tile(
+                if loading {
+                    loaders::mini_glyph_spinner(
+                        format!("pull-request-tab-{ix}"),
+                        2.0,
+                        theme.loader_glyph(),
+                        cx.entity_id(),
+                        cx,
+                    )
                     .into_any_element()
-            };
+                } else {
+                    icons::icon(glyph)
+                        .size(px(13.0))
+                        .flex_none()
+                        .text_color(color)
+                        .into_any_element()
+                },
+                None,
+                is_active,
+                &theme,
+            );
             let tooltip = label.clone();
             let ghost_title: SharedString = title.clone().into();
             let chip = crate::surface_chrome::tab_chip(

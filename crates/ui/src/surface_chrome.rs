@@ -119,19 +119,26 @@ pub(crate) fn workspace_tab(
     selected: bool,
     theme: &Theme,
 ) -> gpui::Stateful<Div> {
-    div()
-        .id(id)
-        .rounded(px(7.0))
+    paint_tab_surface(div().id(id), selected, theme)
+}
+
+/// Every workspace tab sits on a faint plate; the selected one is lifted with
+/// a soft vertical sheen, a lit top edge and a short drop shadow. Inactive
+/// plates carry no outline so the strip reads as one calm row.
+pub(crate) fn paint_tab_surface(
+    el: gpui::Stateful<Div>,
+    selected: bool,
+    theme: &Theme,
+) -> gpui::Stateful<Div> {
+    let hover = tab_chip_hover_background(theme);
+    let hover_text = theme.text;
+    el.rounded(px(7.0))
         .border_1()
         .bg(tab_chip_background(selected, theme))
         .border_color(tab_chip_border(selected, theme))
+        .shadow(tab_chip_shadow(selected, theme))
         .when(!selected, |tab| {
-            tab.hover(|style| {
-                style
-                    .bg(tab_chip_hover_background(theme))
-                    .border_color(theme.ink(0.025))
-                    .text_color(theme.text)
-            })
+            tab.hover(move |style| style.bg(hover).text_color(hover_text))
         })
 }
 
@@ -247,20 +254,57 @@ pub(crate) const TAB_CHIP_SLOT: f32 = TAB_CHIP_WIDTH + CONTROL_GAP;
 pub(crate) const TAB_STRIP_FADE: f32 = 36.0;
 
 pub(crate) fn tab_chip_background(selected: bool, theme: &Theme) -> gpui::Background {
-    let opacity = match (selected, theme.appearance.is_dark()) {
-        (true, true) => 0.11,
-        (true, false) => 0.08,
-        (false, _) => 0.035,
-    };
-    theme.ink(opacity).into()
+    let dark = theme.appearance.is_dark();
+    match (selected, dark) {
+        (true, true) => gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(theme.ink(0.135), 0.0),
+            gpui::linear_color_stop(theme.ink(0.085), 1.0),
+        ),
+        (true, false) => gpui::linear_gradient(
+            180.0,
+            gpui::linear_color_stop(gpui::white(), 0.0),
+            gpui::linear_color_stop(gpui::hsla(0.0, 0.0, 0.975, 1.0), 1.0),
+        ),
+        (false, true) => theme.ink(0.04).into(),
+        (false, false) => theme.ink(0.035).into(),
+    }
 }
 
 pub(crate) fn tab_chip_border(selected: bool, theme: &Theme) -> gpui::Hsla {
-    theme.ink(if selected { 0.035 } else { 0.012 })
+    match (selected, theme.appearance.is_dark()) {
+        (true, true) => theme.ink(0.06),
+        (true, false) => theme.ink(0.09),
+        (false, _) => gpui::transparent_black(),
+    }
+}
+
+pub(crate) fn tab_chip_shadow(selected: bool, theme: &Theme) -> Vec<gpui::BoxShadow> {
+    if !selected {
+        return Vec::new();
+    }
+    if theme.appearance.is_dark() {
+        vec![
+            gpui::BoxShadow::new(px(0.0), px(1.0), gpui::white().opacity(0.07)).inset(),
+            gpui::BoxShadow::new(px(0.0), px(1.0), gpui::black().opacity(0.35))
+                .blur_radius(px(2.0)),
+        ]
+    } else {
+        vec![
+            gpui::BoxShadow::new(px(0.0), px(1.0), gpui::black().opacity(0.06))
+                .blur_radius(px(2.0)),
+            gpui::BoxShadow::new(px(0.0), px(2.0), gpui::black().opacity(0.03))
+                .blur_radius(px(6.0)),
+        ]
+    }
 }
 
 pub(crate) fn tab_chip_hover_background(theme: &Theme) -> gpui::Hsla {
-    theme.ink(0.065)
+    theme.ink(if theme.appearance.is_dark() {
+        0.07
+    } else {
+        0.06
+    })
 }
 
 /// One pane tab chip, as drawn in the titlebar band above a side pane.
@@ -311,7 +355,7 @@ pub(crate) fn tab_chip(
             })
             .focus_visible(|style| style.border_2().border_color(theme.accent))
     } else {
-        tab((id, ix), active, theme)
+        paint_tab_surface(tab((id, ix), active, theme), active, theme)
     };
     frame
         .debug_selector(move || selector.to_string())
@@ -320,18 +364,6 @@ pub(crate) fn tab_chip(
         .w(px(TAB_CHIP_WIDTH))
         .flex_none()
         .p(px(TAB_CHIP_PADDING))
-        .rounded(px(7.0))
-        .border_1()
-        .bg(tab_chip_background(active, theme))
-        .border_color(tab_chip_border(active, theme))
-        .when(!active, |chip| {
-            chip.hover(|style| {
-                style
-                    .bg(tab_chip_hover_background(theme))
-                    .border_color(theme.ink(0.025))
-                    .text_color(theme.text)
-            })
-        })
         .focus_visible(|style| style.border_1().border_color(theme.accent))
         .flex()
         .flex_row()
@@ -426,10 +458,13 @@ pub(crate) fn tab_chip(
 
 pub(crate) const TAB_ICON_WIDTH: f32 = 24.0;
 pub(crate) const TAB_ICON_HEIGHT: f32 = 20.0;
-const TAB_GLYPH_SIZE: f32 = 12.0;
+const TAB_GLYPH_SIZE: f32 = 13.0;
 
 /// A compact raised tile. Content keeps its own paint, including multicolor
 /// file icons, favicons and animated loading indicators.
+///
+/// Tinted tiles get a glossy sheen (lighter top, deeper bottom) with a lit top
+/// edge; neutral tiles are charcoal in dark mode and porcelain in light mode.
 pub(crate) fn tab_icon_tile(
     content: gpui::AnyElement,
     tint: Option<gpui::Hsla>,
@@ -439,44 +474,47 @@ pub(crate) fn tab_icon_tile(
     let dark = theme.appearance.is_dark();
     let white = gpui::white();
     let black = gpui::black();
-    let base = tint.unwrap_or_else(|| {
-        theme
-            .surface_raised
-            .blend(theme.ink(if dark { 0.11 } else { 0.04 }))
-    });
-    let top = if tint.is_some() {
-        base
-    } else {
-        base.blend(white.opacity(if active { 0.10 } else { 0.06 }))
+    let (top, bottom, rim, highlight) = match tint {
+        Some(tint) => (
+            tint.blend(white.opacity(0.16)),
+            tint.blend(black.opacity(0.06)),
+            tint.blend(black.opacity(if dark { 0.18 } else { 0.14 })),
+            white.opacity(0.35),
+        ),
+        None if dark => {
+            let base = gpui::hsla(240.0 / 360.0, 0.03, 0.22, 1.0);
+            (
+                base.blend(white.opacity(if active { 0.10 } else { 0.07 })),
+                base.blend(black.opacity(0.10)),
+                black.opacity(0.38),
+                white.opacity(0.12),
+            )
+        }
+        None => (
+            white,
+            gpui::hsla(240.0 / 360.0, 0.08, 0.95, 1.0),
+            black.opacity(0.11),
+            white,
+        ),
     };
-    let bottom = base.blend(black.opacity(if tint.is_some() { 0.08 } else { 0.04 }));
     div()
         .w(px(TAB_ICON_WIDTH))
         .h(px(TAB_ICON_HEIGHT))
         .flex_none()
-        .rounded(px(4.0))
+        .rounded(px(5.0))
         .border_1()
-        .border_color(if tint.is_some() || dark {
-            white.opacity(if active { 0.18 } else { 0.12 })
-        } else {
-            theme.border
-        })
+        .border_color(rim)
         .bg(gpui::linear_gradient(
             180.0,
             gpui::linear_color_stop(top, 0.0),
             gpui::linear_color_stop(bottom, 1.0),
         ))
         .shadow(vec![
+            gpui::BoxShadow::new(px(0.0), px(1.0), highlight).inset(),
             gpui::BoxShadow::new(
                 px(0.0),
                 px(1.0),
-                white.opacity(if dark { 0.13 } else { 0.55 }),
-            )
-            .inset(),
-            gpui::BoxShadow::new(
-                px(0.0),
-                px(1.0),
-                black.opacity(if dark { 0.24 } else { 0.10 }),
+                black.opacity(if dark { 0.30 } else { 0.08 }),
             )
             .blur_radius(px(2.0)),
         ])
@@ -507,8 +545,8 @@ pub(crate) fn tab_provider_icon(
         }
     };
     let luminance = 0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b);
-    // The tint is the gradient's brightest stop. White keeps at least 3:1
-    // contrast up to 0.30 luminance; paler fills use a dark mark.
+    // White keeps at least 3:1 contrast against the tint up to 0.30
+    // luminance; paler fills use a dark mark.
     let foreground = if luminance > 0.30 {
         gpui::black()
     } else {
