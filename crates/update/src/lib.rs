@@ -46,6 +46,7 @@ mod linux;
 mod release;
 pub use release::{ReleaseChannel, initialize_channel, load_channel, save_channel};
 
+pub mod cli;
 pub mod control;
 #[cfg(windows)]
 pub mod windows;

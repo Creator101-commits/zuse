@@ -4,9 +4,11 @@
 //!
 //! Every time here is conservative: it may be earlier than the stage's real
 //! claim predicate (the stage then finds nothing and the worker backs off to
-//! its busy floor), but it is never later. Work whose readiness depends on
-//! time-based rules that are not expressed here (retirement sweeps, blocked
-//! requests, recovery admission) runs on the worker's idle timer instead.
+//! its busy floor), but it is never later. In-flight attempts are due at
+//! their lease expiry, so a crashed attempt is retried exactly when its lease
+//! ends. Work whose readiness is condition-based rather than timed
+//! (retirement sweeps, recovery admission after days of archive retention)
+//! runs on the worker's maintenance and idle safety timers instead.
 use super::{RuntimeControl, allocation, deletion, lifecycle, recovery, repair, restore};
 use crate::error::ApiError;
 
@@ -80,8 +82,9 @@ const TASK_DRAINS: &str =
     "SELECT 'task_drain', min(next_attempt_at)::bigint FROM zuse_rust_task_command_drains";
 const RECREATIONS: &str = "SELECT 'recreation', min(due_at)::bigint FROM zuse_rust_computer_recreations WHERE phase NOT IN ('ready','cancelled','attention-required')";
 const USER_IMAGES: &str = "SELECT 'user_images', min(GREATEST(next_attempt_at, COALESCE(lease_expires_at, next_attempt_at)))::bigint FROM cloud_machine_images WHERE state IN ('queued','building','cleaning','retiring')";
-/// Optional migration 0028. Blocked requests wait for the idle timer.
-const PROJECT_CACHE: &str = "SELECT 'project_cache', LEAST((SELECT min(GREATEST(next_attempt_at, COALESCE(lease_expires_at, next_attempt_at))) FROM zuse_rust_project_preparation_requests WHERE state IN ('queued','resolving')), (SELECT min(GREATEST(next_attempt_at, COALESCE(lease_expires_at, next_attempt_at))) FROM zuse_rust_project_cache_operations WHERE state IN ('queued','running','uncertain','cleaning')))::bigint";
+/// Optional migration 0028. Blocked requests retry at `next_attempt_at`;
+/// ones blocked because preparation is disabled wait for maintenance.
+const PROJECT_CACHE: &str = "SELECT 'project_cache', LEAST((SELECT min(GREATEST(next_attempt_at, COALESCE(lease_expires_at, next_attempt_at))) FROM zuse_rust_project_preparation_requests WHERE state IN ('queued','resolving') OR (state = 'blocked' AND last_error_code IS DISTINCT FROM 'project_preparation_disabled')), (SELECT min(GREATEST(next_attempt_at, COALESCE(lease_expires_at, next_attempt_at))) FROM zuse_rust_project_cache_operations WHERE state IN ('queued','running','uncertain','cleaning')))::bigint";
 
 const WORKER_JOB_KINDS: [&str; 6] = [
     allocation::JOB_KIND,

@@ -72,6 +72,7 @@ those pools; none opens its own.
 | Process | Pool connections | `LISTEN` connection | Total |
 | --- | ---: | ---: | ---: |
 | `serve` | 6 (3 shared, 2 read-only catalog, 1 billing receipts) | 1 | 7 |
+| plugin executor (child of `serve`, plugins enabled) | 1 | 0 | 1 |
 | `worker` | 3 | 1 | 4 |
 | `billing-worker` | 2 (1 control, 1 delivery receipts) | 0 | 2 |
 | `auth-worker` | 1 | 1 | 2 |
@@ -86,6 +87,10 @@ Settings (per process environment):
 - `ZUSE_CLOUD_DB_MAX_CONNECTIONS`: pool connections for this process, replacing
   the default above (1–64; `serve` needs at least 3, `billing-worker` at least
   2). `serve` with Slack enabled also needs at least 2 shared connections.
+- `ZUSE_CLOUD_EXECUTOR_DB_MAX_CONNECTIONS` (1–16, default 1): connections
+  of the plugin executor that `serve` starts when plugins are enabled. It
+  runs every SDK and sealed-state statement on one long-lived pool of this
+  size; `serve` logs it as `executor` beside its own budget.
 - `ZUSE_CLOUD_DB_LISTEN=false`: drop the `LISTEN` connection. Workers then rely
   on due-time scheduling and a shorter idle poll.
 - `ZUSE_CLOUD_DB_ACQUIRE_TIMEOUT_MS` (default 5000): how long a request waits
@@ -190,3 +195,25 @@ is not tracked live. Stopping machines before the cap is reached would need:
   and to reconcile any difference once usage settles.
 
 That would be new user-visible behavior, so it is not implemented.
+
+Migration `0046_plugin_wakeups.sql` adds triggers that send `NOTIFY plugins`
+on the same channel whenever a plugin connection or custom server row is
+inserted, updated or deleted. `serve` keeps each workspace's connections and
+custom servers in memory so a plugin tool call reads none of them, and drops
+those views on that notification, on a listener reconnect, and synchronously
+for its own writes; views also expire after 60 s. Unlike worker wakeups, this
+cache depends on delivery, so `serve` only uses it while its `LISTEN`
+connection is up and both triggers exist (`plugin-migrate` installs them after
+creating the plugin tables). With `ZUSE_CLOUD_DB_LISTEN=false` every tool call
+reads the rows, as before.
+
+Migration `0048_executor_wakeups.sql` adds the same trigger to every
+`executor_*` table (the plugin SDK's). The executor keeps the rows a tool call
+reads (app and deployment, profile, accounts, OAuth grants ready for use) in
+memory, so a steady-state tool call runs no statements. The executor opens no
+`LISTEN` connection: `serve` sends a change epoch with every executor request,
+bumped on each `plugins` notification and listener reconnect, and a new epoch
+drops the executor's rows. The executor keeps rows only while `serve` sends an
+epoch and every `executor_*` table has the trigger (checked once at start);
+otherwise it reads them per call. Its own writes drop everything, claimed
+OAuth grants are always re-read, and non-deployment rows expire after 60 s.

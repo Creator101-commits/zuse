@@ -1312,17 +1312,24 @@ impl RuntimeControl {
         fence: (i64, i64),
     ) -> Result<(), ApiError> {
         self.scope_access(id, None, true).await?;
-        let mut tx = self.pool.begin().await?;
-        let (row, generation, epoch) = locked_workspace(&mut tx, id).await?;
-        if blocked(&row) || row["desired_state"] != "ready" || (generation, epoch) != fence {
+        // One autocommit statement. Shared locks on the ownership and workspace
+        // rows serialize renewal with fence changes (which update those rows and
+        // delete the lease) exactly like the former exclusive transaction, while
+        // concurrent renewals no longer exclude each other.
+        let (valid, leased): (bool, bool) = sqlx::query_as(GATEWAY_LEASE_SQL)
+            .bind(id)
+            .bind(token)
+            .bind(GATEWAY_LEASE_MS)
+            .bind(fence.0)
+            .bind(fence.1)
+            .fetch_one(&self.pool)
+            .await?;
+        if !valid {
             return Err(ApiError::unauthorized("workspace_runtime_fenced"));
         }
-        let leased:Option<String>=sqlx::query_scalar("INSERT INTO zuse_rust_gateway_leases (workspace_id,owner_token,expires_at) VALUES ($1,$2,(extract(epoch from clock_timestamp())*1000)::bigint+$3) ON CONFLICT (workspace_id) DO UPDATE SET owner_token=EXCLUDED.owner_token,expires_at=EXCLUDED.expires_at WHERE zuse_rust_gateway_leases.expires_at<=(extract(epoch from clock_timestamp())*1000)::bigint OR zuse_rust_gateway_leases.owner_token=$2 RETURNING owner_token")
-            .bind(id).bind(token).bind(GATEWAY_LEASE_MS).fetch_optional(&mut *tx).await?;
-        if leased.is_none() {
+        if !leased {
             return Err(ApiError::unavailable("workspace_gateway_owned_elsewhere"));
         }
-        tx.commit().await?;
         Ok(())
     }
     pub async fn release_gateway(&self, id: &str, token: &str) {
@@ -1474,6 +1481,23 @@ enum WorkspaceLock {
     Command,
     Artifact,
 }
+/// Gateway lease renewal: the fence and state checks of `locked_workspace` and
+/// `blocked`, then the lease upsert, in one statement. A JSON generation or
+/// epoch that is not an integer reads as absent, as `Value::as_i64` does.
+const GATEWAY_LEASE_SQL: &str = "WITH owner AS MATERIALIZED (SELECT generation FROM zuse_rust_control_owners WHERE resource_kind='workspace' AND resource_id=$1 AND backend='rust' FOR SHARE), \
+workspace AS MATERIALIZED (SELECT w.state, w.desired_state, w.request_config, \
+  CASE WHEN jsonb_typeof(w.request_config->'runtimeGeneration')='number' AND (w.request_config->>'runtimeGeneration') ~ '^-?[0-9]{1,18}$' THEN (w.request_config->>'runtimeGeneration')::bigint ELSE 1 END AS generation \
+  FROM api_cloud_workspaces w WHERE w.workspace_id=$1 AND EXISTS(SELECT 1 FROM owner) FOR SHARE OF w), \
+fenced AS MATERIALIZED (SELECT w.*, CASE WHEN jsonb_typeof(w.request_config->'gatewayEpoch')='number' AND (w.request_config->>'gatewayEpoch') ~ '^-?[0-9]{1,18}$' THEN (w.request_config->>'gatewayEpoch')::bigint ELSE w.generation END AS epoch FROM workspace w), \
+valid AS MATERIALIZED (SELECT 1 FROM owner o, fenced w WHERE o.generation=w.generation AND w.generation>=1 AND w.epoch>=1 AND w.generation=$4 AND w.epoch=$5 \
+  AND w.desired_state='ready' AND COALESCE(w.state,'') NOT IN ('archived','archiving','deleting','deleted') \
+  AND COALESCE(w.request_config#>>'{cloudMailboxLifecyclePending,action}','')<>'delete' \
+  AND COALESCE(w.request_config#>>'{cloudMailboxLifecycleDelivered,action}','')<>'delete'), \
+lease AS (INSERT INTO zuse_rust_gateway_leases (workspace_id,owner_token,expires_at) SELECT $1,$2,(extract(epoch from clock_timestamp())*1000)::bigint+$3 FROM valid \
+  ON CONFLICT (workspace_id) DO UPDATE SET owner_token=EXCLUDED.owner_token,expires_at=EXCLUDED.expires_at \
+  WHERE zuse_rust_gateway_leases.expires_at<=(extract(epoch from clock_timestamp())*1000)::bigint OR zuse_rust_gateway_leases.owner_token=$2 RETURNING 1) \
+SELECT EXISTS(SELECT 1 FROM valid), EXISTS(SELECT 1 FROM lease)";
+
 async fn locked_workspace(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,

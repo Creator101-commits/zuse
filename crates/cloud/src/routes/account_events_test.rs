@@ -375,7 +375,7 @@ async fn billing_and_machine_image_hints_reach_only_sockets_that_opted_in() {
         crate::events::store::MIGRATION,
         include_str!("../../migrations/0031_machine_images.sql"),
         include_str!("../../migrations/0037_user_images.sql"),
-        include_str!("../../migrations/0044_change_hints.sql"),
+        include_str!("../../migrations/0049_change_hints.sql"),
     ] {
         sqlx::raw_sql(migration).execute(&pool).await.unwrap();
     }

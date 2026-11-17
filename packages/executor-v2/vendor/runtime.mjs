@@ -18803,6 +18803,13 @@ var toOption = (self2) => (input) => {
 };
 
 // node_modules/effect/dist/Scheduler.js
+var Scheduler_exports = {};
+__export(Scheduler_exports, {
+  MaxOpsBeforeYield: () => MaxOpsBeforeYield,
+  MixedScheduler: () => MixedScheduler,
+  PreventSchedulerYield: () => PreventSchedulerYield,
+  Scheduler: () => Scheduler
+});
 var Scheduler = /* @__PURE__ */ Reference("effect/Scheduler", {
   fiberCached: true,
   defaultValue: () => new MixedScheduler()
@@ -98627,22 +98634,272 @@ var oauthSetupError = (error2) => {
     );
   return error2;
 };
-async function createPluginEngine(options4) {
-  const sql = layer3({
-    url: Redacted_exports.make(options4.databaseUrl),
-    maxConnections: 2,
-    connectTimeout: "5 seconds"
-  });
-  const managed = ManagedRuntime_exports.make(
-    Layer_exports.mergeAll(
-      sql,
-      layer,
-      FetchHttpClient_exports.layer.pipe(
-        Layer_exports.provide(Layer_exports.succeed(FetchHttpClient_exports.Fetch, options4.fetch))
+var RequestScope = Context_exports.Reference("zuse/executor/RequestScope", {
+  defaultValue: () => void 0
+});
+var STATE_CACHE_ENTRIES = 1024;
+var STATE_CACHE_CHARS = 8 * 1024 * 1024;
+var cacheable = (id2) => id2.startsWith("v2:blob:") || id2.startsWith("v2:source:");
+var encodeState = (value6) => JSON.stringify(
+  value6,
+  (_key, item) => item instanceof Uint8Array ? { __executorBytes: Buffer.from(item).toString("base64") } : item
+);
+var decodeState = (text4) => JSON.parse(
+  text4,
+  (_key, value6) => value6 && typeof value6 === "object" && Object.keys(value6).length === 1 && typeof value6.__executorBytes === "string" ? new Uint8Array(Buffer.from(value6.__executorBytes, "base64")) : value6
+);
+var sealedState = (sql, codec) => {
+  const kept = /* @__PURE__ */ new Map();
+  let keptChars = 0;
+  let writes2 = 0;
+  const forget = (id2) => {
+    const text4 = kept.get(id2);
+    if (text4 === void 0) return;
+    kept.delete(id2);
+    keptChars -= text4.length;
+  };
+  const keep = (id2, text4) => {
+    forget(id2);
+    if (!cacheable(id2) || text4.length > STATE_CACHE_CHARS / 8) return;
+    kept.set(id2, text4);
+    keptChars += text4.length;
+    for (const oldest of kept.keys()) {
+      if (kept.size <= STATE_CACHE_ENTRIES && keptChars <= STATE_CACHE_CHARS)
+        break;
+      forget(oldest);
+    }
+  };
+  const inTransaction = Effect_exports.map(
+    Effect_exports.serviceOption(sql.transactionService),
+    Option_exports.isSome
+  );
+  return {
+    get: (id2) => Effect_exports.gen(function* () {
+      const transaction2 = yield* inTransaction;
+      const hit = transaction2 ? void 0 : kept.get(id2);
+      if (hit !== void 0) {
+        kept.delete(id2);
+        kept.set(id2, hit);
+        return decodeState(hit);
+      }
+      const before = writes2;
+      const rows = yield* sql`SELECT sealed FROM zuse_executor_state WHERE id=${id2}`;
+      const row = rows[0];
+      if (row === void 0) return void 0;
+      const text4 = codec.open(id2, row.sealed);
+      if (!transaction2 && before === writes2) keep(id2, text4);
+      return decodeState(text4);
+    }),
+    put: (id2, value6) => Effect_exports.gen(function* () {
+      const text4 = encodeState(value6);
+      const transaction2 = yield* inTransaction;
+      if (!transaction2 && kept.get(id2) === text4) return;
+      writes2++;
+      forget(id2);
+      const sealed = codec.seal(id2, text4);
+      yield* sql`INSERT INTO zuse_executor_state(id,sealed) VALUES(${id2},${sealed}) ON CONFLICT(id) DO UPDATE SET sealed=excluded.sealed`;
+      if (!transaction2) {
+        writes2++;
+        keep(id2, text4);
+      }
+    }),
+    delete: (id2) => Effect_exports.gen(function* () {
+      writes2++;
+      forget(id2);
+      yield* sql`DELETE FROM zuse_executor_state WHERE id=${id2}`;
+      writes2++;
+    })
+  };
+};
+var CACHED_TABLES = /* @__PURE__ */ new Set([
+  "apps",
+  "deployments",
+  "profiles",
+  "accounts",
+  "oauthGrants"
+]);
+var ROW_CACHE_ENTRIES = 2048;
+var ROW_TTL_MS = 6e4;
+var TRACE = /* @__PURE__ */ Symbol("trace");
+var Unkeyable = class extends Error {
+};
+var optionKey = (value6, depth = 0) => {
+  if (depth > 12) throw new Unkeyable();
+  if (value6 === null || typeof value6 === "string" || typeof value6 === "boolean")
+    return value6;
+  if (typeof value6 === "number") return Number.isFinite(value6) ? value6 : String(value6);
+  if (value6 === void 0) return { u: 1 };
+  if (value6 instanceof Date) return { d: value6.getTime() };
+  if (typeof value6 === "function") {
+    const traced = value6[TRACE];
+    if (traced !== void 0) return traced;
+    const node2 = (trace2) => new Proxy(() => void 0, {
+      get: (_target, property) => property === TRACE ? trace2 : typeof property === "symbol" ? void 0 : node2({ get: property, of: trace2 }),
+      apply: (_target, _self, args2) => node2({
+        call: trace2,
+        args: args2.map((arg) => optionKey(arg, depth + 1))
+      })
+    });
+    return {
+      fn: optionKey(
+        value6(node2({ arg: depth })),
+        depth + 1
       )
+    };
+  }
+  if (Array.isArray(value6)) return value6.map((item) => optionKey(item, depth + 1));
+  if (typeof value6 === "object" && Object.getPrototypeOf(value6) === Object.prototype)
+    return Object.fromEntries(
+      Object.entries(value6).map(([key2, item]) => [key2, optionKey(item, depth + 1)])
+    );
+  throw new Unkeyable();
+};
+var rowCache = (sql) => {
+  const rows = /* @__PURE__ */ new Map();
+  let generation = 0;
+  let installed = false;
+  let epoch;
+  const clear4 = () => {
+    generation++;
+    rows.clear();
+  };
+  const inTransaction = Effect_exports.map(
+    Effect_exports.serviceOption(sql.transactionService),
+    Option_exports.isSome
+  );
+  const keepable = (table3, result8) => table3 !== "oauthGrants" || typeof result8 === "object" && result8 !== null && "status" in result8 && typeof result8.status === "string" && result8.status.startsWith("ready_");
+  const read = (method, table3, work) => (options4) => Effect_exports.gen(function* () {
+    if (!installed || epoch === void 0 || !CACHED_TABLES.has(table3) || (yield* inTransaction))
+      return yield* work;
+    let key2;
+    try {
+      key2 = JSON.stringify([method, table3, optionKey(options4)]);
+    } catch {
+      return yield* work;
+    }
+    const hit = rows.get(key2);
+    rows.delete(key2);
+    if (hit !== void 0 && (table3 === "deployments" || Date.now() - hit.at < ROW_TTL_MS)) {
+      rows.set(key2, hit);
+      return structuredClone(hit.value);
+    }
+    const before = generation;
+    const result8 = yield* work;
+    if (before === generation && keepable(table3, result8)) {
+      try {
+        rows.set(key2, { at: Date.now(), value: structuredClone(result8) });
+      } catch {
+        return result8;
+      }
+      for (const oldest of rows.keys()) {
+        if (rows.size <= ROW_CACHE_ENTRIES) break;
+        rows.delete(oldest);
+      }
+    }
+    return result8;
+  });
+  const writing = (effect2) => Effect_exports.suspend(() => {
+    clear4();
+    return effect2;
+  }).pipe(Effect_exports.ensuring(Effect_exports.sync(clear4)));
+  return {
+    /** Checks once that every executor table notifies on change. */
+    verify: Effect_exports.gen(function* () {
+      const rows2 = yield* sql`SELECT count(*) AS tables, count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid=c.oid AND g.tgname='zuse_cloud_executor_wake' AND g.tgenabled<>'D')) AS missing FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relkind='r' AND left(c.relname,9)='executor_'`;
+      const found = rows2[0];
+      installed = found !== void 0 && Number(found.tables) > 0 && Number(found.missing) === 0;
+      if (!installed)
+        console.error(
+          JSON.stringify({ event: "executor_row_cache_disabled", reason: "triggers_missing" })
+        );
+    }),
+    /**
+     * Serve's change epoch for this request: `null` while serve is not
+     * listening (read everything); a newer epoch drops every kept row.
+     */
+    observe(next2) {
+      if (next2 === null) {
+        if (epoch !== void 0) clear4();
+        epoch = void 0;
+      } else if (epoch === void 0 || next2 > epoch) {
+        clear4();
+        epoch = next2;
+      }
+    },
+    wrap(source) {
+      const orm = source;
+      const wrapped = { ...orm };
+      for (const method of ["findFirst", "findMany", "count"])
+        wrapped[method] = (table3, options4) => read(
+          method,
+          table3,
+          orm[method](
+            table3,
+            options4
+          )
+        )(options4);
+      for (const method of [
+        "create",
+        "createMany",
+        "updateMany",
+        "deleteMany",
+        "upsert"
+      ])
+        wrapped[method] = (...args2) => writing(
+          orm[method](
+            ...args2
+          )
+        );
+      wrapped.transaction = (effect2) => writing(
+        orm.transaction(
+          effect2
+        )
+      );
+      return wrapped;
+    }
+  };
+};
+async function createPluginEngine(options4) {
+  const pool = layer3({
+    url: Redacted_exports.make(options4.databaseUrl),
+    maxConnections: Math.max(1, Math.floor(options4.maxConnections ?? 1)),
+    idleTimeout: "60 seconds",
+    connectionTTL: "30 minutes",
+    connectTimeout: "5 seconds",
+    applicationName: "zuse-cloud-executor"
+  });
+  const services = Layer_exports.mergeAll(
+    pool,
+    layer,
+    FetchHttpClient_exports.layer.pipe(
+      Layer_exports.provide(Layer_exports.succeed(FetchHttpClient_exports.Fetch, options4.fetch))
     )
   );
-  const run4 = managed.runPromise;
+  const managed = ManagedRuntime_exports.make(services);
+  const run4 = (effect2) => {
+    const scope3 = options4.requestScope.capture();
+    const enter = (work) => options4.requestScope.enter(scope3, work);
+    const base = new Scheduler_exports.MixedScheduler();
+    const pinned = {
+      executionMode: base.executionMode,
+      shouldYield: (fiber3) => base.shouldYield(fiber3) || scope3 !== void 0 && options4.requestScope.capture() !== scope3,
+      makeDispatcher: () => {
+        const dispatcher = base.makeDispatcher();
+        return {
+          scheduleTask: (task, priority) => dispatcher.scheduleTask(() => enter(task), priority),
+          flush: () => dispatcher.flush()
+        };
+      }
+    };
+    const fetch3 = ((input, init2) => enter(() => options4.fetch(input, init2)));
+    return managed.runPromise(
+      effect2.pipe(
+        Effect_exports.provideService(RequestScope, scope3),
+        Effect_exports.provideService(FetchHttpClient_exports.Fetch, fetch3),
+        Effect_exports.provideService(Scheduler_exports.Scheduler, pinned)
+      )
+    );
+  };
   const io = (work) => Effect_exports.tryPromise({ try: work, catch: () => new RuntimeProtocolFailed() });
   const entries3 = /* @__PURE__ */ new Map();
   const builds = /* @__PURE__ */ new Map();
@@ -98654,13 +98911,27 @@ async function createPluginEngine(options4) {
   const headerOf = (plugin) => plugin.header ?? "Authorization";
   const sourceOf = (plugin, auth2) => `export default ${JSON.stringify({ protocol: 1, id: plugin.id, name: plugin.name, endpoint: plugin.endpoint, auth: auth2, scopes: plugin.scopes ?? [], ...plugin.oauthDiscovery ? { oauthDiscovery: plugin.oauthDiscovery } : {}, ...auth2 === "header" ? { header: headerOf(plugin) } : {} })};
 `;
+  const MAX_ENTRIES = 512;
+  const bounded3 = (map16) => {
+    for (const oldest of map16.keys()) {
+      if (map16.size <= MAX_ENTRIES) break;
+      map16.delete(oldest);
+    }
+  };
   const register = (pluginId, auth2) => {
-    const key2 = JSON.stringify([pluginId, auth2]);
-    const existing = entries3.get(key2);
-    if (existing) return existing;
+    const source = sourceOf(definition(pluginId), auth2);
+    const existing = entries3.get(source);
+    if (existing)
+      return existing.then((entry2) => {
+        if (builds.get(entry2.build) !== entry2) {
+          builds.delete(entry2.build);
+          builds.set(entry2.build, entry2);
+          bounded3(builds);
+        }
+        return entry2;
+      });
     const created = (async () => {
       const plugin = definition(pluginId);
-      const source = sourceOf(plugin, auth2);
       const digest = await crypto.subtle.digest(
         "SHA-256",
         new TextEncoder().encode(source)
@@ -98719,11 +98990,14 @@ async function createPluginEngine(options4) {
         })
       );
       const entry2 = { source, build: build2, handler: createAppHandler2(app3) };
+      builds.delete(build2);
       builds.set(build2, entry2);
+      bounded3(builds);
       return entry2;
     })();
-    entries3.set(key2, created);
-    created.catch(() => entries3.delete(key2));
+    entries3.set(source, created);
+    bounded3(entries3);
+    created.catch(() => entries3.delete(source));
     return created;
   };
   const entryForSource = async (source) => {
@@ -98740,23 +99014,28 @@ async function createPluginEngine(options4) {
     const entry2 = await register(id2, auth2);
     return entry2.source === source ? entry2 : void 0;
   };
-  const dispatch2 = (build2, command, error2, context3 = hostContext({})) => io(async () => {
-    const item = builds.get(BuildId.make(build2));
-    if (!item) throw new Error("Unknown plugin build");
-    const response = await item.handler(
-      new Request("https://zuse.invalid/", {
-        method: "POST",
-        body: JSON.stringify(command),
-        headers: { "content-type": "application/json" },
-        signal: AbortSignal.timeout(3e4)
-      }),
-      context3
-    );
-    const result8 = Schema_exports.decodeUnknownSync(HostResponse3)(
-      await response.json()
-    );
-    return result8;
-  }).pipe(
+  const dispatch2 = (build2, command, error2, context3 = hostContext({})) => Effect_exports.flatMap(
+    Effect_exports.service(RequestScope),
+    (scope3) => (
+      // Re-enter the caller's budget: the app's MCP client uses global fetch.
+      io(
+        () => options4.requestScope.enter(scope3, async () => {
+          const item = builds.get(BuildId.make(build2));
+          if (!item) throw new Error("Unknown plugin build");
+          const response = await item.handler(
+            new Request("https://zuse.invalid/", {
+              method: "POST",
+              body: JSON.stringify(command),
+              headers: { "content-type": "application/json" },
+              signal: AbortSignal.timeout(3e4)
+            }),
+            context3
+          );
+          return Schema_exports.decodeUnknownSync(HostResponse3)(await response.json());
+        })
+      )
+    )
+  ).pipe(
     Effect_exports.flatMap((result8) => {
       if (!result8.ok)
         return Schema_exports.decodeUnknownEffect(error2)(result8.error).pipe(
@@ -98827,67 +99106,76 @@ async function createPluginEngine(options4) {
     checkAccount: unsupported3,
     changes: () => Stream_exports.empty
   };
-  const blobs = {
-    get: (key2) => Effect_exports.tryPromise({
-      try: async () => Option_exports.fromNullishOr(
-        await options4.storage.get(`v2:blob:${key2}`)
-      ),
-      catch: () => new BlobStoreError({ operation: "get" })
-    }),
-    put: (key2, body) => Effect_exports.tryPromise({
-      try: () => options4.storage.put(`v2:blob:${key2}`, body),
-      catch: () => new BlobStoreError({ operation: "put" })
-    }),
-    remove: (key2) => Effect_exports.tryPromise({
-      try: async () => {
-        await options4.storage.delete(`v2:blob:${key2}`);
-      },
-      catch: () => new BlobStoreError({ operation: "remove" })
-    })
-  };
-  const sourceIo = (work) => Effect_exports.tryPromise({
-    try: work,
-    catch: () => new SourceError({ reason: "storage" })
-  });
-  const retain = (code, files) => sourceIo(async () => {
-    const digest = await crypto.subtle.digest(
-      "SHA-1",
-      new TextEncoder().encode(JSON.stringify(files))
-    );
-    const commit = Array.from(
-      new Uint8Array(digest),
-      (b) => b.toString(16).padStart(2, "0")
-    ).join("");
-    await options4.storage.put(`v2:source:${code}:${commit}`, files);
-    return { code, commit };
-  });
-  const sources = {
-    retain,
-    read: ({ code, commit }) => sourceIo(
-      async () => Schema_exports.decodeUnknownSync(SourceFiles)(
-        await options4.storage.get(`v2:source:${code}:${commit}`)
-      )
-    ),
-    workspace: (code) => sourceIo(async () => {
-      const value6 = await options4.storage.get(`v2:head:${code}`);
-      return value6 === void 0 ? null : Schema_exports.decodeUnknownSync(SourceSnapshot)(value6);
-    }),
-    commit: (input) => Effect_exports.gen(function* () {
-      const old = yield* sources.workspace(input.code);
-      if ((old?.revision.commit ?? null) !== input.expected)
-        return yield* new SourceError({ reason: "conflict" });
-      const revision = yield* retain(input.code, input.files);
-      const next2 = { revision, files: input.files };
-      yield* sourceIo(
-        () => options4.storage.put(`v2:head:${input.code}`, next2)
-      );
-      return next2;
-    })
-  };
   try {
-    const db = await run4(makeExecutorStorage({ provider: "postgresql" }));
+    const sql = await run4(PgClient);
+    const state = sealedState(sql, options4.state);
+    const blobs = {
+      get: (key2) => state.get(`v2:blob:${key2}`).pipe(
+        Effect_exports.map((value6) => Option_exports.fromNullishOr(value6)),
+        Effect_exports.mapError(() => new BlobStoreError({ operation: "get" }))
+      ),
+      put: (key2, body) => state.put(`v2:blob:${key2}`, body).pipe(Effect_exports.mapError(() => new BlobStoreError({ operation: "put" }))),
+      remove: (key2) => state.delete(`v2:blob:${key2}`).pipe(
+        Effect_exports.mapError(() => new BlobStoreError({ operation: "remove" }))
+      )
+    };
+    const sourceError = () => new SourceError({ reason: "storage" });
+    const retain = (code, files) => Effect_exports.gen(function* () {
+      const digest = yield* Effect_exports.tryPromise({
+        try: () => crypto.subtle.digest(
+          "SHA-1",
+          new TextEncoder().encode(JSON.stringify(files))
+        ),
+        catch: sourceError
+      });
+      const commit = Array.from(
+        new Uint8Array(digest),
+        (b) => b.toString(16).padStart(2, "0")
+      ).join("");
+      yield* state.put(`v2:source:${code}:${commit}`, files).pipe(Effect_exports.mapError(sourceError));
+      return { code, commit };
+    });
+    const sources = {
+      retain,
+      read: ({ code, commit }) => state.get(`v2:source:${code}:${commit}`).pipe(
+        Effect_exports.flatMap(
+          (value6) => Effect_exports.try({
+            try: () => Schema_exports.decodeUnknownSync(SourceFiles)(value6),
+            catch: sourceError
+          })
+        ),
+        Effect_exports.mapError(sourceError)
+      ),
+      workspace: (code) => state.get(`v2:head:${code}`).pipe(
+        Effect_exports.flatMap(
+          (value6) => Effect_exports.try({
+            try: () => value6 === void 0 ? null : Schema_exports.decodeUnknownSync(SourceSnapshot)(value6),
+            catch: sourceError
+          })
+        ),
+        Effect_exports.mapError(sourceError)
+      ),
+      commit: (input) => Effect_exports.gen(function* () {
+        const old = yield* sources.workspace(input.code);
+        if ((old?.revision.commit ?? null) !== input.expected)
+          return yield* new SourceError({ reason: "conflict" });
+        const revision = yield* retain(input.code, input.files);
+        const next2 = { revision, files: input.files };
+        yield* state.put(`v2:head:${input.code}`, next2).pipe(Effect_exports.mapError(sourceError));
+        return next2;
+      })
+    };
+    const storage = await run4(makeExecutorStorage({ provider: "postgresql" }));
+    const cache = rowCache(sql);
+    const db = {
+      ...storage,
+      orm: (version2) => cache.wrap(storage.orm(version2))
+    };
     if (options4.migrate) await run4(db.migrate);
-    else await run4(db.checkMigration);
+    else {
+      await run4(db.checkMigration);
+      await run4(cache.verify);
+    }
     const bytes2 = Uint8Array.from(
       atob(options4.encryptionKey.replaceAll("-", "+").replaceAll("_", "/")),
       (c) => c.charCodeAt(0)
@@ -98925,6 +99213,14 @@ async function createPluginEngine(options4) {
         blobs,
         credentials,
         runtime: runtimeAdapter(runtime),
+        // Evaluate every listing, as when each request opened its own
+        // engine: a long-lived engine must not serve remembered catalogs.
+        toolListings: {
+          freshMillis: 0,
+          maxStaleMillis: 0,
+          loadMillis: 0,
+          slowFailureMillis: 1e3
+        },
         oauth: {
           httpClient: client,
           clientName: "Zuse",
@@ -98937,11 +99233,18 @@ async function createPluginEngine(options4) {
     );
     await run4(e.apps.list({ owner: OwnerId.make("__readiness__") }));
     const ownerOf = (owner) => OwnerId.make(owner);
-    const target2 = async (owner, ref) => {
+    const owned = /* @__PURE__ */ new Map();
+    const target2 = async (owner, ref, read = false) => {
       await register(ref.plugin, ref.auth);
       const app3 = AppId.make(ref.app), profile = ProfileId.make(ref.profile);
+      const key2 = JSON.stringify([owner, ref.app, ref.profile]);
+      if (read && owned.has(key2)) return { app: app3, profile };
       await run4(e.apps.get({ app: app3, owner: ownerOf(owner) }));
       await run4(e.apps.profiles.get({ app: app3, profile, owner: ownerOf(owner) }));
+      if (read) {
+        owned.set(key2, ref.app);
+        bounded3(owned);
+      }
       return { app: app3, profile };
     };
     return {
@@ -99042,14 +99345,17 @@ async function createPluginEngine(options4) {
           if (cancelled.state.status === "completed")
             account = cancelled.state.account.id;
         }
-        if (app3) await run4(e.apps.remove({ app: AppId.make(app3), owner: own2 }));
+        if (app3) {
+          for (const [key2, kept] of owned) if (kept === app3) owned.delete(key2);
+          await run4(e.apps.remove({ app: AppId.make(app3), owner: own2 }));
+        }
         if (account)
           await run4(
             e.accounts.remove({ account: AccountId.make(account), owner: own2 })
           );
       },
       async list(owner, ref) {
-        const t = await target2(owner, ref);
+        const t = await target2(owner, ref, true);
         const result8 = await run4(e.tools.index(t));
         return result8.items.map((tool) => ({
           name: tool.name,
@@ -99059,7 +99365,7 @@ async function createPluginEngine(options4) {
       async schema(owner, ref, tool) {
         return run4(
           e.tools.get({
-            ...await target2(owner, ref),
+            ...await target2(owner, ref, true),
             tool: ToolName.make(tool)
           })
         );
@@ -99067,7 +99373,7 @@ async function createPluginEngine(options4) {
       async call(owner, ref, tool, input) {
         const result8 = await run4(
           e.tools.call({
-            ...await target2(owner, ref),
+            ...await target2(owner, ref, true),
             tool: ToolName.make(tool),
             input: Schema_exports.decodeUnknownSync(Json3)(input)
           })
@@ -99076,6 +99382,8 @@ async function createPluginEngine(options4) {
           throw new Error("Plugin requires additional approval");
         return result8.value;
       },
+      observe: (epoch) => cache.observe(epoch),
+      ready: () => run4(sql`SELECT 1 FROM zuse_executor_state LIMIT 1`).then(() => void 0),
       close: () => managed.dispose()
     };
   } catch (error2) {
@@ -99085,5 +99393,7 @@ async function createPluginEngine(options4) {
 }
 export {
   PluginEngineError,
-  createPluginEngine
+  createPluginEngine,
+  rowCache,
+  sealedState
 };

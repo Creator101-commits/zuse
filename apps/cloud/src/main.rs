@@ -16,6 +16,9 @@ use zuse_cloud::{
     store::Store,
 };
 
+/// Hourly maintenance: cleanup sweeps and condition-based retirement.
+const MAINTENANCE_MS: i64 = 3_600_000;
+
 #[derive(Parser)]
 #[command(about = "Zuse hosted cloud control plane")]
 struct Args {
@@ -1106,10 +1109,16 @@ async fn main() -> Result<()> {
                             tracing::warn!(code = error.code, "Restore stage deferred");
                         }
                         // Kicked by the worker loop when recovery/restore jobs are
-                        // due; recovery admission scans run on the idle timer.
+                        // due (including expired leases of crashed attempts);
+                        // recovery admission (archive retention, days long) runs
+                        // on the idle safety timer.
                         let wait = if failed {
                             failures = failures.saturating_add(1);
-                            zuse_cloud::db::failure_backoff(failures, cadence.busy, cadence.idle)
+                            zuse_cloud::db::failure_backoff(
+                                failures,
+                                cadence.busy,
+                                cadence.failure_cap(),
+                            )
                         } else {
                             failures = 0;
                             cadence.idle
@@ -1150,7 +1159,9 @@ async fn main() -> Result<()> {
                 let runtime = runtime.clone();
                 Some(tokio::spawn(async move {
                     loop {
-                        for _ in 0..4 {
+                        // Hourly maintenance; the same throughput bound as the
+                        // former four reconciles a minute.
+                        for _ in 0..240 {
                             match runtime.reconcile_object_write_once(now_ms()).await {
                                 Ok(true) => {}
                                 Ok(false) => break,
@@ -1163,7 +1174,8 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(MAINTENANCE_MS as u64))
+                            .await;
                     }
                 }))
             };
@@ -1207,11 +1219,12 @@ async fn main() -> Result<()> {
                 Work::Recreation,
                 Work::MachineImages,
                 Work::ProjectCache,
+                Work::IdleSleep,
             ];
             let mut asset_cleanup_at = 0;
             let mut idle_sleep_at = 0;
-            // Stages without a due time (retirement sweeps, blocked requests)
-            // run on the idle timer.
+            // Condition-based retirement sweeps have no due time; they run as
+            // hourly maintenance (and after a missed-notification wake).
             let mut idle_stages_at = 0;
             let mut due_failures = 0u32;
             let mut lifecycle_priority = false;
@@ -1274,14 +1287,26 @@ async fn main() -> Result<()> {
                 let run = |at: fn(&WorkerDue) -> Option<i64>| should_run(due.as_ref(), at, now);
                 let idle_round = now >= idle_stages_at;
                 if idle_round {
-                    idle_stages_at = now + cadence.idle.as_millis() as i64;
+                    idle_stages_at = now + MAINTENANCE_MS;
                 }
                 let mut worked = false;
                 if now_ms() >= grant_cleanup_at {
-                    if let Err(error) = runtime.cleanup_grant_receipts(now_ms()).await {
-                        tracing::warn!(code = error.code, "Credential receipt cleanup deferred");
+                    // Bounded batches until caught up (former cadence: one
+                    // batch a minute).
+                    for _ in 0..60 {
+                        match runtime.cleanup_grant_receipts(now_ms()).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Credential receipt cleanup deferred"
+                                );
+                                break;
+                            }
+                        }
                     }
-                    grant_cleanup_at = now_ms() + 60_000;
+                    grant_cleanup_at = now_ms() + MAINTENANCE_MS;
                 }
                 if now_ms() >= idle_sleep_at {
                     match runtime.idle_sleep_once(now_ms()).await {
@@ -1290,10 +1315,29 @@ async fn main() -> Result<()> {
                             lifecycle_priority = true;
                             zuse_cloud::events::hint::send();
                         }
-                        // Idle timeouts are minutes long; a 30s scan cadence is ample.
-                        Ok(false) => idle_sleep_at = now_ms() + 30_000,
+                        // Sleep until the earliest computer's idle deadline. A
+                        // shared-credit hold wakes the loop with NOTIFY; a newly
+                        // idle-eligible computer's deadline is at least the idle
+                        // timeout away, which the bounded sweep never misses.
+                        Ok(false) => {
+                            let now = now_ms();
+                            idle_sleep_at = match runtime.idle_sleep_due(now).await {
+                                Ok(due) => zuse_cloud::runtime::lifecycle::idle::next_check(
+                                    now,
+                                    due,
+                                    runtime.idle_sweep_ms(),
+                                ),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        code = error.code,
+                                        "Idle sleep deadline deferred"
+                                    );
+                                    now + cadence.failure_cap().as_millis() as i64
+                                }
+                            };
+                        }
                         Err(error) => {
-                            idle_sleep_at = now_ms() + 30_000;
+                            idle_sleep_at = now_ms() + cadence.failure_cap().as_millis() as i64;
                             tracing::warn!(code = error.code, "Idle sleep admission deferred");
                         }
                     }
@@ -1394,16 +1438,36 @@ async fn main() -> Result<()> {
                 // Expired uploads are already unauthorized. Their physical
                 // purge is bounded maintenance, not part of every task wake.
                 if now_ms() >= asset_cleanup_at {
-                    if let Err(error) = runtime.sweep_launch_assets_once(now_ms()).await {
-                        tracing::warn!(
-                            code = error.code,
-                            "Abandoned launch upload cleanup deferred"
-                        );
+                    // Bounded batches until caught up (former cadence: one
+                    // pass a minute).
+                    for _ in 0..60 {
+                        match runtime.sweep_launch_assets_once(now_ms()).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Abandoned launch upload cleanup deferred"
+                                );
+                                break;
+                            }
+                        }
                     }
-                    if let Err(error) = runtime.sweep_asset_releases_once(now_ms()).await {
-                        tracing::warn!(code = error.code, "Attachment release sweep deferred");
+                    // Failed remote deletes stay `releasing`; never retry them in a burst.
+                    for _ in 0..10 {
+                        match runtime.sweep_asset_releases_once(now_ms()).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Attachment release sweep deferred"
+                                );
+                                break;
+                            }
+                        }
                     }
-                    asset_cleanup_at = now_ms() + 60_000;
+                    asset_cleanup_at = now_ms() + MAINTENANCE_MS;
                 }
                 if once {
                     runtime
@@ -1428,8 +1492,11 @@ async fn main() -> Result<()> {
                 let (wait, timer) = if due.is_none() {
                     // The due query failed (for example an exhausted pool):
                     // back off instead of retrying in a tight loop.
-                    let wait =
-                        zuse_cloud::db::failure_backoff(due_failures, cadence.busy, cadence.idle);
+                    let wait = zuse_cloud::db::failure_backoff(
+                        due_failures,
+                        cadence.busy,
+                        cadence.failure_cap(),
+                    );
                     (wait, Reason::Due)
                 } else if worked {
                     // More may be ready; look again after the busy floor.
@@ -1459,6 +1526,10 @@ async fn main() -> Result<()> {
                 if reason == Reason::Notify(Work::All) {
                     // Notifications may have been missed: rerun the idle stages too.
                     idle_stages_at = 0;
+                    idle_sleep_at = 0;
+                }
+                if reason == Reason::Notify(Work::IdleSleep) {
+                    idle_sleep_at = 0;
                 }
                 tracing::debug!(
                     reason = reason.as_str(),
@@ -1609,7 +1680,7 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                        joining.wait_for_dispatch().await;
+                        joining.wait_for_dispatch(now_ms()).await;
                     }
                 });
             }
@@ -1621,6 +1692,7 @@ async fn main() -> Result<()> {
             if let Some(settings) = zuse_cloud::plugins::PluginConfig::from_env()? {
                 let plugins =
                     zuse_cloud::plugins::PluginControl::from_pool(db.pool.clone(), settings)?;
+                plugins.attach_wakeups(wakeups.clone()).await;
                 let maintenance = plugins.clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));

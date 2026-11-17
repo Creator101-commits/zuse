@@ -24,7 +24,61 @@ fn eligible(row: &Value) -> bool {
         && !super::super::recreation::leases_blocked(row)
 }
 
+/// When the worker should next run idle-sleep admission: the earliest known
+/// deadline, but never later than one sweep so a computer that became
+/// eligible without a notification is still admitted on time (its deadline is
+/// at least a full idle timeout away, and the sweep is at most half of it).
+pub fn next_check(now: i64, due: Option<i64>, sweep_ms: i64) -> i64 {
+    let sweep = now.saturating_add(sweep_ms);
+    match due {
+        // Already due but not admitted this round (for example a concurrent
+        // command): look again after a short floor instead of spinning.
+        Some(at) if at <= now => now.saturating_add(1_000).min(sweep),
+        Some(at) => at.saturating_add(5).min(sweep),
+        None => sweep,
+    }
+}
+
+/// Longest idle-sleep sweep interval.
+pub const MAX_SWEEP_MS: i64 = 300_000;
+
 impl RuntimeControl {
+    /// Bound on the idle-sleep sweep: at most half the idle timeout.
+    pub fn idle_sweep_ms(&self) -> i64 {
+        (self.idle_ms / 2).clamp(500, MAX_SWEEP_MS)
+    }
+    /// The earliest idle-sleep or shared-credit sleep deadline, in one or two
+    /// statements, using the same eligibility as admission.
+    pub async fn idle_sleep_due(&self, now: i64) -> Result<Option<i64>, ApiError> {
+        if self.creation_accounts.is_empty() || !self.task_command_delivery_available().await? {
+            return Ok(None);
+        }
+        let quiet = self
+            .idle_ms
+            .saturating_add(crate::runtime::activity::COALESCE_MS);
+        let idle: Option<i64> = sqlx::query_scalar(include_str!("idle_deadline.sql"))
+            .bind(self.creation_accounts.filter())
+            .bind(quiet)
+            .bind(zuse_protocol::cloud_task_commands::MODE)
+            .fetch_one(&self.pool)
+            .await?;
+        let installed: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_brokeboy_compute_charges') IS NOT NULL",
+        )
+        .await?;
+        let credit: Option<i64> = if installed {
+            sqlx::query_scalar(include_str!("credit_deadline.sql"))
+                .bind(self.creation_accounts.filter())
+                .bind(now)
+                .bind(zuse_protocol::cloud_task_commands::MODE)
+                .fetch_one(&self.pool)
+                .await?
+        } else {
+            None
+        };
+        Ok(crate::db::wake::earliest([idle, credit]))
+    }
     /// Admit at most one due computer per worker round. Empty scans are paced
     /// by the worker; an open event subscription is not user activity.
     pub async fn idle_sleep_once(&self, now: i64) -> Result<bool, ApiError> {
@@ -151,3 +205,19 @@ impl RuntimeControl {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    #[test]
+    fn next_check_follows_deadlines_bounded_by_the_sweep() {
+        assert_eq!(next_check(1_000, None, 300_000), 301_000);
+        assert_eq!(next_check(1_000, Some(61_000), 300_000), 61_005);
+        assert_eq!(next_check(1_000, Some(900_000), 300_000), 301_000);
+        // Past due but not admitted: a short floor, never a spin.
+        assert_eq!(next_check(1_000, Some(1_000), 300_000), 2_000);
+        assert_eq!(next_check(1_000, Some(0), 500), 1_500);
+        assert_eq!(next_check(i64::MAX, Some(i64::MAX), 300_000), i64::MAX);
+    }
+}
