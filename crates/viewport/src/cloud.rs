@@ -12,6 +12,7 @@ mod project_start;
 mod recreation;
 mod repair;
 mod retained_history;
+mod scope;
 mod sync;
 mod transport;
 mod uploads;
@@ -63,6 +64,10 @@ pub(super) struct Cloud {
     pub(super) account: Option<String>,
     pub(super) organization: Option<String>,
     namespace: Option<String>,
+    /// `namespace` came from the opener's configuration, not from a cloud
+    /// reply. The first reply's `apiOrigin` replaces it without counting as a
+    /// scope change: the opener cannot know the engine's exact origin.
+    namespace_provisional: bool,
     heads: HashMap<String, (zuse_model::cloud::Head, web_time::Instant)>,
     head_verified: Option<web_time::Instant>,
     pub(super) projects: Vec<Value>,
@@ -510,6 +515,7 @@ impl WorkspaceView {
         self.cloud.account = Some(account);
         self.cloud.organization = organization;
         self.cloud.namespace = origin;
+        self.cloud.namespace_provisional = true;
         self.settings = true;
         self.select_settings_section(crate::settings_view::Section::Cloud, cx);
         self.refresh_cloud();
@@ -535,6 +541,7 @@ impl WorkspaceView {
         self.cloud.account = Some(account);
         self.cloud.organization = organization;
         self.cloud.namespace = seed["apiOrigin"].as_str().map(str::to_owned);
+        self.cloud.namespace_provisional = false;
         self.cloud.command_api_ready = seed["commandDeliveryMode"] == "server-admitted-v2"
             && seed["commandAdmissionVersion"] == 2;
         let mut target = target;
@@ -974,32 +981,56 @@ impl WorkspaceView {
                 1 => {
                     let account = value["accountId"].as_str().map(str::to_owned);
                     let organization = value["organizationId"].as_str().map(str::to_owned);
-                    if (self.cloud.account.is_some() && self.cloud.account != account)
-                        || self.cloud.organization != organization
-                        || (self.cloud.namespace.is_some()
-                            && self.cloud.namespace.as_deref() != value["apiOrigin"].as_str())
-                    {
+                    let namespace = value["apiOrigin"].as_str().map(str::to_owned);
+                    let change = scope::Change::between(
+                        scope::Scope {
+                            account: self.cloud.account.as_deref(),
+                            organization: self.cloud.organization.as_deref(),
+                            origin: self.cloud.namespace.as_deref(),
+                            origin_provisional: self.cloud.namespace_provisional,
+                        },
+                        scope::Scope {
+                            account: account.as_deref(),
+                            organization: organization.as_deref(),
+                            origin: namespace.as_deref(),
+                            origin_provisional: false,
+                        },
+                    );
+                    // The repository the user had chosen, so the same repository
+                    // can be selected again in the new scope.
+                    let previous_repository = change.any().then(|| {
+                        self.cloud
+                            .projects
+                            .get(self.cloud.project)
+                            .and_then(|row| row["repositoryIdentity"].as_str())
+                            .map(str::to_owned)
+                    });
+                    if change.any() {
+                        tracing::info!(
+                            account = change.account,
+                            organization = change.organization,
+                            origin = change.origin,
+                            "cloud scope changed; reloading repositories"
+                        );
                         self.stash_draft(cx);
                         self.input
                             .update(cx, |input, cx| input.set_value(String::new(), cx));
                         self.attachments.clear();
                         // Retain the previous project identity as an invalid
-                        // choice until explicit reselection; never retarget it.
+                        // choice until it resolves in the new scope.
                         self.cloud.project = usize::MAX;
                         self.cloud.projects.clear();
-                        self.error = Some("Cloud scope changed. Choose a repository again; your previous draft is preserved.".into());
                     }
-                    if self.cloud.organization != organization {
+                    if change.organization {
                         self.close_cloud();
                         self.cloud.heads.clear();
                         self.cloud.connection = None;
                     }
-                    let namespace = value["apiOrigin"].as_str().map(str::to_owned);
-                    if self.cloud.namespace.is_some() && self.cloud.namespace != namespace {
+                    if change.origin {
                         self.close_cloud();
                         self.cloud.heads.clear();
                     }
-                    if self.cloud.account.is_some() && self.cloud.account != account {
+                    if change.account {
                         self.close_cloud();
                         self.cloud.workspaces.clear();
                         self.cloud.connection = None;
@@ -1009,8 +1040,14 @@ impl WorkspaceView {
                     self.cloud.account = account;
                     self.cloud.organization = organization;
                     self.cloud.namespace = namespace;
+                    self.cloud.namespace_provisional = false;
                     if self.cloud.launch.is_none() && self.cloud.target.is_none() {
                         self.cloud.notice = None;
+                    }
+                    if change.any() {
+                        // Informational, once: the repositories below are this
+                        // scope's, and the draft is stashed, not lost.
+                        self.cloud.notice = Some(change.notice().into());
                     }
                     let selected_project = self.cloud.project_id.clone().or_else(|| {
                         self.cloud
@@ -1028,6 +1065,15 @@ impl WorkspaceView {
                                 .iter()
                                 .position(|row| row["projectId"] == id)
                         })
+                        .or_else(|| {
+                            // After a scope change, the same repository in the
+                            // new scope is the user's evident choice.
+                            let repository = previous_repository.clone().flatten()?;
+                            self.cloud
+                                .projects
+                                .iter()
+                                .position(|row| row["repositoryIdentity"] == repository.as_str())
+                        })
                         .unwrap_or_else(|| {
                             if selected_project.is_some() {
                                 usize::MAX
@@ -1042,6 +1088,15 @@ impl WorkspaceView {
                             .and_then(|row| row["projectId"].as_str())
                             .map(str::to_owned)
                     });
+                    if previous_repository.is_some() && self.cloud.project != usize::MAX {
+                        // Re-resolved by repository: follow the new scope's id.
+                        self.cloud.project_id = self
+                            .cloud
+                            .projects
+                            .get(self.cloud.project)
+                            .and_then(|row| row["projectId"].as_str())
+                            .map(str::to_owned);
+                    }
                     self.cloud.provider_catalogs = value["providerAgentCatalogs"].clone();
                     self.cloud.capabilities = value["computerCapabilities"].clone();
                     self.cloud.command_api_version = value["commandAdmissionVersion"].as_u64();
@@ -1067,6 +1122,7 @@ impl WorkspaceView {
                         self.cloud.organization =
                             value["organizationId"].as_str().map(str::to_owned);
                         self.cloud.namespace = value["apiOrigin"].as_str().map(str::to_owned);
+                        self.cloud.namespace_provisional = false;
                     }
                     self.cloud.workspaces = value["workspaces"]
                         .as_array()
@@ -1160,9 +1216,13 @@ impl WorkspaceView {
                 5 => {
                     if value["accountId"].as_str() != self.cloud.account.as_deref()
                         || value["organizationId"].as_str() != self.cloud.organization.as_deref()
-                        || value["apiOrigin"]
-                            .as_str()
-                            .is_some_and(|origin| Some(origin) != self.cloud.namespace.as_deref())
+                        || value["apiOrigin"].as_str().is_some_and(|origin| {
+                            !self.cloud.namespace_provisional
+                                && !scope::same_origin(
+                                    Some(origin),
+                                    self.cloud.namespace.as_deref(),
+                                )
+                        })
                     {
                         return true;
                     }
