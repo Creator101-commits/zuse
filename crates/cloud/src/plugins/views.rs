@@ -13,7 +13,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -39,6 +39,9 @@ struct Entries {
 
 pub(super) struct Views {
     enabled: AtomicBool,
+    /// Bumped whenever every view is dropped; forwarded to the executor so it
+    /// drops its kept SDK rows at the same moments.
+    epoch: AtomicU64,
     ttl: Duration,
     entries: Mutex<Entries>,
 }
@@ -48,6 +51,7 @@ impl Views {
     pub fn new(ttl: Duration) -> Self {
         Self {
             enabled: AtomicBool::new(false),
+            epoch: AtomicU64::new(0),
             ttl,
             entries: Mutex::new(Entries {
                 generation: 0,
@@ -66,6 +70,12 @@ impl Views {
     }
     pub fn enabled(&self) -> bool {
         self.enabled.load(Ordering::SeqCst)
+    }
+    /// The change epoch for executor requests, or `None` while disabled
+    /// (the executor then reads every row from the database).
+    pub fn epoch(&self) -> Option<u64> {
+        let epoch = self.epoch.load(Ordering::SeqCst);
+        self.enabled().then_some(epoch)
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, Entries> {
         self.entries.lock().unwrap_or_else(|e| e.into_inner())
@@ -123,6 +133,7 @@ impl Views {
     }
     /// Some tenant's rows changed, or notifications may have been missed.
     pub fn clear(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         let mut entries = self.lock();
         entries.generation = entries.generation.wrapping_add(1);
         entries.views.clear();
@@ -280,6 +291,25 @@ mod tests {
         drop(views.changes("personal:a"));
         views.store("personal:a", racing, view("a", &["stale"]));
         assert!(views.get("personal:a").is_none());
+    }
+
+    #[test]
+    fn the_executor_epoch_advances_with_every_full_drop() {
+        let views = Views::new(VIEW_TTL);
+        assert_eq!(views.epoch(), None, "not listening: executor keeps nothing");
+        views.enable();
+        let first = views.epoch().unwrap();
+        // A tenant's local write is applied by the executor itself.
+        views.invalidate("personal:a");
+        assert_eq!(views.epoch(), Some(first));
+        // A notification, reconnect or lag drops the executor's rows too.
+        views.clear();
+        let second = views.epoch().unwrap();
+        assert!(second > first);
+        views.disable();
+        assert_eq!(views.epoch(), None);
+        views.enable();
+        assert!(views.epoch().unwrap() > second, "never reuses an epoch");
     }
 
     #[test]

@@ -104,6 +104,11 @@ export interface PluginEngine {
 		tool: string,
 		input: unknown,
 	): Promise<unknown>;
+	/**
+	 * Serve's database change epoch, sent with every request: `null` while
+	 * serve cannot forward change notifications, so nothing is kept.
+	 */
+	observe(epoch: number | null): void;
 	/** One cheap statement on the engine's pool. */
 	ready(): Promise<void>;
 	close(): Promise<void>;

@@ -98711,6 +98711,154 @@ var sealedState = (sql, codec) => {
     })
   };
 };
+var CACHED_TABLES = /* @__PURE__ */ new Set([
+  "apps",
+  "deployments",
+  "profiles",
+  "accounts",
+  "oauthGrants"
+]);
+var ROW_CACHE_ENTRIES = 2048;
+var ROW_TTL_MS = 6e4;
+var TRACE = /* @__PURE__ */ Symbol("trace");
+var Unkeyable = class extends Error {
+};
+var optionKey = (value6, depth = 0) => {
+  if (depth > 12) throw new Unkeyable();
+  if (value6 === null || typeof value6 === "string" || typeof value6 === "boolean")
+    return value6;
+  if (typeof value6 === "number") return Number.isFinite(value6) ? value6 : String(value6);
+  if (value6 === void 0) return { u: 1 };
+  if (value6 instanceof Date) return { d: value6.getTime() };
+  if (typeof value6 === "function") {
+    const traced = value6[TRACE];
+    if (traced !== void 0) return traced;
+    const node2 = (trace2) => new Proxy(() => void 0, {
+      get: (_target, property) => property === TRACE ? trace2 : typeof property === "symbol" ? void 0 : node2({ get: property, of: trace2 }),
+      apply: (_target, _self, args2) => node2({
+        call: trace2,
+        args: args2.map((arg) => optionKey(arg, depth + 1))
+      })
+    });
+    return {
+      fn: optionKey(
+        value6(node2({ arg: depth })),
+        depth + 1
+      )
+    };
+  }
+  if (Array.isArray(value6)) return value6.map((item) => optionKey(item, depth + 1));
+  if (typeof value6 === "object" && Object.getPrototypeOf(value6) === Object.prototype)
+    return Object.fromEntries(
+      Object.entries(value6).map(([key2, item]) => [key2, optionKey(item, depth + 1)])
+    );
+  throw new Unkeyable();
+};
+var rowCache = (sql) => {
+  const rows = /* @__PURE__ */ new Map();
+  let generation = 0;
+  let installed = false;
+  let epoch;
+  const clear4 = () => {
+    generation++;
+    rows.clear();
+  };
+  const inTransaction = Effect_exports.map(
+    Effect_exports.serviceOption(sql.transactionService),
+    Option_exports.isSome
+  );
+  const keepable = (table3, result8) => table3 !== "oauthGrants" || typeof result8 === "object" && result8 !== null && "status" in result8 && typeof result8.status === "string" && result8.status.startsWith("ready_");
+  const read = (method, table3, work) => (options4) => Effect_exports.gen(function* () {
+    if (!installed || epoch === void 0 || !CACHED_TABLES.has(table3) || (yield* inTransaction))
+      return yield* work;
+    let key2;
+    try {
+      key2 = JSON.stringify([method, table3, optionKey(options4)]);
+    } catch {
+      return yield* work;
+    }
+    const hit = rows.get(key2);
+    rows.delete(key2);
+    if (hit !== void 0 && (table3 === "deployments" || Date.now() - hit.at < ROW_TTL_MS)) {
+      rows.set(key2, hit);
+      return structuredClone(hit.value);
+    }
+    const before = generation;
+    const result8 = yield* work;
+    if (before === generation && keepable(table3, result8)) {
+      try {
+        rows.set(key2, { at: Date.now(), value: structuredClone(result8) });
+      } catch {
+        return result8;
+      }
+      for (const oldest of rows.keys()) {
+        if (rows.size <= ROW_CACHE_ENTRIES) break;
+        rows.delete(oldest);
+      }
+    }
+    return result8;
+  });
+  const writing = (effect2) => Effect_exports.suspend(() => {
+    clear4();
+    return effect2;
+  }).pipe(Effect_exports.ensuring(Effect_exports.sync(clear4)));
+  return {
+    /** Checks once that every executor table notifies on change. */
+    verify: Effect_exports.gen(function* () {
+      const rows2 = yield* sql`SELECT count(*) AS tables, count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid=c.oid AND g.tgname='zuse_cloud_executor_wake' AND g.tgenabled<>'D')) AS missing FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relkind='r' AND left(c.relname,9)='executor_'`;
+      const found = rows2[0];
+      installed = found !== void 0 && Number(found.tables) > 0 && Number(found.missing) === 0;
+      if (!installed)
+        console.error(
+          JSON.stringify({ event: "executor_row_cache_disabled", reason: "triggers_missing" })
+        );
+    }),
+    /**
+     * Serve's change epoch for this request: `null` while serve is not
+     * listening (read everything); a newer epoch drops every kept row.
+     */
+    observe(next2) {
+      if (next2 === null) {
+        if (epoch !== void 0) clear4();
+        epoch = void 0;
+      } else if (epoch === void 0 || next2 > epoch) {
+        clear4();
+        epoch = next2;
+      }
+    },
+    wrap(source) {
+      const orm = source;
+      const wrapped = { ...orm };
+      for (const method of ["findFirst", "findMany", "count"])
+        wrapped[method] = (table3, options4) => read(
+          method,
+          table3,
+          orm[method](
+            table3,
+            options4
+          )
+        )(options4);
+      for (const method of [
+        "create",
+        "createMany",
+        "updateMany",
+        "deleteMany",
+        "upsert"
+      ])
+        wrapped[method] = (...args2) => writing(
+          orm[method](
+            ...args2
+          )
+        );
+      wrapped.transaction = (effect2) => writing(
+        orm.transaction(
+          effect2
+        )
+      );
+      return wrapped;
+    }
+  };
+};
 async function createPluginEngine(options4) {
   const pool = layer3({
     url: Redacted_exports.make(options4.databaseUrl),
@@ -99017,9 +99165,17 @@ async function createPluginEngine(options4) {
         return next2;
       })
     };
-    const db = await run4(makeExecutorStorage({ provider: "postgresql" }));
+    const storage = await run4(makeExecutorStorage({ provider: "postgresql" }));
+    const cache = rowCache(sql);
+    const db = {
+      ...storage,
+      orm: (version2) => cache.wrap(storage.orm(version2))
+    };
     if (options4.migrate) await run4(db.migrate);
-    else await run4(db.checkMigration);
+    else {
+      await run4(db.checkMigration);
+      await run4(cache.verify);
+    }
     const bytes2 = Uint8Array.from(
       atob(options4.encryptionKey.replaceAll("-", "+").replaceAll("_", "/")),
       (c) => c.charCodeAt(0)
@@ -99226,6 +99382,7 @@ async function createPluginEngine(options4) {
           throw new Error("Plugin requires additional approval");
         return result8.value;
       },
+      observe: (epoch) => cache.observe(epoch),
       ready: () => run4(sql`SELECT 1 FROM zuse_executor_state LIMIT 1`).then(() => void 0),
       close: () => managed.dispose()
     };
@@ -99237,5 +99394,6 @@ async function createPluginEngine(options4) {
 export {
   PluginEngineError,
   createPluginEngine,
+  rowCache,
   sealedState
 };

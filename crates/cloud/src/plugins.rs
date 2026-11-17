@@ -50,6 +50,9 @@ END $grants$;";
 pub const MIGRATION: &str = include_str!("../migrations/0009_plugins.sql");
 /// Change notifications that keep `serve`'s in-memory plugin views current.
 pub const WAKEUPS_MIGRATION: &str = include_str!("../migrations/0046_plugin_wakeups.sql");
+/// Change notifications for the SDK tables, which keep the executor's rows current.
+pub const EXECUTOR_WAKEUPS_MIGRATION: &str =
+    include_str!("../migrations/0048_executor_wakeups.sql");
 pub const CALLBACK_PORTS: [u16; 4] = [8976, 8977, 8978, 8979];
 
 const ATTEMPT_TTL_MS: i64 = 10 * 60_000;
@@ -382,6 +385,9 @@ impl PluginControl {
         sqlx::raw_sql(MIGRATION).execute(pool).await?;
         sqlx::raw_sql(WAKEUPS_MIGRATION).execute(pool).await?;
         executor::Executor::migrate(pool, key).await?;
+        sqlx::raw_sql(EXECUTOR_WAKEUPS_MIGRATION)
+            .execute(pool)
+            .await?;
         sqlx::raw_sql(APP_ROLE_GRANTS).execute(pool).await?;
         lock.commit().await?;
         Ok(())
@@ -1000,7 +1006,15 @@ impl PluginControl {
         })
     }
 
-    async fn engine(&self, request: Value) -> Result<Value, ApiError> {
+    async fn engine(&self, mut request: Value) -> Result<Value, ApiError> {
+        // The executor keeps SDK rows only while this process can forward
+        // change notifications; a new epoch drops them (see `views`).
+        if let Some(fields) = request.as_object_mut() {
+            fields.insert(
+                "epoch".into(),
+                self.views.epoch().map_or(Value::Null, Value::from),
+            );
+        }
         let mut slot = self.executor.lock().await;
         if let Some(engine) = slot.as_ref() {
             if !engine.alive().await {

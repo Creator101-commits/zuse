@@ -17955,8 +17955,12 @@ async function serveMcp(input) {
 }
 async function dispatch(input) {
   if (input.operation === "mcp") return serveMcp(input);
+  const engine = await sharedEngine();
+  engine.observe(
+    Number.isSafeInteger(input.epoch) && input.epoch >= 0 ? input.epoch : null
+  );
   if (input.operation === "ready") {
-    await (await sharedEngine()).ready();
+    await engine.ready();
     return { ready: true };
   }
   const owner = input.owner;
@@ -17968,7 +17972,6 @@ async function dispatch(input) {
     input.plugin = id;
   }
   const ref = input.ref;
-  const engine = await sharedEngine();
   switch (input.operation) {
     case "prepare":
       return await engine.prepare(

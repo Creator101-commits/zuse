@@ -1,7 +1,7 @@
 //! Plugin change triggers (migration 0046) against a real PostgreSQL. Every
 //! committed change to connections or custom servers must reach listeners of
 //! the writer's own schema, since cached plugin views depend on it.
-use super::{MIGRATION, WAKEUPS_MIGRATION};
+use super::{EXECUTOR_WAKEUPS_MIGRATION, MIGRATION, WAKEUPS_MIGRATION};
 use crate::db::wake::{Wakeups, Work};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
@@ -159,6 +159,39 @@ async fn plugin_change_triggers_notify_listeners_after_commit() {
         .await
         .unwrap();
     assert_eq!(next(&mut receiver).await, Some(Work::Plugins));
+
+    // 0048: every SDK table (created by the SDK migration) notifies the same way.
+    sqlx::raw_sql("CREATE TABLE executor_accounts(id text PRIMARY KEY, v int); CREATE TABLE executor_oauth_grants(id text PRIMARY KEY, status text); CREATE TABLE other_rows(id text)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(EXECUTOR_WAKEUPS_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(EXECUTOR_WAKEUPS_MIGRATION)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for statement in [
+        "INSERT INTO executor_accounts VALUES('a',1)",
+        "UPDATE executor_accounts SET v=2",
+        "INSERT INTO executor_oauth_grants VALUES('a','ready_1')",
+        "UPDATE executor_oauth_grants SET status='refresh_2'",
+        "DELETE FROM executor_accounts",
+    ] {
+        sqlx::query(statement).execute(&pool).await.unwrap();
+        assert_eq!(
+            next(&mut receiver).await,
+            Some(Work::Plugins),
+            "{statement}"
+        );
+    }
+    sqlx::query("INSERT INTO other_rows VALUES('x')")
+        .execute(&pool)
+        .await
+        .unwrap();
+    quiet(&mut receiver).await;
 
     drop(wakeups);
     for (pool, schema) in [(bare, bare_schema), (other, other_schema), (pool, schema)] {

@@ -206,3 +206,14 @@ cache depends on delivery, so `serve` only uses it while its `LISTEN`
 connection is up and both triggers exist (`plugin-migrate` installs them after
 creating the plugin tables). With `ZUSE_CLOUD_DB_LISTEN=false` every tool call
 reads the rows, as before.
+
+Migration `0048_executor_wakeups.sql` adds the same trigger to every
+`executor_*` table (the plugin SDK's). The executor keeps the rows a tool call
+reads (app and deployment, profile, accounts, OAuth grants ready for use) in
+memory, so a steady-state tool call runs no statements. The executor opens no
+`LISTEN` connection: `serve` sends a change epoch with every executor request,
+bumped on each `plugins` notification and listener reconnect, and a new epoch
+drops the executor's rows. The executor keeps rows only while `serve` sends an
+epoch and every `executor_*` table has the trigger (checked once at start);
+otherwise it reads them per call. Its own writes drop everything, claimed
+OAuth grants are always re-read, and non-deployment rows expire after 60 s.

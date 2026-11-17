@@ -213,6 +213,216 @@ export const sealedState = (sql: PgClient.PgClient, codec: StateCodec) => {
 };
 
 /**
+ * SDK rows that every tool invocation reads: the app with its deployment,
+ * the profile, the selected accounts and their OAuth grants.
+ */
+const CACHED_TABLES = new Set([
+	"apps",
+	"deployments",
+	"profiles",
+	"accounts",
+	"oauthGrants",
+]);
+const ROW_CACHE_ENTRIES = 2048;
+/** Matches the 60 s expiry of serve's plugin views. */
+const ROW_TTL_MS = 60_000;
+const TRACE = Symbol("trace");
+class Unkeyable extends Error {}
+
+/**
+ * A structural key for ORM options, including their `where`/`join` builder
+ * callbacks: each callback runs against a recording builder, so the key is
+ * the exact sequence of builder calls and values. Anything else (classes,
+ * byte arrays, coercion of a builder value) makes the read uncacheable.
+ */
+const optionKey = (value: unknown, depth = 0): unknown => {
+	if (depth > 12) throw new Unkeyable();
+	if (value === null || typeof value === "string" || typeof value === "boolean")
+		return value;
+	if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+	if (value === undefined) return { u: 1 };
+	if (value instanceof Date) return { d: value.getTime() };
+	if (typeof value === "function") {
+		const traced = (value as { [TRACE]?: unknown })[TRACE];
+		if (traced !== undefined) return traced;
+		const node = (trace: unknown): unknown =>
+			new Proxy(() => undefined, {
+				get: (_target, property) =>
+					property === TRACE
+						? trace
+						: typeof property === "symbol"
+							? undefined
+							: node({ get: property, of: trace }),
+				apply: (_target, _self, args: unknown[]) =>
+					node({
+						call: trace,
+						args: args.map((arg) => optionKey(arg, depth + 1)),
+					}),
+			});
+		return {
+			fn: optionKey(
+				(value as (builder: unknown) => unknown)(node({ arg: depth })),
+				depth + 1,
+			),
+		};
+	}
+	if (Array.isArray(value)) return value.map((item) => optionKey(item, depth + 1));
+	if (typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype)
+		return Object.fromEntries(
+			Object.entries(value).map(([key, item]) => [key, optionKey(item, depth + 1)]),
+		);
+	throw new Unkeyable();
+};
+
+/**
+ * Keeps the SDK's per-invocation reads in memory between operations.
+ *
+ * Served only while every `executor_*` table carries the change trigger
+ * (`0048_executor_wakeups.sql`) and serve forwards database change
+ * notifications as an epoch with each request ({@link observe}); any other
+ * process's write bumps it. This process's own ORM writes drop everything
+ * before and after they run. Reads inside a transaction, and claimed or
+ * missing OAuth grants (renewal coordination), always go to the database.
+ */
+export const rowCache = (sql: PgClient.PgClient) => {
+	const rows = new Map<string, { readonly at: number; readonly value: unknown }>();
+	/** Bumped by every invalidation; a read that raced one is not kept. */
+	let generation = 0;
+	/** Triggers verified on every executor table. */
+	let installed = false;
+	/** The latest epoch serve sent; undefined while serve cannot invalidate. */
+	let epoch: number | undefined;
+	const clear = () => {
+		generation++;
+		rows.clear();
+	};
+	const inTransaction = Effect.map(
+		Effect.serviceOption(sql.transactionService),
+		Option.isSome,
+	);
+	const keepable = (table: string, result: unknown) =>
+		table !== "oauthGrants" ||
+		(typeof result === "object" &&
+			result !== null &&
+			"status" in result &&
+			typeof result.status === "string" &&
+			result.status.startsWith("ready_"));
+	const read =
+		(method: string, table: string, work: Effect.Effect<unknown, unknown>) =>
+		(options: unknown) =>
+			Effect.gen(function* () {
+				if (
+					!installed ||
+					epoch === undefined ||
+					!CACHED_TABLES.has(table) ||
+					(yield* inTransaction)
+				)
+					return yield* work;
+				let key: string;
+				try {
+					key = JSON.stringify([method, table, optionKey(options)]);
+				} catch {
+					return yield* work;
+				}
+				const hit = rows.get(key);
+				rows.delete(key);
+				// Deployments never change; other rows are re-read after a while
+				// in case a notification was lost unnoticed.
+				if (
+					hit !== undefined &&
+					(table === "deployments" || Date.now() - hit.at < ROW_TTL_MS)
+				) {
+					rows.set(key, hit);
+					return structuredClone(hit.value);
+				}
+				const before = generation;
+				const result = yield* work;
+				if (before === generation && keepable(table, result)) {
+					try {
+						rows.set(key, { at: Date.now(), value: structuredClone(result) });
+					} catch {
+						return result;
+					}
+					for (const oldest of rows.keys()) {
+						if (rows.size <= ROW_CACHE_ENTRIES) break;
+						rows.delete(oldest);
+					}
+				}
+				return result;
+			});
+	const writing = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+		Effect.suspend(() => {
+			clear();
+			return effect;
+		}).pipe(Effect.ensuring(Effect.sync(clear)));
+	return {
+		/** Checks once that every executor table notifies on change. */
+		verify: Effect.gen(function* () {
+			const rows = yield* sql<{
+				tables: string;
+				missing: string;
+			}>`SELECT count(*) AS tables, count(*) FILTER (WHERE NOT EXISTS (SELECT 1 FROM pg_trigger g WHERE g.tgrelid=c.oid AND g.tgname='zuse_cloud_executor_wake' AND g.tgenabled<>'D')) AS missing FROM pg_class c WHERE c.relnamespace=current_schema()::regnamespace AND c.relkind='r' AND left(c.relname,9)='executor_'`;
+			const found = rows[0];
+			installed =
+				found !== undefined &&
+				Number(found.tables) > 0 &&
+				Number(found.missing) === 0;
+			if (!installed)
+				console.error(
+					JSON.stringify({ event: "executor_row_cache_disabled", reason: "triggers_missing" }),
+				);
+		}),
+		/**
+		 * Serve's change epoch for this request: `null` while serve is not
+		 * listening (read everything); a newer epoch drops every kept row.
+		 */
+		observe(next: number | null) {
+			if (next === null) {
+				if (epoch !== undefined) clear();
+				epoch = undefined;
+			} else if (epoch === undefined || next > epoch) {
+				clear();
+				epoch = next;
+			}
+		},
+		wrap<O extends object>(source: O): O {
+			const orm = source as Record<string, unknown>;
+			const wrapped: Record<string, unknown> = { ...orm };
+			for (const method of ["findFirst", "findMany", "count"])
+				wrapped[method] = (table: string, options?: unknown) =>
+					read(
+						method,
+						table,
+						(orm[method] as (t: string, o?: unknown) => Effect.Effect<unknown, unknown>)(
+							table,
+							options,
+						),
+					)(options);
+			for (const method of [
+				"create",
+				"createMany",
+				"updateMany",
+				"deleteMany",
+				"upsert",
+			])
+				wrapped[method] = (...args: unknown[]) =>
+					writing(
+						(orm[method] as (...a: unknown[]) => Effect.Effect<unknown, unknown>)(
+							...args,
+						),
+					);
+			wrapped.transaction = (effect: Effect.Effect<unknown, unknown, unknown>) =>
+				writing(
+					(orm.transaction as (e: typeof effect) => Effect.Effect<unknown, unknown>)(
+						effect,
+					),
+				);
+			return wrapped as unknown as O;
+		},
+	};
+};
+
+/**
  * Only these bundled declarations can execute: a remote MCP endpoint with one
  * auth method. Endpoints come from the host's lookup; no user source, eval, or
  * dynamic deployment.
@@ -589,9 +799,17 @@ export async function createPluginEngine(
 					return next;
 				}),
 		};
-		const db = await run(makeExecutorStorage({ provider: "postgresql" }));
+		const storage = await run(makeExecutorStorage({ provider: "postgresql" }));
+		const cache = rowCache(sql);
+		const db: typeof storage = {
+			...storage,
+			orm: (version) => cache.wrap(storage.orm(version)),
+		};
 		if (options.migrate) await run(db.migrate);
-		else await run(db.checkMigration);
+		else {
+			await run(db.checkMigration);
+			await run(cache.verify);
+		}
 		const bytes = Uint8Array.from(
 			atob(options.encryptionKey.replaceAll("-", "+").replaceAll("_", "/")),
 			(c) => c.charCodeAt(0),
@@ -817,6 +1035,7 @@ export async function createPluginEngine(
 					throw new Error("Plugin requires additional approval");
 				return result.value;
 			},
+			observe: (epoch) => cache.observe(epoch),
 			ready: () =>
 				run(sql`SELECT 1 FROM zuse_executor_state LIMIT 1`).then(() => undefined),
 			close: () => managed.dispose(),
