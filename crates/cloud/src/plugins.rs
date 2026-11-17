@@ -10,6 +10,9 @@ pub mod catalog;
 pub mod egress;
 mod executor;
 pub(crate) mod routes;
+mod views;
+#[cfg(test)]
+mod wakeup_tests;
 
 use crate::{crypto::MasterKey, error::ApiError};
 use catalog::Auth;
@@ -45,6 +48,8 @@ BEGIN
  END IF;
 END $grants$;";
 pub const MIGRATION: &str = include_str!("../migrations/0009_plugins.sql");
+/// Change notifications that keep `serve`'s in-memory plugin views current.
+pub const WAKEUPS_MIGRATION: &str = include_str!("../migrations/0046_plugin_wakeups.sql");
 pub const CALLBACK_PORTS: [u16; 4] = [8976, 8977, 8978, 8979];
 
 const ATTEMPT_TTL_MS: i64 = 10 * 60_000;
@@ -146,7 +151,7 @@ impl PluginIdentity {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CustomServer {
     name: String,
@@ -225,11 +230,13 @@ impl Attempt {
     }
 }
 
+#[derive(Clone)]
 struct ConnectionRow {
     id: String,
     plugin_id: String,
     label: String,
     owner: String,
+    subject: String,
     state: String,
     enabled: bool,
     auth: Option<String>,
@@ -244,6 +251,7 @@ impl ConnectionRow {
             plugin_id: row.get("plugin_id"),
             label: row.get("label"),
             owner: row.get("owner"),
+            subject: row.get("subject"),
             state: row.get("state"),
             enabled: row.get("enabled"),
             auth: row.get("auth"),
@@ -279,6 +287,17 @@ pub struct PluginControl {
     http: reqwest::Client,
     executor: tokio::sync::Mutex<Option<Arc<executor::Executor>>>,
     gate: Arc<tokio::sync::Semaphore>,
+    /// Connection rows and custom servers per tenant; see [`views`].
+    views: views::Views,
+    fences: views::Fences,
+}
+
+/// Holds an admitted operation's capacity permit and tenant fences.
+struct Admitted {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    _local: tokio::sync::OwnedMutexGuard<()>,
+    /// The cross-process advisory lock of management operations.
+    _shared: Option<sqlx::Transaction<'static, sqlx::Postgres>>,
 }
 
 fn now() -> i64 {
@@ -361,6 +380,7 @@ impl PluginControl {
             .execute(&mut *lock)
             .await?;
         sqlx::raw_sql(MIGRATION).execute(pool).await?;
+        sqlx::raw_sql(WAKEUPS_MIGRATION).execute(pool).await?;
         executor::Executor::migrate(pool, key).await?;
         sqlx::raw_sql(APP_ROLE_GRANTS).execute(pool).await?;
         lock.commit().await?;
@@ -374,7 +394,79 @@ impl PluginControl {
             config,
             executor: tokio::sync::Mutex::new(None),
             gate: Arc::new(tokio::sync::Semaphore::new(2)),
+            views: views::Views::new(views::VIEW_TTL),
+            fences: views::Fences::default(),
         }))
+    }
+
+    /// Keeps tenants' connection rows and custom servers in memory while
+    /// database notifications can invalidate them: `LISTEN` is up and the
+    /// `0046_plugin_wakeups.sql` triggers exist. Otherwise every operation
+    /// reads them from the database, as before.
+    pub async fn attach_wakeups(self: &Arc<Self>, wakeups: Arc<crate::db::wake::Wakeups>) {
+        if !wakeups.enabled() {
+            return;
+        }
+        // Subscribe first so no change between the check and enabling is missed.
+        let mut notifications = wakeups.subscribe();
+        let installed: Result<i64, sqlx::Error> = sqlx::query_scalar("SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgenabled<>'D' AND ((tgname='zuse_cloud_plugin_connections_wake' AND tgrelid=to_regclass('zuse_plugin_connections')) OR (tgname='zuse_cloud_plugin_servers_wake' AND tgrelid=to_regclass('zuse_plugin_servers')))")
+            .fetch_one(&self.pool)
+            .await;
+        if !matches!(installed, Ok(2)) {
+            tracing::warn!(
+                code = "plugin_wakeups_missing",
+                "Plugin change notifications are not installed; reading plugin connections on every call"
+            );
+            return;
+        }
+        self.views.enable();
+        let weak = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let _wakeups = wakeups;
+            use crate::db::wake::Work;
+            use tokio::sync::broadcast::error::RecvError;
+            loop {
+                let work = notifications.recv().await;
+                let Some(control) = weak.upgrade() else { break };
+                match work {
+                    Ok(Work::Plugins | Work::All) | Err(RecvError::Lagged(_)) => {
+                        control.views.clear()
+                    }
+                    Ok(_) => {}
+                    Err(RecvError::Closed) => {
+                        control.views.disable();
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    /// The tenant's connection rows and custom servers, from memory when
+    /// notifications keep them current.
+    async fn view(&self, tenant: &str) -> Result<views::View, ApiError> {
+        if let Some(view) = self.views.get(tenant) {
+            return Ok(view);
+        }
+        let generation = self.views.generation();
+        let rows = sqlx::query(
+            "SELECT * FROM zuse_plugin_connections WHERE tenant_id=$1 ORDER BY created_at,connection_id",
+        )
+        .bind(tenant)
+        .fetch_all(&self.pool)
+        .await?;
+        let servers = self
+            .servers(tenant)
+            .await?
+            .into_iter()
+            .map(|(id, server, _)| (id, server))
+            .collect();
+        let view = views::View {
+            rows: Arc::new(rows.iter().map(ConnectionRow::from_row).collect()),
+            servers: Arc::new(servers),
+        };
+        self.views.store(tenant, generation, view.clone());
+        Ok(view)
     }
 
     pub async fn ready(&self) -> Result<(), ApiError> {
@@ -441,17 +533,45 @@ impl PluginControl {
             .collect()
     }
 
+    fn catalog_definition(id: &str) -> Option<Definition> {
+        catalog::find(id).map(|entry| Definition {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            endpoint: entry.endpoint.clone(),
+            oauth_discovery: entry.oauth_discovery.clone(),
+            scopes: entry.scopes.clone(),
+            auth: entry.auth,
+            header: None,
+        })
+    }
+    fn custom_definition(id: &str, server: CustomServer) -> Definition {
+        Definition {
+            id: id.into(),
+            name: server.name,
+            endpoint: server.endpoint,
+            oauth_discovery: None,
+            scopes: None,
+            auth: server.header.is_some().then_some(Auth::Header),
+            header: server.header,
+        }
+    }
+    /// [`Self::definition`] resolved from a tenant view.
+    fn view_definition(view: &views::View, id: &str) -> Option<Definition> {
+        if let Some(definition) = Self::catalog_definition(id) {
+            return Some(definition);
+        }
+        if !id.starts_with("custom-") {
+            return None;
+        }
+        view.servers
+            .iter()
+            .find(|(server_id, _)| server_id == id)
+            .map(|(_, server)| Self::custom_definition(id, server.clone()))
+    }
+
     async fn definition(&self, tenant: &str, id: &str) -> Result<Option<Definition>, ApiError> {
-        if let Some(entry) = catalog::find(id) {
-            return Ok(Some(Definition {
-                id: entry.id.clone(),
-                name: entry.name.clone(),
-                endpoint: entry.endpoint.clone(),
-                oauth_discovery: entry.oauth_discovery.clone(),
-                scopes: entry.scopes.clone(),
-                auth: entry.auth,
-                header: None,
-            }));
+        if let Some(definition) = Self::catalog_definition(id) {
+            return Ok(Some(definition));
         }
         if !id.starts_with("custom-") {
             return Ok(None);
@@ -467,15 +587,7 @@ impl PluginControl {
             return Ok(None);
         };
         let server: CustomServer = self.open("server", tenant, id, &sealed)?;
-        Ok(Some(Definition {
-            id: id.into(),
-            name: server.name,
-            endpoint: server.endpoint,
-            oauth_discovery: None,
-            scopes: None,
-            auth: server.header.is_some().then_some(Auth::Header),
-            header: server.header,
-        }))
+        Ok(Some(Self::custom_definition(id, server)))
     }
 
     /// Personal tenants see their own rows; organization tenants also see rows
@@ -487,6 +599,21 @@ impl PluginControl {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(ConnectionRow::from_row).collect())
+    }
+
+    /// [`Self::visible`] from the tenant view.
+    async fn visible_cached(
+        &self,
+        identity: &PluginIdentity,
+    ) -> Result<(views::View, Vec<ConnectionRow>), ApiError> {
+        let view = self.view(&identity.tenant).await?;
+        let rows = view
+            .rows
+            .iter()
+            .filter(|row| row.subject == identity.subject || row.owner == "organization")
+            .cloned()
+            .collect();
+        Ok((view, rows))
     }
 
     async fn attempt(&self, tenant: &str, id: &str) -> Result<Option<Attempt>, ApiError> {
@@ -535,13 +662,15 @@ impl PluginControl {
             return Err(ApiError::forbidden("workspace_access_denied"));
         }
         let _guard = self.admit(&identity.tenant).await?;
+        let _changes = (!matches!(&input, PluginRequest::List { .. }))
+            .then(|| self.views.changes(&identity.tenant));
         match input {
             PluginRequest::List { .. } => {
-                let mut catalog: Vec<PluginDefinition> = self
-                    .servers(&identity.tenant)
-                    .await?
+                let (view, visible) = self.visible_cached(identity).await?;
+                let mut catalog: Vec<PluginDefinition> = view
+                    .servers
                     .iter()
-                    .filter_map(|(id, server, _)| public_server(id, server))
+                    .filter_map(|(id, server)| public_server(id, server))
                     .collect();
                 catalog.extend_from_slice(catalog::public());
                 let tenant_path: String =
@@ -555,12 +684,7 @@ impl PluginControl {
                         self.config.public_origin.origin().ascii_serialization()
                     ),
                     catalog,
-                    connections: self
-                        .visible(identity)
-                        .await?
-                        .iter()
-                        .map(ConnectionRow::public)
-                        .collect(),
+                    connections: visible.iter().map(ConnectionRow::public).collect(),
                 })
             }
             PluginRequest::Connect {
@@ -943,27 +1067,33 @@ impl PluginControl {
                 .ok_or_else(|| ApiError::conflict("plugin_executor_reconnect_required"))?,
         )
     }
-    async fn admit(
-        &self,
-        tenant: &str,
-    ) -> Result<
-        (
-            tokio::sync::OwnedSemaphorePermit,
-            sqlx::Transaction<'_, sqlx::Postgres>,
-        ),
-        ApiError,
-    > {
-        let permit = self
-            .gate
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ApiError::unavailable("plugins_busy"))?;
+    /// Admits a management operation: a capacity permit, this process's
+    /// tenant fence and the cross-process advisory lock, held until it settles.
+    async fn admit(&self, tenant: &str) -> Result<Admitted, ApiError> {
+        let mut admitted = self.admit_local(tenant).await?;
         let mut tx = self.pool.begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
             .bind(format!("plugin-operation:{tenant}"))
             .execute(&mut *tx)
             .await?;
-        Ok((permit, tx))
+        admitted._shared = Some(tx);
+        Ok(admitted)
+    }
+    /// Admits a tool operation: a capacity permit and this process's tenant
+    /// fence. Tool operations change no plugin rows except marking a refused
+    /// connection, and the SDK claims credential renewals in its own rows, so
+    /// they hold no database connection while the upstream server runs.
+    async fn admit_local(&self, tenant: &str) -> Result<Admitted, ApiError> {
+        let permit = self
+            .gate
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::unavailable("plugins_busy"))?;
+        Ok(Admitted {
+            _permit: permit,
+            _local: self.fences.lock(tenant).await,
+            _shared: None,
+        })
     }
     /// Marks the connection usable and clears attempt secrets atomically.
     async fn finish(
@@ -1335,6 +1465,7 @@ impl PluginControl {
             .filter(|a| a.state == "pending" && a.ticket_digest.is_none() && a.expires_at > now())
             .ok_or_else(|| ApiError::bad_request("invalid_plugin_callback"))?;
         let _guard = self.admit(&attempt.tenant).await?;
+        let _changes = self.views.changes(&attempt.tenant);
         let attempt = self
             .attempt(&attempt.tenant, &attempt.id)
             .await?
@@ -1417,13 +1548,14 @@ impl PluginControl {
         identity: &PluginIdentity,
         input: PluginToolRequest,
     ) -> Result<Value, ApiError> {
-        let _guard = self.admit(&identity.tenant).await?;
+        let _guard = self.admit_local(&identity.tenant).await?;
+        let (view, visible) = self.visible_cached(identity).await?;
         let mut connected = Vec::new();
-        for row in self.visible(identity).await? {
+        for row in visible {
             if row.state != "connected" || !row.enabled {
                 continue;
             }
-            if let Some(definition) = self.definition(&identity.tenant, &row.plugin_id).await? {
+            if let Some(definition) = Self::view_definition(&view, &row.plugin_id) {
                 connected.push((row, definition));
             }
         }
@@ -1443,6 +1575,7 @@ impl PluginControl {
                 let (operation,arguments)=match &input {PluginToolRequest::Call{arguments,..}=>("call",Value::Object(arguments.clone())),_=>("schema",Value::Null)};
                 let result=self.engine(json!({"operation":operation,"owner":identity.tenant,"ref":reference,"definition":definition,"tool":tool,"arguments":arguments})).await;
                 if result.as_ref().is_err_and(|error|error.code=="plugin_needs_auth") {
+                    let _changes = self.views.changes(&identity.tenant);
                     sqlx::query("UPDATE zuse_plugin_connections SET state='needs-auth',updated_at=$3 WHERE tenant_id=$1 AND connection_id=$2").bind(&identity.tenant).bind(&row.id).bind(now()).execute(&self.pool).await?;
                 }
                 result
@@ -1550,6 +1683,7 @@ impl PluginControl {
             .await?;
         for (tenant, id) in &expired {
             let _guard = self.admit(tenant).await?;
+            let _changes = self.views.changes(tenant);
             self.fail(tenant, id, "cancelled", None).await?;
         }
         let purged = sqlx::query(

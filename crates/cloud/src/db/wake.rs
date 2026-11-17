@@ -36,6 +36,9 @@ pub enum Work {
     /// An account's shared-credit hold turned on; its online computers should
     /// be paused (trigger from optional migration `0047_billing_wakeups.sql`).
     IdleSleep,
+    /// A plugin connection or custom server row changed (migration
+    /// `0046_plugin_wakeups.sql`); cached plugin views must be re-read.
+    Plugins,
     /// Notifications may have been missed (listener reconnected or lagged).
     All,
 }
@@ -52,6 +55,7 @@ impl Work {
             "mailbox" => Self::Mailbox,
             "auth" => Self::Auth,
             "idle_sleep" => Self::IdleSleep,
+            "plugins" => Self::Plugins,
             _ => return None,
         })
     }
@@ -66,6 +70,7 @@ impl Work {
             Self::Mailbox => "mailbox",
             Self::Auth => "auth",
             Self::IdleSleep => "idle_sleep",
+            Self::Plugins => "plugins",
             Self::All => "all",
         }
     }
@@ -429,6 +434,7 @@ mod tests {
             Work::Mailbox,
             Work::Auth,
             Work::IdleSleep,
+            Work::Plugins,
         ] {
             assert_eq!(Work::parse(kind.as_str()), Some(kind));
         }

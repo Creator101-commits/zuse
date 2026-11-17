@@ -195,3 +195,14 @@ is not tracked live. Stopping machines before the cap is reached would need:
   and to reconcile any difference once usage settles.
 
 That would be new user-visible behavior, so it is not implemented.
+
+Migration `0046_plugin_wakeups.sql` adds triggers that send `NOTIFY plugins`
+on the same channel whenever a plugin connection or custom server row is
+inserted, updated or deleted. `serve` keeps each workspace's connections and
+custom servers in memory so a plugin tool call reads none of them, and drops
+those views on that notification, on a listener reconnect, and synchronously
+for its own writes; views also expire after 60 s. Unlike worker wakeups, this
+cache depends on delivery, so `serve` only uses it while its `LISTEN`
+connection is up and both triggers exist (`plugin-migrate` installs them after
+creating the plugin tables). With `ZUSE_CLOUD_DB_LISTEN=false` every tool call
+reads the rows, as before.

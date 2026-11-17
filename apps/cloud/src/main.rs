@@ -1692,6 +1692,7 @@ async fn main() -> Result<()> {
             if let Some(settings) = zuse_cloud::plugins::PluginConfig::from_env()? {
                 let plugins =
                     zuse_cloud::plugins::PluginControl::from_pool(db.pool.clone(), settings)?;
+                plugins.attach_wakeups(wakeups.clone()).await;
                 let maintenance = plugins.clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
