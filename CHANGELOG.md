@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- On Linux, an agent whose builds exhaust memory no longer takes the whole app down: each agent runs in its own systemd scope, and Zuse stops the agent using the most memory (with a notice in its chat) before the system's OOM handling kills the app.
 - Keep the Settings Back to app button clickable on Windows by excluding it from the window-drag region.
 
 ## 0.26.1 - 2026-11-15

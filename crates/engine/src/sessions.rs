@@ -377,6 +377,26 @@ impl SessionsEngine {
         let _ = self.inner.analytics.set(analytics);
     }
 
+    /// Live runtimes whose agent process is known: `(chat id, agent pid)`.
+    pub(crate) fn agent_processes(&self) -> Vec<(String, u32)> {
+        lock(&self.inner.runs)
+            .iter()
+            .filter_map(|(chat, handle)| Some((chat.clone(), handle.turn.agent_pid()?)))
+            .collect()
+    }
+
+    /// Put an error notice into the chat's live run, shown in its transcript.
+    pub(crate) fn notice(&self, chat: &str, message: &str) -> bool {
+        lock(&self.inner.runs).get(chat).is_some_and(|handle| {
+            handle
+                .engine_tx
+                .send(AgentEvent::Error {
+                    message: message.into(),
+                })
+                .is_ok()
+        })
+    }
+
     pub(crate) fn permission_failure(&self, chat: &str, run: &str, message: &str) {
         if let Some(handle) = lock(&self.inner.runs)
             .get(chat)
