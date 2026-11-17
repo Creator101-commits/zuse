@@ -3690,7 +3690,10 @@ impl EngineRpc {
                 } else {
                     gateway.request(&request).await
                 }
-                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                .map_err(|error| {
+                    tracing::warn!(method, ?error, "plugin request failed: {error}");
+                    RpcError::Failed(error.to_string())
+                })?;
                 RpcReply::value(&response)
             }
             methods::PLUGIN_TOOLS => {
@@ -3708,7 +3711,10 @@ impl EngineRpc {
                 let response = gateway
                     .tools(&p.chat_id, &p.request)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(|error| {
+                        tracing::warn!(?error, "plugin tool request failed: {error:#}");
+                        RpcError::Failed(error.to_string())
+                    })?;
                 RpcReply::value(&response)
             }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),

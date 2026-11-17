@@ -173,3 +173,5 @@ mod tests {
 }
 
 pub(crate) mod owned;
+#[cfg(target_os = "linux")]
+pub mod scope;

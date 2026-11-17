@@ -363,9 +363,10 @@ fn can_apply_title(original: Option<&str>, current: Option<&str>) -> bool {
     original == current && needs_title(current)
 }
 
-/// The request's first words: the completed-turn fallback name.
+/// The request's first words: the completed-turn fallback name. Chips read
+/// as their labels, never as link markup.
 fn first_words(prompt: &str) -> String {
-    prompt
+    zuse_protocol::file_mentions::mention_display_text(prompt)
         .split_whitespace()
         .take(7)
         .collect::<Vec<_>>()
@@ -762,6 +763,10 @@ mod tests {
         assert_eq!(
             first_words("please   fix the login flow when the session expires today"),
             "please fix the login flow when the"
+        );
+        assert_eq!(
+            first_words("can you read [Linear](zuse-plugin:linear) issues"),
+            "can you read Linear issues"
         );
         assert!(!TitleTrigger::TurnStarted.fallback());
         assert!(TitleTrigger::TurnCompleted.fallback());

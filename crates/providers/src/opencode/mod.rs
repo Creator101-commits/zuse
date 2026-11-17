@@ -472,6 +472,10 @@ impl Harness for OpencodeHarness {
         request.prompt = zuse_protocol::invocation::harness_prompt(&request.prompt, self.id());
         let cwd = (!request.cwd.is_empty()).then(|| request.cwd.clone());
         let server = self.server(cwd.as_deref(), request.mcp.as_ref()).await?;
+        controls
+            .turn
+            .adopt_agent(server.child.as_ref().and_then(|c| c.id()))
+            .await;
         let (event_tx, event_rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(256);
         tokio::spawn(run_session(Session {
             server,

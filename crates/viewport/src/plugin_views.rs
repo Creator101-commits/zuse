@@ -718,7 +718,7 @@ impl WorkspaceView {
                     if self.plugin_request.is_some() {
                         crate::localization::text("plugins-plugins_loading", cx)
                     } else {
-                        ("Plugins are unavailable. Refresh to try again.").to_string()
+                        self.plugin_state.unavailable_message()
                     },
                 ));
             } else if listing.sections.is_empty() {
@@ -757,20 +757,6 @@ impl WorkspaceView {
         column()
             .size_full()
             .min_h_0()
-            .child(
-                row().h(px(36.)).flex_none().px_3().child(
-                    control(
-                        "plugins-back-to-settings",
-                        tr(cx, msg::native::back_to_settings),
-                    )
-                    .child(icon("alt-arrow-left").size(px(14.)))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.close_plugins_browse();
-                        this.settings = true;
-                        this.select_settings_section(crate::settings_view::Section::Plugins, cx);
-                    })),
-                ),
-            )
             .child(
                 column()
                     .id("plugins-page")

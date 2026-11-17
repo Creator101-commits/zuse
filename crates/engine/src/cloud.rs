@@ -145,6 +145,21 @@ pub(crate) fn rpc_error(error: anyhow::Error) -> zuse_rpc::RpcError {
 
 pub const DEFAULT_API_URL: &str = crate::api_origins::DEFAULT_CLOUD_API_URL;
 
+/// The cloud origin this process's engine talks to, in the exact form its
+/// replies carry as `apiOrigin`. Resolved like the engine itself
+/// (`ZUSE_CLOUD_API_URL`, else `ZUSE_API_URL`, else the default), so a
+/// staging profile that only sets `ZUSE_API_URL` is not mistaken for
+/// production.
+pub fn configured_api_origin() -> String {
+    canonical_origin(&crate::api_origins::from_env().cloud)
+}
+
+fn canonical_origin(origin: &str) -> String {
+    reqwest::Url::parse(origin)
+        .map(|url| url.as_str().to_owned())
+        .unwrap_or_else(|_| origin.to_owned())
+}
+
 /// Production cloud origins. Cloud computers stay off against these unless
 /// explicitly enabled.
 const PRODUCTION_ORIGINS: &[&str] = &["https://api.zuse.sh", "https://api-rust.zuse.sh"];
@@ -1982,6 +1997,15 @@ mod tests {
     #[test]
     fn cloud_defaults_to_the_rust_cloud_origin() {
         assert_eq!(DEFAULT_API_URL, "https://api-rust.zuse.sh");
+        // The configured origin is spelled exactly as replies' `apiOrigin`.
+        assert_eq!(
+            canonical_origin(DEFAULT_API_URL),
+            CloudApi::new(DEFAULT_API_URL).unwrap().origin.as_str()
+        );
+        assert_eq!(
+            canonical_origin("https://api-rust-stag.zuse.sh"),
+            "https://api-rust-stag.zuse.sh/"
+        );
         let api = CloudApi::new(DEFAULT_API_URL).unwrap();
         assert_eq!(api.origin.as_str(), "https://api-rust.zuse.sh/");
     }

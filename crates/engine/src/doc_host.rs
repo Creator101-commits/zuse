@@ -4587,6 +4587,28 @@ impl DocHost {
         }
     }
 
+    /// Stop a chat's agent because it is exhausting the machine's memory:
+    /// the notice goes into its transcript, its queue pauses (a queued
+    /// message would only restart the same work) and the runtime ends with
+    /// everything it started, as the Stop button does.
+    pub(crate) async fn stop_for_memory(
+        &self,
+        chat_id: &str,
+        notice: &str,
+    ) -> Result<bool, EngineError> {
+        let Some(sessions) = self.sessions() else {
+            return Ok(false);
+        };
+        let handle = self.open_local(chat_id)?;
+        sessions.notice(chat_id, notice);
+        if self.interrupt_and_pause_queue(&sessions, &handle).await? {
+            return Ok(true);
+        }
+        // Parked with nothing the queue logic counts as work, yet still
+        // holding memory (a detached build): end the runtime anyway.
+        sessions.terminate(chat_id).await
+    }
+
     /// Stop the active turn without treating the resulting Idle transition as
     /// permission to release the next queued message. The same lock used by
     /// drains closes the race between clicking Cancel and the status watcher.

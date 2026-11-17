@@ -2375,7 +2375,10 @@ impl ToolActivity {
 fn tool_display_name(call: &ToolCall) -> String {
     match call {
         _ if call.is_subagent_spawn() => "Agent".into(),
-        ToolCall::Mcp { tool, .. } => tool.clone(),
+        ToolCall::Mcp { tool, .. } => match plugin_tool(call) {
+            Some(call) => call.label(),
+            None => tool.clone(),
+        },
         ToolCall::Unknown { name, .. } => name.clone(),
         _ => tool_chip_content(call).0.into(),
     }
@@ -11080,7 +11083,8 @@ fn chip_header_row(
         tool_title_shimmer_phase(shimmer_epoch(), Instant::now())
     });
     let code_detail = tool.kind == ToolItemKind::Call
-        && matches!(tool.call, ToolCall::Exec { .. } | ToolCall::Mcp { .. });
+        && matches!(tool.call, ToolCall::Exec { .. } | ToolCall::Mcp { .. })
+        && plugin_tool(&tool.call).is_none();
     let stats = (tool.kind == ToolItemKind::Call)
         .then(|| chip_diff_stats(tool))
         .flatten();
@@ -11190,7 +11194,7 @@ fn chip_header_row(
                 .items_center()
                 .overflow_hidden()
                 .text_color(theme.text_muted)
-                .child(tool_group_title(SharedString::from(label), shimmer, theme))
+                .child(tool_group_title(label, shimmer, theme))
                 .map(|label| {
                     if hover_text {
                         label
@@ -11283,10 +11287,14 @@ fn shimmer_epoch() -> Instant {
 /// (`tool_chip_content`), with the file verbs in the tense of the call
 /// (Reading → Read, Editing → Edited); a thought is "Thinking" over its
 /// opening sentence.
-fn chip_label(tool: &ToolItem) -> (&'static str, String) {
+fn chip_label(tool: &ToolItem) -> (SharedString, String) {
     match tool.kind {
-        ToolItemKind::Thought => ("Thinking", thought_teaser(&note_chip_detail(tool))),
-        ToolItemKind::Note => ("Wrote", note_chip_detail(tool)),
+        ToolItemKind::Thought => ("Thinking".into(), thought_teaser(&note_chip_detail(tool))),
+        ToolItemKind::Note => ("Wrote".into(), note_chip_detail(tool)),
+        // A plugin call names the plugin and what it did: "Linear  List issues".
+        ToolItemKind::Call if let Some(call) = plugin_tool(&tool.call) => {
+            (call.plugin.into(), call.action)
+        }
         ToolItemKind::Call => {
             let (label, detail) = tool_chip_content(&tool.call);
             let pending = !tool.resolved;
@@ -11298,9 +11306,40 @@ fn chip_label(tool: &ToolItem) -> (&'static str, String) {
                 ToolCall::EditFile { .. } | ToolCall::ApplyPatch { .. } => "Edited",
                 _ => label,
             };
-            (label, detail)
+            (label.into(), detail)
         }
     }
+}
+
+/// A call to one of Zuse's plugin tools, named for people. The live catalog's
+/// name wins over the bundled one, so plugins it alone lists read right.
+fn plugin_tool(call: &ToolCall) -> Option<zuse_protocol::plugin_tools::PluginToolCall> {
+    let ToolCall::Mcp {
+        server,
+        tool,
+        input,
+    } = call
+    else {
+        return None;
+    };
+    let mut call = zuse_protocol::plugin_tools::plugin_tool_call(server, tool, input.as_ref())?;
+    if let Some(name) = call
+        .plugin_id
+        .as_deref()
+        .and_then(crate::plugin_logos::known_name)
+    {
+        call.plugin = name;
+    }
+    Some(call)
+}
+
+/// The logo a plugin call's row shows in place of its tool glyph, once the
+/// call's address names a plugin the app has a logo for.
+fn plugin_tool_logo(call: &ToolCall) -> Option<SharedString> {
+    plugin_tool(call)?
+        .plugin_id
+        .as_deref()
+        .and_then(crate::plugin_logos::logo_path)
 }
 
 /// The opening sentence of a thought, for its one-line teaser.
@@ -11605,17 +11644,32 @@ fn activity_rail(
         theme,
     )
     .child(
-        crate::icons::icon(match tool.kind {
-            ToolItemKind::Thought => crate::icons::TOOL_THINKING,
-            ToolItemKind::Note => crate::icons::PEN,
-            ToolItemKind::Call => tool_icon_path(&tool.call),
-        })
-        .absolute()
-        .left(px(ACTIVITY_ICON_LEFT))
-        .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
-        .size(px(ACTIVITY_ICON_SIZE))
-        .opacity(branch_reveal)
-        .text_color(tint),
+        match (tool.kind == ToolItemKind::Call)
+            .then(|| plugin_tool_logo(&tool.call))
+            .flatten()
+        {
+            // A plugin call shows its plugin's logo in place of the glyph.
+            Some(logo) => gpui::img(logo)
+                .absolute()
+                .left(px(ACTIVITY_ICON_LEFT))
+                .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
+                .size(px(ACTIVITY_ICON_SIZE))
+                .rounded(px(3.0))
+                .opacity(branch_reveal)
+                .into_any_element(),
+            None => crate::icons::icon(match tool.kind {
+                ToolItemKind::Thought => crate::icons::TOOL_THINKING,
+                ToolItemKind::Note => crate::icons::PEN,
+                ToolItemKind::Call => tool_icon_path(&tool.call),
+            })
+            .absolute()
+            .left(px(ACTIVITY_ICON_LEFT))
+            .top(px(row_height / 2.0 - ACTIVITY_ICON_SIZE / 2.0))
+            .size(px(ACTIVITY_ICON_SIZE))
+            .opacity(branch_reveal)
+            .text_color(tint)
+            .into_any_element(),
+        },
     )
 }
 
@@ -18254,6 +18308,44 @@ mod tests {
             ],
         };
         assert_eq!(tool_chip_content(&todo), ("Todo", "1/2 done".to_string()));
+    }
+
+    #[test]
+    fn plugin_calls_show_the_plugin_its_logo_and_the_action() {
+        let call = |tool: &str, input: Option<serde_json::Value>| ToolCall::Mcp {
+            server: "zuse".into(),
+            tool: tool.into(),
+            input,
+        };
+        let linear = call_item(call(
+            "plugins_call",
+            Some(serde_json::json!({"address":"tools.linear.user.c1.list_issues"})),
+        ));
+        let (label, detail) = chip_label(&linear);
+        assert_eq!((label.as_ref(), detail.as_str()), ("Linear", "List issues"));
+        assert_eq!(
+            plugin_tool_logo(&linear.call).as_deref(),
+            Some("plugin-icons/linear.app")
+        );
+        assert_eq!(tool_display_name(&linear.call), "Linear · List issues");
+
+        // Arguments still streaming: a neutral label and the generic glyph.
+        let streaming = call_item(call("plugins_call", None));
+        let (label, detail) = chip_label(&streaming);
+        assert_eq!((label.as_ref(), detail.as_str()), ("Plugins", "Call tool"));
+        assert_eq!(plugin_tool_logo(&streaming.call), None);
+
+        let search = call_item(call("plugins_search", None));
+        let (label, detail) = chip_label(&search);
+        assert_eq!(
+            (label.as_ref(), detail.as_str()),
+            ("Plugins", "Search tools")
+        );
+
+        // Any other MCP tool keeps its server and tool name.
+        let other = call_item(call("show_ui", None));
+        assert_eq!(chip_label(&other).0.as_ref(), "MCP");
+        assert_eq!(plugin_tool_logo(&other.call), None);
     }
 
     #[test]

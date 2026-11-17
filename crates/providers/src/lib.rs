@@ -111,6 +111,9 @@ pub struct TurnControl {
     background_tasks: std::sync::Arc<BackgroundTasks>,
     steering: std::sync::Arc<std::sync::Mutex<SteeringState>>,
     settled: std::sync::Arc<tokio::sync::Notify>,
+    /// OS pid of the runtime's agent process (0 until spawned), so the host
+    /// can account its memory and stop it under memory pressure.
+    agent_pid: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 /// One background task as a driver reports it; the host stamps its times.
 #[derive(Clone, Debug, PartialEq)]
@@ -166,6 +169,25 @@ struct SteeringState {
 }
 
 impl TurnControl {
+    /// Host: the runtime's agent process, once spawned.
+    pub fn agent_pid(&self) -> Option<u32> {
+        match self.agent_pid.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            pid => Some(pid),
+        }
+    }
+
+    /// Driver: record the agent process just spawned for this runtime and,
+    /// on Linux, give it a systemd scope of its own so its memory (and its
+    /// builds') is charged to it rather than to the app.
+    pub(crate) async fn adopt_agent(&self, pid: Option<u32>) {
+        let Some(pid) = pid else { return };
+        self.agent_pid
+            .store(pid, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(target_os = "linux")]
+        crate::process::scope::adopt(pid).await;
+    }
+
     /// Host: end the in-flight turn, keeping the runtime and its background work.
     pub fn stop_turn(&self) {
         self.stop_turn_epoch();

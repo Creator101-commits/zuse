@@ -9,21 +9,26 @@ impl WorkspaceView {
         let next = if let Some(value) = frame.get("ok").or_else(|| frame.get("item")) {
             match self.plugin_state.apply(value) {
                 Ok(next) => next,
-                Err(error) => {
-                    self.plugin_state.notice = Some(error.into());
-                    self.plugin_state.failed()
-                }
+                Err(error) => self.plugin_state.failed_with(error),
             }
-        } else if frame.get("err").is_some() || frame["done"] == true {
-            self.plugin_state.notice = Some(
-                "Could not confirm the plugin request. Check connections before trying again."
-                    .into(),
-            );
-            self.plugin_state.failed()
+        } else if let Some(error) = frame.get("err") {
+            // Keep the engine's reason: a read shows it on the empty page, a
+            // write in the notice next to the reconciling read.
+            self.plugin_state.failed_with(
+                error
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| error.to_string()),
+            )
+        } else if frame["done"] == true {
+            self.plugin_state.failed_with(
+                "Could not confirm the plugin request. Check connections before trying again.",
+            )
         } else {
             return;
         };
         self.plugin_request = None;
+        self.plugin_request_at = None;
         self.pending.remove(&id);
         if let Some(next) = next {
             self.plugin_action(next);
@@ -128,6 +133,66 @@ mod tests {
             json!({"action":"list","tenantId":"organization:team"})
         );
         assert_eq!(plugin_calls[2], json!({"action":"list"}));
+    }
+    #[gpui::test]
+    fn failed_reads_show_the_engine_reason_and_refresh_recovers_from_a_lost_reply(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(initialize);
+        let (requests, mut received) = futures::channel::mpsc::unbounded();
+        let (_events, frames) = futures::channel::mpsc::unbounded();
+        let window = cx.add_window(|window, cx| {
+            WorkspaceView::new(
+                Transport {
+                    requests,
+                    events: frames,
+                },
+                window,
+                cx,
+            )
+        });
+        window
+            .update(cx, |view, _, cx| {
+                // Not connected yet: the page says why instead of "unavailable".
+                view.plugin_action(json!({"action":"list"}));
+                assert!(view.plugin_request.is_none());
+                assert!(view.plugin_state.load_error.is_some());
+                view.connected = true;
+                view.cloud_account = json!({"user":{"id":"owner"}});
+                view.plugin_action(json!({"action":"list"}));
+                let read = view.plugin_request.unwrap();
+                let reason = "Plugin service is unavailable (could not connect). Check the account connection and try again.";
+                view.receive(json!({"id":read,"err":reason,"done":true}), cx);
+                assert!(view.plugin_request.is_none());
+                assert_eq!(
+                    view.plugin_state.unavailable_message(),
+                    format!("Plugins are unavailable: {reason}")
+                );
+                // A reply that never arrives blocks Refresh only until it is overdue.
+                view.plugin_action(json!({"action":"list"}));
+                let lost = view.plugin_request.unwrap();
+                view.plugin_action(json!({"action":"list"}));
+                assert_eq!(view.plugin_request, Some(lost));
+                view.plugin_request_at =
+                    Some(web_time::Instant::now() - PLUGIN_REQUEST_TIMEOUT - std::time::Duration::from_secs(1));
+                view.plugin_action(json!({"action":"list"}));
+                let retry = view.plugin_request.unwrap();
+                assert_ne!(retry, lost);
+                view.receive(json!({"id":lost,"err":"late","done":true}), cx);
+                assert_eq!(view.plugin_request, Some(retry));
+                view.receive(json!({"id":retry,"ok":{"kind":"snapshot","canManage":true,"tenantId":"personal:owner","tenants":[],"endpoint":"unused","catalog":[{"id":"linear","name":"Linear","description":"Issues"}],"connections":[]}}), cx);
+                assert!(view.plugin_request.is_none());
+                assert!(view.plugin_state.load_error.is_none());
+                assert!(view.plugin_state.snapshot["catalog"].is_array());
+            })
+            .unwrap();
+        let mut reads = 0;
+        while let Ok(request) = received.try_recv() {
+            if request["method"] == methods::PLUGINS {
+                reads += 1;
+            }
+        }
+        assert_eq!(reads, 3);
     }
     #[gpui::test]
     fn workspace_selection_uses_a_mutation_and_reconciles_its_uncertain_receipt(

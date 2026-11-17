@@ -15310,6 +15310,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "tracing",
  "ttf-parser",
  "unicode-segmentation",
  "url",
