@@ -75,6 +75,12 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         !control.idle_sleep_once(now).await.unwrap(),
         "coalesced input gets the full ten minutes"
     );
+    let quiet = control.idle_ms + grace;
+    assert_eq!(
+        control.idle_sleep_due(now).await.unwrap(),
+        Some(now - 600_000 + quiet),
+        "the deadline is the instant admission becomes possible"
+    );
     sqlx::query("UPDATE api_cloud_workspaces SET last_activity_at=1,next_action_at=0 WHERE workspace_id='ws-bob'").execute(&pool).await.unwrap();
     for state in [
         "queued",
@@ -89,6 +95,11 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
             !control.idle_sleep_once(now).await.unwrap(),
             "must not sleep {state}"
         );
+        assert_eq!(
+            control.idle_sleep_due(now).await.unwrap(),
+            None,
+            "a live command has no idle deadline ({state})"
+        );
     }
     sqlx::query("UPDATE zuse_rust_task_command_execution SET state='completed',updated_at=$1")
         .bind(now - 300_000)
@@ -98,6 +109,17 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
     assert!(
         !control.idle_sleep_once(now).await.unwrap(),
         "upgraded API must notice recent completed work even with old workspace timestamp"
+    );
+    assert_eq!(
+        control.idle_sleep_due(now).await.unwrap(),
+        Some(now - 300_000 + quiet),
+        "recent completed work moves the deadline"
+    );
+    assert!(
+        !control
+            .idle_sleep_once(now - 300_000 + quiet - 1)
+            .await
+            .unwrap()
     );
     sqlx::query("UPDATE zuse_rust_task_command_execution SET updated_at=1")
         .execute(&pool)
@@ -123,6 +145,11 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         assert!(
             !control.idle_sleep_once(now).await.unwrap(),
             "unsupported/repairing computers must not block or be paused"
+        );
+        assert_eq!(
+            control.idle_sleep_due(now).await.unwrap(),
+            None,
+            "ineligible computers never produce a past-due deadline"
         );
     }
     sqlx::query("UPDATE api_cloud_workspaces SET request_config=$1,state='setup' WHERE workspace_id='ws-bob'").bind(config()).execute(&pool).await.unwrap();
@@ -151,6 +178,7 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         !control.idle_sleep_once(now).await.unwrap(),
         "launch must finish first"
     );
+    assert_eq!(control.idle_sleep_due(now).await.unwrap(), None);
     sqlx::query("DELETE FROM api_cloud_workspace_launch_intents")
         .execute(&pool)
         .await
@@ -188,6 +216,11 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         .execute(&pool)
         .await
         .unwrap();
+    assert_eq!(
+        control.idle_sleep_due(now).await.unwrap(),
+        Some(quiet + 1),
+        "past due: admission runs now"
+    );
     let (a, b) = tokio::join!(control.idle_sleep_once(now), control.idle_sleep_once(now));
     assert_eq!(
         usize::from(a.unwrap()) + usize::from(b.unwrap()),
@@ -207,6 +240,11 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         "idle-timeout"
     );
     assert!(!control.idle_sleep_once(now).await.unwrap());
+    assert_eq!(
+        control.idle_sleep_due(now).await.unwrap(),
+        None,
+        "a pausing computer has no deadline"
+    );
     let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*)FROM zuse_rust_lifecycle_operations),(SELECT count(*)FROM zuse_rust_jobs WHERE kind='workspace-lifecycle')").fetch_one(&pool).await.unwrap();
     assert_eq!(counts, (1, 1));
     // Memory resume may keep the same generation and last activity. A new
@@ -229,10 +267,20 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         .await
         .unwrap();
     assert!(!control.idle_sleep_once(resumed + grace).await.unwrap());
+    assert_eq!(
+        control.idle_sleep_due(resumed + grace).await.unwrap(),
+        None,
+        "busy and not held: nothing to schedule"
+    );
     sqlx::query("UPDATE api_cloud_billing_periods SET shared_credit_hold=true")
         .execute(&pool)
         .await
         .unwrap();
+    assert_eq!(
+        control.idle_sleep_due(resumed + grace).await.unwrap(),
+        Some(resumed + grace),
+        "a held account's computers are due at their next action"
+    );
     assert!(control.idle_sleep_once(resumed + grace).await.unwrap());
     let reason:String=sqlx::query_scalar("SELECT request_config->'rustLifecycleOperation'->>'reason' FROM api_cloud_workspaces WHERE workspace_id='ws-bob'").fetch_one(&pool).await.unwrap();
     assert_eq!(reason, "credits-exhausted");

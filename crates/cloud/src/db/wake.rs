@@ -223,8 +223,12 @@ pub struct Cadence {
 }
 
 impl Cadence {
-    /// `ZUSE_CLOUD_WORKER_IDLE_POLL_MS` (default 20s with `LISTEN`, 5s
+    /// `ZUSE_CLOUD_WORKER_IDLE_POLL_MS` (default 5 minutes with `LISTEN`, 5s
     /// without) and `ZUSE_CLOUD_WORKER_POLL_MS` (default 1s) for the busy floor.
+    ///
+    /// With `LISTEN` every work source sends `NOTIFY` and every timed transition
+    /// is a known due time, so the idle timer is only a safety net for a lost
+    /// notification.
     pub fn from_env(listening: bool, busy_ms: u64) -> anyhow::Result<Self> {
         Self::from_lookup(listening, busy_ms, |name| std::env::var(name).ok())
     }
@@ -235,7 +239,7 @@ impl Cadence {
     ) -> anyhow::Result<Self> {
         let idle_ms =
             match lookup("ZUSE_CLOUD_WORKER_IDLE_POLL_MS").filter(|v| !v.trim().is_empty()) {
-                None if listening => 20_000,
+                None if listening => IDLE_WITH_LISTEN_MS,
                 None => 5_000,
                 Some(raw) => raw
                     .trim()
@@ -253,7 +257,17 @@ impl Cadence {
             busy: Duration::from_millis(busy_ms.min(idle_ms)),
         })
     }
+    /// Longest backoff after failed database rounds. Kept short so a loop
+    /// recovers quickly from an outage even when its idle timer is long.
+    pub fn failure_cap(&self) -> Duration {
+        self.idle.min(Duration::from_millis(FAILURE_CAP_MS))
+    }
 }
+
+/// Idle safety net when `LISTEN` is enabled.
+pub const IDLE_WITH_LISTEN_MS: u64 = 300_000;
+/// Longest backoff after consecutive database failures.
+pub const FAILURE_CAP_MS: u64 = 20_000;
 
 /// How long to sleep given the earliest known due time (epoch ms).
 ///
@@ -360,9 +374,22 @@ mod tests {
         assert_eq!(
             Cadence::from_lookup(true, 1_000, none).unwrap(),
             Cadence {
-                idle: Duration::from_secs(20),
+                idle: Duration::from_secs(300),
                 busy: Duration::from_secs(1)
             }
+        );
+        // Failure backoff stays short even with the long idle safety net.
+        assert_eq!(
+            Cadence::from_lookup(true, 1_000, none)
+                .unwrap()
+                .failure_cap(),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            Cadence::from_lookup(false, 1_000, none)
+                .unwrap()
+                .failure_cap(),
+            Duration::from_secs(5)
         );
         assert_eq!(
             Cadence::from_lookup(false, 1_000, none).unwrap().idle,

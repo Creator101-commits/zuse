@@ -129,7 +129,7 @@ impl Hub {
                             wait = crate::db::failure_backoff(
                                 failures,
                                 Duration::from_secs(1),
-                                cadence.idle,
+                                cadence.failure_cap(),
                             );
                             retry_at = Some(tokio::time::Instant::now() + wait);
                             tracing::warn!(code = error.code, "Account event dispatch deferred");
