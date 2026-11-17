@@ -116,7 +116,7 @@ jobs:
       - run: cargo test -p zuse-relay --test startup
       - run: cargo test -p zuse-remote
       - run: cargo test -p zuse-plugins
-      - run: "cargo test --no-fail-fast -p zuse-engine --lib -- plugins::tests managed_access source_control::tests::pr_ visuals diff_sync::turn_snapshot registry::custom_acp::tests doc_host::tool_result_tests doc_host::source_context_tests account::tests harness_models harness_local model_connections::tests native_harness::tests native_recovery::tests sessions::tests"
+      - run: "cargo test --no-fail-fast -p zuse-engine --lib -- plugins::tests managed_access source_control::tests::pr_ visuals diff_sync::turn_snapshot registry::custom_acp::tests doc_host::tool_result_tests doc_host::source_context_tests account::tests harness_models harness_local model_connections::tests native_harness::tests native_recovery::tests sessions::tests archives::tests terminals::restore_tests"
       - run: cargo test --locked -p zuse-engine --lib analytics_counts_structured_refusal_without_recording_the_reason
       - run: cargo test --no-fail-fast -p zuse-engine --test pairing --test browser_access --test git_workspace --test external_chats --test voice_runtime --test relay_access --test durable_turn_review --test thread_sessions --test custom_acp --test auth
       - run: cargo test -p zuse-doc --lib session_owner_tests
