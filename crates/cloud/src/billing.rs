@@ -2,6 +2,7 @@
 mod catalog;
 mod delivery;
 mod exports;
+pub mod schedule;
 mod settlement;
 mod storage;
 pub use exports::{ExportReport, MeterEvent, MeterExportConfig};
@@ -144,6 +145,8 @@ fn cost_policy(
     Ok(policy)
 }
 
+#[cfg(test)]
+mod wake_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

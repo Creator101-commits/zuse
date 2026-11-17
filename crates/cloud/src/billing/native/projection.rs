@@ -162,8 +162,10 @@ impl BillingControl {
             .await
             .map_err(failure)?;
         tx.commit().await?;
-        // Durable acceptance is sufficient for a 2xx; the billing worker owns retries
-        // and projection even if this HTTP request disappears immediately afterwards.
+        // Durable acceptance is sufficient for a 2xx. Project it right away without
+        // delaying the reply; the billing worker still owns retries and projection
+        // if this process stops before the follow-up finishes.
+        self.follow_up(&owner, true);
         Ok(Some(accepted))
     }
 }

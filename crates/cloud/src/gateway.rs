@@ -208,7 +208,7 @@ impl Hub {
                 workspace,
                 token,
                 fence,
-                lease_valid_until: Mutex::new(lease_requested_at + Duration::from_secs(9)),
+                lease_valid_until: Mutex::new(lease_requested_at + LEASE_CONFIRMED_FOR),
                 bytes,
                 state: Mutex::new(State {
                     peers: HashMap::new(),
@@ -219,9 +219,12 @@ impl Hub {
             *slot = Arc::downgrade(&room);
             let supervisor = room.clone();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(2));
+                // Local checks (empty room, expired peers) run every second;
+                // the database renewal and peer revalidation every 5s.
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 tick.tick().await;
+                let mut renewed_at = Instant::now();
                 loop {
                     tick.tick().await;
                     let room = &supervisor;
@@ -233,6 +236,10 @@ impl Hub {
                         }
                     }
                     room.expire();
+                    if renewed_at.elapsed() < LEASE_RENEW_EVERY {
+                        continue;
+                    }
+                    renewed_at = Instant::now();
                     let peers: Vec<_> = {
                         lock(&room.state)
                             .peers
@@ -269,7 +276,7 @@ impl Hub {
                     .await;
                     match lease {
                         Ok(Ok(())) => {
-                            *lock(&room.lease_valid_until) = requested_at + Duration::from_secs(9);
+                            *lock(&room.lease_valid_until) = requested_at + LEASE_CONFIRMED_FOR;
                         }
                         failure => {
                             let transient = match &failure {
@@ -304,6 +311,14 @@ impl Hub {
         .map_err(|_| ApiError::unavailable("workspace_gateway_setup_failed"))?
     }
 }
+/// How often a room renews its gateway lease and revalidates its peers. Each
+/// renewal locks the workspace row, so it stays well below the lease length.
+const LEASE_RENEW_EVERY: Duration = Duration::from_secs(5);
+/// How long a successful renewal is trusted locally. It ends before the
+/// database lease (`GATEWAY_LEASE_MS`) so another process can never forward
+/// for the same workspace at the same time.
+const LEASE_CONFIRMED_FOR: Duration = Duration::from_secs(20);
+
 fn retain_lease(transient: bool, confirmed_until: Instant, now: Instant) -> bool {
     transient && now < confirmed_until
 }

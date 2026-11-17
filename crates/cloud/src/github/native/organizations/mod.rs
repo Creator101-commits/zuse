@@ -118,8 +118,16 @@ impl Joining {
     pub fn notify_dispatch(&self) {
         self.dispatch.notify_one();
     }
-    pub async fn wait_for_dispatch(&self) {
-        tokio::select! {_ = self.dispatch.notified()=>{},_ = tokio::time::sleep(Duration::from_secs(30))=>{}}
+    /// Sleeps until a local enqueue (webhook or route), the earliest retry or
+    /// lease expiry of a pending job, or a slow safety sweep for jobs enqueued
+    /// by another process. One indexed statement per wait.
+    pub async fn wait_for_dispatch(&self, now: i64) {
+        let due: Option<i64> = sqlx::query_scalar("SELECT min(GREATEST(next_attempt_at,COALESCE(lease_until,next_attempt_at)))::bigint FROM zuse_rust_github_join_jobs WHERE requested_version>completed_version")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(Some(now + DISPATCH_RETRY_MS));
+        let wait = dispatch_wait(now, due);
+        tokio::select! {_ = self.dispatch.notified()=>{},_ = tokio::time::sleep(wait)=>{}}
     }
     fn rollout(&self, org: &str) -> Result<(), ApiError> {
         if !self.organizations.contains(org) {
@@ -163,10 +171,11 @@ impl Joining {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         value: &Enrollment,
     ) -> Result<(), ApiError> {
-        let events: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_account_event_outbox') IS NOT NULL")
-                .fetch_one(&mut **tx)
-                .await?;
+        let events: bool = crate::db::schema::present_in(
+            &mut **tx,
+            "SELECT to_regclass('zuse_rust_account_event_outbox') IS NOT NULL",
+        )
+        .await?;
         let previous: Option<Value> = if events {
             sqlx::query_scalar("SELECT data FROM api_github_enrollments WHERE organization_id=$1 AND account_id=$2 FOR UPDATE").bind(&value.organization_id).bind(&value.account_id).fetch_optional(&mut **tx).await?
         } else {
@@ -436,5 +445,33 @@ fn admin(access: &Access) -> Result<&str, ApiError> {
             Ok(organization_id)
         }
         _ => Err(ApiError::forbidden("organization_admin_required")),
+    }
+}
+
+/// Safety sweep for jobs another process enqueued without a local wake.
+const DISPATCH_SWEEP_MS: i64 = 300_000;
+/// Retry after a failed due-time read.
+const DISPATCH_RETRY_MS: i64 = 30_000;
+
+/// How long the reconciler sleeps given the earliest pending job time.
+fn dispatch_wait(now: i64, due: Option<i64>) -> Duration {
+    let until = due.map_or(DISPATCH_SWEEP_MS, |at| {
+        at.saturating_sub(now).clamp(1_000, DISPATCH_SWEEP_MS)
+    });
+    Duration::from_millis(until as u64)
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_waits_for_the_earliest_job_bounded_by_floor_and_sweep() {
+        assert_eq!(dispatch_wait(0, None), Duration::from_secs(300));
+        assert_eq!(dispatch_wait(0, Some(4_000)), Duration::from_secs(4));
+        // Due already (another replica holds the lease or it just failed):
+        // never spin.
+        assert_eq!(dispatch_wait(10_000, Some(0)), Duration::from_secs(1));
+        assert_eq!(dispatch_wait(0, Some(i64::MAX)), Duration::from_secs(300));
     }
 }

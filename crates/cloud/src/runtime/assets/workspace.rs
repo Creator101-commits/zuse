@@ -93,10 +93,11 @@ impl RuntimeControl {
         let mut tx = self.pool.begin().await?;
         self.workspace_asset_locked(id, access, fence, &mut tx)
             .await?;
-        let schema: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_task_asset_chunks') IS NOT NULL")
-                .fetch_one(&mut *tx)
-                .await?;
+        let schema: bool = crate::db::schema::present_in(
+            &mut *tx,
+            "SELECT to_regclass('zuse_rust_task_asset_chunks') IS NOT NULL",
+        )
+        .await?;
         if !schema {
             return Err(ApiError::unavailable("cloud_task_asset_schema_required"));
         }

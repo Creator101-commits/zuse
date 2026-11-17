@@ -16,10 +16,11 @@ pub(crate) async fn delivery(
     connection: &mut sqlx::PgConnection,
     owner: &str,
 ) -> Result<Option<MachineDelivery>, ApiError> {
-    let ready: bool =
-        sqlx::query_scalar("SELECT to_regclass('cloud_machine_versions') IS NOT NULL")
-            .fetch_one(&mut *connection)
-            .await?;
+    let ready: bool = crate::db::schema::present_in(
+        &mut *connection,
+        "SELECT to_regclass('cloud_machine_versions') IS NOT NULL",
+    )
+    .await?;
     if !ready {
         return Ok(None);
     }

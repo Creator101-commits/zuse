@@ -114,29 +114,6 @@ impl ImageControl {
             config,
         }
     }
-    pub async fn connect(
-        url: &str,
-        accounts: impl Into<crate::access_policy::Accounts>,
-        config: ImageConfig,
-    ) -> anyhow::Result<Self> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(6)
-            .after_connect(|conn, _| {
-                Box::pin(async move {
-                    sqlx::query("SET statement_timeout='10s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET lock_timeout='5s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect cloud image writer"))?;
-        Ok(Self::from_pool(pool, accounts, config))
-    }
     pub(crate) async fn owned(&self, account: &str) -> Result<Transaction<'_, Postgres>, ApiError> {
         if !self.accounts.contains(account) {
             return Err(ApiError::forbidden("cloud_image_writes_disabled"));
