@@ -18,6 +18,7 @@ bin/zuse-server       old name for `zuse serve` (a link; bin\zuse-server.cmd on 
 share/zuse/web/       the browser app `zuse serve` serves
 share/zuse/legal/     licences and notices
 manifest.json         SHA-256 inventory; the link is listed under "links"
+install.py            user installer (Linux/macOS, Python 3.11+)
 ```
 
 Extract it anywhere and run `bin/zuse serve --lan`, or copy the tree under a
@@ -26,6 +27,28 @@ prefix such as `/usr/local` (`tar -xzf zuse-cli-*.tar.gz --strip-components=1
 `--assets` or `ZUSE_WEB_ASSETS` overrides that. Run without a command, it says
 the desktop app is not installed and lists the commands. Only `appshot`,
 opening links and `--paired-link-file` need the desktop app.
+
+For a user installation on Linux or macOS, run `python3 install.py` from the
+extracted CLI archive, or `sh install.sh --cli --version VERSION` with the shell
+installer from the release. The shell installer selects `zuse-cli` and verifies
+it against `SHA256SUMS.cli`. The standalone installer verifies the file inventory,
+keeps versioned packages in `~/.zuse/cli/packages`, and switches the `current`
+symlink after the complete package is ready. Launchers in `~/.local/bin` follow
+`current`; set `ZUSE_BIN_HOME` to choose another launcher directory. An existing
+desktop or unrelated `zuse` launcher is never replaced.
+
+Run `zuse serve` and open its printed private link on this computer. Use
+`zuse serve --lan` to connect from another device, or `zuse serve --account`
+for account access. `zuse update` downloads a checksummed CLI archive, checks
+its executable version and installs the browser assets and command together.
+Restart the server to use the upgrade; services installed with `zuse daemon
+install --serve` follow `current` on their next restart. Previous packages and
+profiles are preserved. Updates also require Python 3.11+ and `tar`.
+
+To remove only the launchers, run `python3 ~/.zuse/cli/current/install.py
+--uninstall` or `sh install.sh --cli --uninstall`. Stop any background service
+with `zuse daemon stop` first. Windows CLI archives remain portable; this
+user installer and update path apply to Linux and macOS.
 
 Cargo builds this binary as `zuse-cli` (beside the desktop app's `zuse`);
 packages install it as `bin/zuse` here and as `zuse-server` in the app

@@ -20,6 +20,7 @@ pub mod computers;
 pub mod config;
 pub mod connections;
 pub mod crypto;
+pub mod db;
 pub mod device_proof;
 pub mod devices;
 pub mod error;

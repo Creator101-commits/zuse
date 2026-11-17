@@ -37,7 +37,7 @@ def read(url):
         return response.read()
 
 
-def install(tag, download=read):
+def install(tag, download=read, cli=False):
     if tag:
         tag = tag if tag.startswith('v') else 'v' + tag
         if not re.fullmatch(r'v\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?', tag):
@@ -54,14 +54,16 @@ def install(tag, download=read):
             if not published:
                 raise ValueError('No published Zuse releases found')
             tag = published[0]['tag_name']
-        return install(tag, download)
+        return install(tag, download, cli)
     arch = {'x86_64': 'x86_64', 'aarch64': 'aarch64', 'arm64': 'aarch64'}.get(platform.machine())
-    if platform.system() != 'Linux' or not arch:
-        raise ValueError('This installer supports Linux x86_64 and ARM64')
+    system = {'Linux': 'linux', 'Darwin': 'macos'}.get(platform.system())
+    if not arch or not system or (not cli and system != 'linux'):
+        raise ValueError('Desktop installation supports Linux; --cli supports Linux and macOS (x86_64 and ARM64)')
     version = tag[1:]
-    name = f'zuse-{version}-linux-{arch}'
+    name = f'zuse-{"cli-" if cli else ""}{version}-{system}-{arch}'
     filename = name + '.tar.gz'
-    checksums = download(f'{BASE}/download/{tag}/SHA256SUMS').decode()
+    checksum_name = 'SHA256SUMS.cli' if cli else 'SHA256SUMS'
+    checksums = download(f'{BASE}/download/{tag}/{checksum_name}').decode()
     matches = [line.split()[0] for line in checksums.splitlines() if len(line.split()) == 2 and line.split()[1].lstrip('*') == filename]
     if len(matches) != 1 or not re.fullmatch('[0-9a-f]{64}', matches[0]):
         raise ValueError('Release has no unique checksum for this architecture')
@@ -79,16 +81,17 @@ def install(tag, download=read):
                 if path.is_absolute() or '..' in path.parts or '\\' in member.name or not path.parts or path.parts[0] != name or str(path) in seen:
                     raise ValueError('Unsafe package path')
                 seen.add(str(path))
-                if not member.isfile() and not member.isdir():
+                cli_alias = cli and member.name == name + '/bin/zuse-server' and member.issym() and member.linkname == 'zuse'
+                if not member.isfile() and not member.isdir() and not cli_alias:
                     raise ValueError('Package links and special files are not allowed')
-            # All members are confined regular files/directories; no archive links.
+            # Only the CLI's sibling alias is allowed; all members stay in root.
             bundle.extractall(root)
         package = root / name
         manifest = json.loads((package / 'manifest.json').read_text())
-        if manifest.get('version') != version or manifest.get('arch') != arch or manifest.get('platform') != 'linux' or manifest.get('format') != 1:
+        if manifest.get('version') != version or manifest.get('arch') != arch or manifest.get('platform') != system or manifest.get('format') != 1 or (cli and manifest.get('kind') != 'cli'):
             raise ValueError('Package metadata does not match the requested release')
         expected = manifest['files']
-        actual = {p.relative_to(package).as_posix(): p for p in package.rglob('*') if p.is_file()}
+        actual = {p.relative_to(package).as_posix(): p for p in package.rglob('*') if p.is_file() and not p.is_symlink()}
         if set(actual) != set(expected) | {'manifest.json'}:
             raise ValueError('Package inventory mismatch')
         for relative, digest in expected.items():
@@ -98,15 +101,23 @@ def install(tag, download=read):
         subprocess.run([sys.executable, str(package / 'install.py')], check=True)
     bin_dir = Path(os.environ.get('ZUSE_BIN_HOME', Path.home() / '.local/bin')).expanduser()
     if str(bin_dir) not in os.environ.get('PATH', '').split(os.pathsep):
-        print(f'Add {bin_dir} to your PATH, then run zuse.')
+        print(f'Add {bin_dir} to your PATH, then run ' + ('zuse serve.' if cli else 'zuse.'))
     else:
-        print('Run zuse to start the app.')
-    print('Linux runtime libraries and a working Vulkan driver are required; see the release notes.')
+        print('Run zuse serve to start the browser app.' if cli else 'Run zuse to start the app.')
+    if not cli:
+        print('Linux runtime libraries and a working Vulkan driver are required; see the release notes.')
 
 
-def uninstall():
+def uninstall(cli=False):
     data = Path(os.environ.get('XDG_DATA_HOME', Path.home() / '.local/share')).expanduser().resolve()
     bin_dir = Path(os.environ.get('ZUSE_BIN_HOME', Path.home() / '.local/bin')).expanduser().resolve()
+    if cli:
+        root = Path.home() / '.zuse/cli'
+        installer = root / 'current/install.py'
+        if not (root / '.installed-by-zuse-cli').is_file() or not installer.is_file():
+            raise ValueError('No Zuse-managed CLI installation found; profiles are untouched')
+        subprocess.run([sys.executable, str(installer), '--uninstall'], check=True)
+        return
     packages = data / 'zuse/packages'
     installed = (bin_dir / 'zuse').resolve()
     try:
@@ -122,16 +133,17 @@ def uninstall():
 def main():
     if sys.version_info < (3, 11):
         raise ValueError('Python 3.11 or newer is required')
-    parser = argparse.ArgumentParser(description='Install a checksum-verified Zuse release for the current Linux user.')
+    parser = argparse.ArgumentParser(description='Install a checksum-verified Zuse release for the current user.')
     parser.add_argument('--version', help='Version to install, for example 0.26.0-preview.1; defaults to latest stable, or latest preview if no stable release exists')
     parser.add_argument('--uninstall', action='store_true', help='Remove Zuse-owned launchers; preserve packages and profiles')
+    parser.add_argument('--cli', action='store_true', help='Install only the command and browser app on Linux or macOS')
     args = parser.parse_args()
-    if platform.system() != 'Linux':
-        raise ValueError('This installer is for Linux')
+    if platform.system() != 'Linux' and not (args.cli and platform.system() == 'Darwin'):
+        raise ValueError('Use --cli for a standalone installation on macOS')
     if args.uninstall:
-        uninstall()
+        uninstall(args.cli)
     else:
-        install(args.version)
+        install(args.version, cli=args.cli)
 
 
 if __name__ == '__main__':

@@ -1,10 +1,6 @@
 use crate::{access::Access, error::ApiError};
 use serde_json::{Value, json};
-use sqlx::{
-    PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use std::{str::FromStr, time::Duration};
+use sqlx::{PgPool, Row};
 
 #[derive(Clone)]
 pub struct Store {
@@ -322,44 +318,11 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// One-shot read-only catalog (operator commands and tests). Long-running
+    /// processes pass [`crate::db::ProcessDb::read_only_pool`] to
+    /// [`Self::from_pool`] instead, so the connection stays in their budget.
     pub async fn connect_read_only(url: &str) -> anyhow::Result<Self> {
-        let options = PgConnectOptions::from_str(url)
-            .map_err(|_| anyhow::anyhow!("Invalid cloud PostgreSQL connection configuration"))?
-            .application_name("zuse-cloud-api");
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(Duration::from_secs(5))
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::query("SET default_transaction_read_only = on")
-                        .execute(&mut *connection)
-                        .await?;
-                    sqlx::query("SET statement_timeout = '10s'")
-                        .execute(&mut *connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect_with(options)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect to cloud PostgreSQL"))?;
-        Ok(Self {
-            staging_candidate: None,
-            events: None,
-            connections: None,
-            computers: None,
-            devices: None,
-            plugins: None,
-            pool,
-            billing: None,
-            images: None,
-            projects: None,
-            github: None,
-            github_native: None,
-            github_joining: None,
-            project_templates: Default::default(),
-            transcripts: None,
-        })
+        Ok(Self::from_pool(crate::db::read_only_pool(url).await?))
     }
 
     pub fn from_pool(pool: PgPool) -> Self {
@@ -418,7 +381,7 @@ impl Store {
 
     /// Launch summaries contain no environment values, credentials or secret bindings.
     pub async fn launch_projects(&self, owner: &str) -> Result<Vec<Value>, ApiError> {
-        let present: bool = sqlx::query_scalar("SELECT to_regclass('api_cloud_projects') IS NOT NULL AND to_regclass('api_cloud_project_builds') IS NOT NULL AND to_regclass('api_cloud_snapshots') IS NOT NULL").fetch_one(&self.pool).await?;
+        let present: bool = crate::db::schema::present(&self.pool, "SELECT to_regclass('api_cloud_projects') IS NOT NULL AND to_regclass('api_cloud_project_builds') IS NOT NULL AND to_regclass('api_cloud_snapshots') IS NOT NULL").await?;
         if !present {
             return Ok(vec![]);
         }

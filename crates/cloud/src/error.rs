@@ -45,6 +45,14 @@ impl From<sqlx::Error> for ApiError {
     fn from(error: sqlx::Error) -> Self {
         // SQL errors can carry connection details, SQL and row contents. Log
         // only a validated SQLSTATE; never Display/Debug the error itself.
+        if matches!(error, sqlx::Error::PoolTimedOut) {
+            // Every connection in the process budget stayed busy for the
+            // acquire timeout: fail fast with 503 instead of queueing.
+            tracing::warn!(
+                code = "database_pool_exhausted",
+                "Cloud database pool exhausted"
+            );
+        }
         if let Some(code) = error
             .as_database_error()
             .and_then(|e| e.code())

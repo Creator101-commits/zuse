@@ -711,10 +711,11 @@ impl RuntimeControl {
         provider: &dyn RecoveryProvider,
         now: i64,
     ) -> Result<bool, ApiError> {
-        let ready: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_recovery_operations') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let ready: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_recovery_operations') IS NOT NULL",
+        )
+        .await?;
         if !ready {
             return Ok(false);
         }
@@ -1091,10 +1092,11 @@ pub(super) async fn observe_runtime(
                 required(row, "provider")?
             );
             let mut payload = json!({"eventId":event,"accountId":row["account_id"],"eventName":"zuse_cloud_runtime_observed_ms","units":now-start,"occurredAtMs":now,"metadata":{"provider":row["provider"],"resource_kind":"workspace","resource_id":row["workspace_id"],"provider_sandbox_id":source,"started_at":iso(start),"ended_at":iso(now),"vcpu_count":value["vcpuCount"].to_string(),"memory_mib":value["memoryMib"].to_string(),"measurement":"observed","billable":"false"}});
-            let periods: bool =
-                sqlx::query_scalar("SELECT to_regclass('api_cloud_billing_periods') IS NOT NULL")
-                    .fetch_one(&mut **tx)
-                    .await?;
+            let periods: bool = crate::db::schema::present_in(
+                &mut **tx,
+                "SELECT to_regclass('api_cloud_billing_periods') IS NOT NULL",
+            )
+            .await?;
             let billing: Option<String> = if periods {
                 sqlx::query_scalar("SELECT to_jsonb(p)->>'billing_provider' FROM api_cloud_billing_periods p WHERE account_id=$1 AND period_start<=$2 AND period_end>$2 AND COALESCE(to_jsonb(p)->>'billing_provider','manual')<>'manual' ORDER BY period_start DESC LIMIT 1").bind(required(row,"account_id")?).bind(now).fetch_optional(&mut **tx).await?.flatten()
             } else {

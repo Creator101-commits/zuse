@@ -1,8 +1,10 @@
 //! Embedded billing. Resource accounting and legacy invoice credit remain host-owned.
 mod commerce;
 mod compute;
+mod follow_up;
 mod models;
 mod projection;
+pub(in crate::billing) use follow_up::FollowUps;
 pub use models::ModelReservation;
 
 use super::BillingControl;
@@ -30,6 +32,7 @@ const CLOUD_PLAN: &str = "cloud-workspace-standard-v1";
 
 pub struct NativeBilling {
     engine: Billing,
+    environment: Environment,
     provider: Arc<dyn PaymentProvider>,
     accounts: HashSet<String>,
     default_provider: String,
@@ -155,7 +158,10 @@ impl NativeBilling {
             DatabaseConnection {
                 driver: Dialect::Postgres,
                 url: database_url.into(),
-                max_connections: Some(4),
+                // The embedded engine opens its own pool from the URL. It runs
+                // only for ZUSE_BROKEBOY_ACCOUNTS (staging), outside the
+                // process budget; keep it small.
+                max_connections: Some(2),
                 acquire_timeout_ms: Some(5000),
             },
             BillingOptions {
@@ -177,6 +183,7 @@ impl NativeBilling {
             })?;
         Ok(Some(Self {
             engine,
+            environment,
             provider,
             accounts,
             default_provider,
@@ -340,27 +347,87 @@ impl BillingControl {
         };
         let mut reports = vec![];
         for owner in &native.accounts {
-            let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM zuse_brokeboy_accounts WHERE account_id=$1 AND state='active')").bind(owner).fetch_one(&self.pool).await?;
-            if !active {
-                continue;
+            if let Some(report) = self.maintain_native_account(owner).await? {
+                reports.push(report);
             }
-            self.recover_model_requests(owner).await?;
-            let tx = self.owned_transaction(owner).await?;
-            let result = native
-                .engine
-                .call("maintenance.run", json!({"customerId":owner,"limit":100}))
-                .await
-                .map_err(failure)?;
-            tx.commit().await?;
-            reports.push(result);
-            self.sync_native_subscriptions(owner).await?;
-            self.settle_compute_credits(owner).await?;
-            self.sync_expired_model_requests(owner).await?;
-            self.sync_credit_capacity(owner).await?;
         }
         Ok(json!({"enabled":true,"reports":reports}))
     }
+    /// Engine work, subscription projection, compute debits, expired model
+    /// reservations and the shared-credit hold for one enrolled account.
+    /// `None` when the account is not active. The engine report's `more` is
+    /// true when its work limit was reached.
+    pub(in crate::billing) async fn maintain_native_account(
+        &self,
+        owner: &str,
+    ) -> Result<Option<Value>, ApiError> {
+        let Some(native) = &self.native else {
+            return Ok(None);
+        };
+        let active:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM zuse_brokeboy_accounts WHERE account_id=$1 AND state='active')").bind(owner).fetch_one(&self.pool).await?;
+        if !active {
+            return Ok(None);
+        }
+        self.recover_model_requests(owner).await?;
+        let tx = self.owned_transaction(owner).await?;
+        let result = native
+            .engine
+            .call("maintenance.run", json!({"customerId":owner,"limit":100}))
+            .await
+            .map_err(failure)?;
+        tx.commit().await?;
+        self.sync_native_subscriptions(owner).await?;
+        self.settle_compute_credits(owner).await?;
+        self.sync_expired_model_requests(owner).await?;
+        self.sync_credit_capacity(owner).await?;
+        Ok(Some(result))
+    }
+    /// Earliest instant after `floor` at which time alone changes embedded
+    /// billing state for an enrolled account: engine work becoming available,
+    /// or a model reservation, credit grant or subscription period expiring.
+    /// Unfinished model request transitions retry a minute after `floor`.
+    /// One statement over indexed rows; `None` when embedded billing is off or
+    /// nothing is scheduled.
+    pub async fn native_next_due(&self, floor: i64) -> Result<Option<i64>, ApiError> {
+        let Some(native) = &self.native else {
+            return Ok(None);
+        };
+        let accounts: Vec<String> = native.accounts.iter().cloned().collect();
+        self.native_due_for(&accounts, floor).await
+    }
+    pub(in crate::billing) async fn native_due_for(
+        &self,
+        accounts: &[String],
+        floor: i64,
+    ) -> Result<Option<i64>, ApiError> {
+        let Some(native) = &self.native else {
+            return Ok(None);
+        };
+        let scopes: Vec<String> = accounts
+            .iter()
+            .map(|account| format!("{}:c:{account}", native.environment.name()))
+            .collect();
+        Ok(sqlx::query_scalar(NEXT_DUE)
+            .bind(accounts)
+            .bind(&scopes)
+            .bind(floor)
+            .fetch_one(&self.pool)
+            .await?)
+    }
 }
+/// Engine records keep their times inside JSON text. Only active grants, held
+/// reservations and active subscriptions change state when a time passes;
+/// work rows carry an indexed `due` (`availableAt`, or the lease of running
+/// work). The work states are the ones the engine's maintenance picks up.
+const NEXT_DUE: &str = "SELECT LEAST(\
+ (SELECT MIN(expires_at) FROM zuse_brokeboy_model_requests WHERE account_id=ANY($1) AND state='held' AND expires_at>$3),\
+ (SELECT $3+60000 WHERE EXISTS(SELECT 1 FROM zuse_brokeboy_model_requests WHERE account_id=ANY($1) AND state IN ('reserving','increasing','settling','releasing'))),\
+ (SELECT MIN(due) FROM brokeboy_work WHERE scope=ANY($2) AND state IN ('processing','internal_pending','internal_failed','meter_pending','meter_failed','pending','failed') AND due>$3),\
+ (SELECT MIN((r.d->>k)::numeric)::bigint FROM (\
+ SELECT data::jsonb AS d,ARRAY['expiresAt'] AS ks FROM brokeboy_grants WHERE scope=ANY($2) AND state='active' \
+ UNION ALL SELECT data::jsonb,ARRAY['expiresAt'] FROM brokeboy_reservations WHERE scope=ANY($2) AND state='held' \
+ UNION ALL SELECT data::jsonb,ARRAY['periodEnd','paidThrough','graceThrough'] FROM brokeboy_subscriptions WHERE scope=ANY($2) AND state='active'\
+ ) r CROSS JOIN LATERAL unnest(r.ks) AS k WHERE jsonb_typeof(r.d->k)='number' AND (r.d->>k)::numeric>$3))";
 impl crate::store::Store {
     pub async fn close_native_billing(&self) -> Result<(), ApiError> {
         if let Some(control) = &self.billing {

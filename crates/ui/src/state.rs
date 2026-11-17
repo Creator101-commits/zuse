@@ -428,7 +428,9 @@ impl EngineHandle {
         // serving IPC at probe time (a daemon mid-start): wait for its
         // listener, re-trying the lock in case it dies instead.
         std::fs::create_dir_all(&engine_config.data_dir)?;
-        let lock_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // A desktop that just closed can still be draining agents and stores.
+        // Outlast its bounded runtime teardown before reporting contention.
+        let lock_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let lock = loop {
             match InstanceLock::acquire(&engine_config.data_dir) {
                 Ok(lock) => break lock,

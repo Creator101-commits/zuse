@@ -167,10 +167,11 @@ impl RuntimeControl {
     /// abandoned chunk ciphertext. True when any work was found.
     pub async fn sweep_asset_releases_once(&self, now: i64) -> Result<bool, ApiError> {
         let mut worked = false;
-        let chunks: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_task_asset_chunks') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let chunks: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_task_asset_chunks') IS NOT NULL",
+        )
+        .await?;
         if chunks {
             worked |= sqlx::query("DELETE FROM zuse_rust_task_asset_chunks WHERE ctid IN (SELECT ctid FROM zuse_rust_task_asset_chunks WHERE NOT ready AND updated_at<=$1 LIMIT 100)").bind(now - STALE_CHUNK_CIPHERTEXT_MS).execute(&self.pool).await?.rows_affected() > 0;
         }

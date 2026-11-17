@@ -216,13 +216,29 @@ An explicit paired connection never falls back to another local engine. Remote d
 Install Zuse on the machine that should run your agents, then start it:
 
 ```sh
+zuse serve              # this computer: open the printed private browser link
 zuse serve --lan        # same network: prints a private link and QR code
 zuse serve --account    # anywhere: sign in with a code, then open the printed link
 ```
 
+If the desktop app or service already owns this profile, plain `zuse serve`
+enables or reuses that engine's browser access and prints a private pairing
+link. Otherwise it starts a server, choosing an available agent RPC port when
+the default is occupied. An explicit `--ipc-port` (or `ZUSE_IPC_PORT`) is
+honored exactly. Use `--data-dir` for an independent workspace; two engines
+cannot open the same profile. Remote access flags apply when starting a new
+server; configure a running engine's remote access in Settings.
+
 On a local network the browser warns about the computer's private certificate the first time, because the web app needs HTTPS. Continue only on a network you trust, or add `--tailscale-serve` for a certificate browsers already accept. Run `zuse pair` for another link, `zuse link` to make a running server available through your account, or `zuse status` to see what is reachable.
 
 The desktop app includes the `zuse` command. For a server without a display, download the `zuse-cli` archive for your platform from the release instead: it holds only `bin/zuse` and the web app it serves, with no desktop libraries. To keep the server running, install it as a service with `zuse daemon install --serve --lan` (systemd on Linux, launchd on macOS). `zuse-server` still works as the old name for `zuse serve`.
+
+On Linux or macOS, run `sh install.sh --cli` using the installer from the same
+release, or `python3 install.py` inside the extracted CLI archive. This installs
+the command and browser app under `~/.zuse/cli`, with launchers in `~/.local/bin`.
+Add that directory to PATH if needed. `zuse update` upgrades both together;
+restart a running server afterward. Python 3.11+ is required for installation
+and updates. See [CLI installation](internal-docs/packaging.md#command-line-only).
 
 ## License
 

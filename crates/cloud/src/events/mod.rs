@@ -11,6 +11,7 @@ impl crate::store::Store {
     pub async fn with_account_events_from_env(
         mut self,
         runtime: Option<&std::sync::Arc<crate::runtime::RuntimeControl>>,
+        wakeups: std::sync::Arc<crate::db::wake::Wakeups>,
     ) -> anyhow::Result<Self> {
         if std::env::var("ZUSE_CLOUD_ACCOUNT_EVENTS").as_deref() != Ok("true") {
             return Ok(self);
@@ -36,7 +37,7 @@ impl crate::store::Store {
             "Invalid account event issuer"
         );
         self.events = Some(
-            hub::Hub::start(runtime.shared_pool(), key, issuer)
+            hub::Hub::start_with_wakeups(runtime.shared_pool(), key, issuer, wakeups)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e.code))?,
         );

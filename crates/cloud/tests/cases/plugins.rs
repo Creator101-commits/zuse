@@ -227,6 +227,18 @@ async fn send(
 #[tokio::test]
 #[ignore = "requires isolated localhost PostgreSQL"]
 async fn native_plugins_store_credentials_execute_and_isolate_tenants() {
+    credentials_execute_and_isolate(false).await;
+}
+
+/// The same flows, including OAuth renewal and revocation, while serve and the
+/// executor keep rows in memory.
+#[tokio::test]
+#[ignore = "requires isolated localhost PostgreSQL"]
+async fn native_plugins_store_credentials_execute_and_isolate_tenants_with_cached_rows() {
+    credentials_execute_and_isolate(true).await;
+}
+
+async fn credentials_execute_and_isolate(listen: bool) {
     let (admin, pool, schema) = fixture().await;
     sqlx::raw_sql(zuse_cloud::plugins::MIGRATION)
         .execute(&pool)
@@ -275,6 +287,12 @@ async fn native_plugins_store_credentials_execute_and_isolate_tenants() {
         },
     )
     .unwrap();
+    if listen {
+        let wakeups = zuse_cloud::db::wake::Wakeups::listen_with(schema_connection(&schema).await)
+            .await
+            .unwrap();
+        host.attach_wakeups(wakeups).await;
+    }
     let signing = ed25519_dalek::SigningKey::from_bytes(&[74; 32]);
     let jwk = json!({"kty":"OKP","crv":"Ed25519","d":B64.encode([74;32]),"x":B64.encode(signing.verifying_key().as_bytes())});
     let runtime = Arc::new(zuse_cloud::runtime::RuntimeControl::from_pool(
@@ -1139,4 +1157,280 @@ async fn native_plugins_executor_validates_protocol_schemas_and_lifecycle() {
         .execute(&admin)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated localhost PostgreSQL"]
+async fn native_plugins_cached_views_follow_changes_and_tenants() {
+    let (admin, pool, schema) = fixture().await;
+    PluginControl::migrate(&pool, &configuration().key)
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let p = Provider {
+        origin: format!("http://{}", listener.local_addr().unwrap()),
+        ..Default::default()
+    };
+    let upstream = Router::new().route("/mcp", post(rpc)).with_state(p.clone());
+    let task = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let host = PluginControl::from_pool(pool.clone(), configuration()).unwrap();
+    // A dedicated LISTEN connection on the test schema, as `serve` opens one.
+    let scope = schema.clone();
+    let listen = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let scope = scope.clone();
+            Box::pin(async move {
+                sqlx::query(&format!("SET search_path = {scope}"))
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&std::env::var("ZUSE_CLOUD_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let wakeups = zuse_cloud::db::wake::Wakeups::listen_with(listen)
+        .await
+        .unwrap();
+    host.attach_wakeups(wakeups.clone()).await;
+    let app = application(&pool, host.clone());
+    let tenant = "personal:user-alice";
+    let (_, attempt) = send(&app, "/v1/plugins", "alice", "personal", json!({"action":"addServer","tenantId":tenant,"requestId":Uuid::new_v4().to_string(),"name":"Cached","url":format!("{}/mcp",p.origin),"apiKey":{"header":"Authorization","value":"Bearer fixture-secret"}})).await;
+    assert_eq!(attempt["state"], "connected", "{attempt}");
+    let connection = attempt["connectionId"].as_str().unwrap().to_owned();
+    let (status, found) = send(
+        &app,
+        "/v1/plugins/tools",
+        "alice",
+        "personal",
+        json!({"action":"search","query":"echo"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{found}");
+    let call = json!({"action":"call","address":found[0]["address"],"arguments":{"n":1}});
+    let calls = |actor: &'static str, scope: &'static str| {
+        let app = app.clone();
+        let call = call.clone();
+        async move { send(&app, "/v1/plugins/tools", actor, scope, call).await.0 }
+    };
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+    // A cached view never serves another tenant.
+    assert_ne!(calls("bob", "personal").await, StatusCode::OK);
+    assert_ne!(
+        calls("admin", "organization:org-team").await,
+        StatusCode::OK
+    );
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+
+    // A change made by another process arrives as NOTIFY and drops the view.
+    sqlx::query("UPDATE zuse_plugin_connections SET enabled=false WHERE connection_id=$1")
+        .bind(&connection)
+        .execute(&schema_connection(&schema).await)
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while calls("alice", "personal").await == StatusCode::OK {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "notification did not invalidate the view"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // This process's own writes take effect on the very next call.
+    let enable = |enabled: bool| json!({"action":"setEnabled","tenantId":tenant,"connectionId":connection,"enabled":enabled});
+    assert_eq!(
+        send(&app, "/v1/plugins", "alice", "personal", enable(true))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+    assert_eq!(
+        send(&app, "/v1/plugins", "alice", "personal", enable(false))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_ne!(calls("alice", "personal").await, StatusCode::OK);
+    let mut notifications = wakeups.subscribe();
+    assert_eq!(
+        send(&app, "/v1/plugins", "alice", "personal", enable(true))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+    // Let this write's own NOTIFY arrive (it drops the view once more).
+    while tokio::time::timeout(std::time::Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("own write notifies")
+        .unwrap()
+        != zuse_cloud::db::wake::Work::Plugins
+    {}
+
+    // Views really are served from memory: a change that sends no NOTIFY is
+    // not seen until notifications may have been missed (listener reconnect).
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+    let direct = schema_connection(&schema).await;
+    sqlx::raw_sql("ALTER TABLE zuse_plugin_connections DISABLE TRIGGER zuse_cloud_plugin_connections_wake; UPDATE zuse_plugin_connections SET enabled=false; ALTER TABLE zuse_plugin_connections ENABLE TRIGGER zuse_cloud_plugin_connections_wake")
+        .execute(&direct)
+        .await
+        .unwrap();
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+    wakeups.notify(zuse_cloud::db::wake::Work::All);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while calls("alice", "personal").await == StatusCode::OK {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "reconnect kept views"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let mut notifications = wakeups.subscribe();
+    assert_eq!(
+        send(&app, "/v1/plugins", "alice", "personal", enable(true))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+
+    // The executor keeps the SDK rows a call reads, too: a change that sends
+    // no NOTIFY stays unseen until serve forwards a new epoch.
+    while tokio::time::timeout(std::time::Duration::from_secs(5), notifications.recv())
+        .await
+        .expect("own write notifies")
+        .unwrap()
+        != zuse_cloud::db::wake::Work::Plugins
+    {}
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+    sqlx::raw_sql("ALTER TABLE executor_installations DISABLE TRIGGER zuse_cloud_executor_wake; UPDATE executor_installations SET enabled=false; ALTER TABLE executor_installations ENABLE TRIGGER zuse_cloud_executor_wake")
+        .execute(&direct)
+        .await
+        .unwrap();
+    assert_eq!(
+        calls("alice", "personal").await,
+        StatusCode::OK,
+        "served from the executor's kept rows"
+    );
+    wakeups.notify(zuse_cloud::db::wake::Work::All);
+    assert_ne!(
+        calls("alice", "personal").await,
+        StatusCode::OK,
+        "a new epoch drops the executor's rows"
+    );
+    // With its trigger, an SDK row change reaches the executor via serve.
+    sqlx::query("UPDATE executor_installations SET enabled=true")
+        .execute(&direct)
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    while calls("alice", "personal").await != StatusCode::OK {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "SDK change did not reach the executor"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    eprintln!(
+        "sdk_row_change_visible_ms={}",
+        started.elapsed().as_millis()
+    );
+
+    // A second serve process (own executor, own LISTEN) changes the connection:
+    // this process rejects the next calls within notification latency.
+    let other = PluginControl::from_pool(pool.clone(), configuration()).unwrap();
+    let other_wakeups =
+        zuse_cloud::db::wake::Wakeups::listen_with(schema_connection(&schema).await)
+            .await
+            .unwrap();
+    other.attach_wakeups(other_wakeups).await;
+    let other_app = application(&pool, other.clone());
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+    assert_eq!(
+        send(
+            &other_app,
+            "/v1/plugins",
+            "alice",
+            "personal",
+            enable(false)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let started = tokio::time::Instant::now();
+    while calls("alice", "personal").await == StatusCode::OK {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "another process's change was not seen"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    eprintln!(
+        "cross_process_disable_visible_ms={}",
+        started.elapsed().as_millis()
+    );
+    assert_eq!(
+        send(&other_app, "/v1/plugins", "alice", "personal", enable(true))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let started = tokio::time::Instant::now();
+    while calls("alice", "personal").await != StatusCode::OK {
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    drop(other_app);
+    drop(other);
+
+    // Disconnecting revokes at once: the very next call is rejected.
+    assert_eq!(calls("alice", "personal").await, StatusCode::OK);
+    assert_eq!(
+        send(
+            &app,
+            "/v1/plugins",
+            "alice",
+            "personal",
+            json!({"action":"disconnect","tenantId":tenant,"connectionId":connection})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let started = tokio::time::Instant::now();
+    assert_ne!(calls("alice", "personal").await, StatusCode::OK);
+    eprintln!(
+        "disconnect_next_call_rejected_ms={}",
+        started.elapsed().as_millis()
+    );
+    task.abort();
+    drop(direct);
+    pool.close().await;
+    sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+/// A separate connection on the test schema, standing in for another process.
+async fn schema_connection(schema: &str) -> PgPool {
+    let scope = schema.to_owned();
+    PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let scope = scope.clone();
+            Box::pin(async move {
+                sqlx::query(&format!("SET search_path = {scope}"))
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&std::env::var("ZUSE_CLOUD_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap()
 }

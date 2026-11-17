@@ -576,10 +576,11 @@ impl super::RuntimeControl {
         registry: &crate::providers::registry::Registry,
         now: i64,
     ) -> Result<bool, crate::error::ApiError> {
-        let ready: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_recovery_operations') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let ready: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_recovery_operations') IS NOT NULL",
+        )
+        .await?;
         if !ready {
             return Ok(false);
         }
@@ -603,10 +604,11 @@ impl super::RuntimeControl {
         registry: &crate::providers::registry::Registry,
         now: i64,
     ) -> Result<bool, crate::error::ApiError> {
-        let ready: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_restores') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let ready: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_restores') IS NOT NULL",
+        )
+        .await?;
         if !ready {
             return Ok(false);
         }

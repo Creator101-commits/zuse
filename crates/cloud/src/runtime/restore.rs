@@ -81,10 +81,11 @@ impl RuntimeControl {
         crate::images::deletion::snapshot_read_guard(tx, required(row, "account_id")?, None)
             .await?;
         lifecycle::require_resume_capacity(self.staging_candidate.as_deref(), tx, row, now).await?;
-        let ready: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_restores') IS NOT NULL")
-                .fetch_one(&mut **tx)
-                .await?;
+        let ready: bool = crate::db::schema::present_in(
+            &mut **tx,
+            "SELECT to_regclass('zuse_rust_restores') IS NOT NULL",
+        )
+        .await?;
         if !ready {
             return Err(ApiError::unavailable("cloud_restore_schema_not_ready"));
         }
@@ -250,10 +251,11 @@ impl RuntimeControl {
         provider: &dyn RestoreProvider,
         now: i64,
     ) -> Result<bool, ApiError> {
-        let ready: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_restores') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let ready: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_restores') IS NOT NULL",
+        )
+        .await?;
         if !ready {
             return Ok(false);
         }

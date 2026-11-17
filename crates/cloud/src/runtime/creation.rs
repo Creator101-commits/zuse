@@ -272,10 +272,11 @@ impl RuntimeControl {
                 .bind(format!("cloud-create:{owner}"))
                 .execute(&mut *tx)
                 .await?;
-            let tombstones: bool =
-                sqlx::query_scalar("SELECT to_regclass('zuse_rust_deletions') IS NOT NULL")
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let tombstones: bool = crate::db::schema::present_in(
+                &mut *tx,
+                "SELECT to_regclass('zuse_rust_deletions') IS NOT NULL",
+            )
+            .await?;
             if tombstones {
                 let deleted:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM zuse_rust_deletions WHERE account_id=$1 AND idempotency_digest=$2 AND (expires_at IS NULL OR expires_at>$3))").bind(owner).bind(self.delete_idempotency(owner,&body.idempotency_key)).bind(now).fetch_one(&mut *tx).await?;
                 if deleted {
@@ -744,9 +745,11 @@ impl RuntimeControl {
         let staging: bool = if facts.is_some() {
             true
         } else {
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_launch_staging') IS NOT NULL")
-                .fetch_one(&mut *tx)
-                .await?
+            crate::db::schema::present_in(
+                &mut *tx,
+                "SELECT to_regclass('zuse_rust_launch_staging') IS NOT NULL",
+            )
+            .await?
         };
         let staged: Option<(String, i64)> = if let Some(facts) = &facts {
             facts

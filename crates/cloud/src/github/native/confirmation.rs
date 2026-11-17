@@ -116,10 +116,11 @@ impl NativeGithub {
 
     /// The phase stays `choosing`, so publish a feed hint for live app sessions.
     pub(super) async fn announce_confirmation(&self, transaction: &BrowserTransaction) {
-        let events: Result<bool, _> =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_account_event_outbox') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await;
+        let events: Result<bool, _> = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_account_event_outbox') IS NOT NULL",
+        )
+        .await;
         if !matches!(events, Ok(true)) {
             return;
         }

@@ -37,28 +37,6 @@ impl ProjectControl {
             accounts: accounts.into(),
         }
     }
-    pub async fn connect(
-        url: &str,
-        accounts: impl Into<crate::access_policy::Accounts>,
-    ) -> anyhow::Result<Self> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(|conn, _| {
-                Box::pin(async move {
-                    sqlx::query("SET statement_timeout='10s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET lock_timeout='5s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect cloud project writer"))?;
-        Ok(Self::from_pool(pool, accounts))
-    }
     async fn owned(&self, owner: &str) -> Result<Transaction<'_, Postgres>, ApiError> {
         if !self.accounts.contains(owner) {
             return Err(ApiError::forbidden("cloud_project_writes_disabled"));

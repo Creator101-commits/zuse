@@ -37,7 +37,7 @@ impl Command {
 pub fn run(global: Global, command: Command, l10n: &Localizer) -> anyhow::Result<()> {
     let port = global.ipc_port();
     match command {
-        Command::Serve(args) => serve::main(*args, port, l10n),
+        Command::Serve(args) => serve::main(*args, global.ipc_port, l10n),
         Command::Headless => zuse_engine::runtime()?.block_on(async {
             zuse_engine::Engine::new(config::engine_config(port))
                 .run()

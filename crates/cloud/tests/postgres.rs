@@ -1354,8 +1354,14 @@ async fn socket_connect(url: &str, protocol: &str, credential: &str) -> TestSock
     socket
 }
 async fn socket_message(socket: &mut TestSocket) -> tokio_tungstenite::tungstenite::Message {
+    socket_message_within(socket, std::time::Duration::from_secs(5)).await
+}
+async fn socket_message_within(
+    socket: &mut TestSocket,
+    wait: std::time::Duration,
+) -> tokio_tungstenite::tungstenite::Message {
     use futures::StreamExt;
-    tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+    tokio::time::timeout(wait, socket.next())
         .await
         .unwrap()
         .unwrap()
@@ -1594,8 +1600,11 @@ async fn gateway_multiplexes_live_sockets_and_fences_runtime_ownership() {
         .execute(&pool)
         .await
         .unwrap();
+    // A changed fence is found at the room's next lease renewal (every 5s), so
+    // allow one full renewal interval plus the renewal timeout.
+    let fence_detection = std::time::Duration::from_secs(15);
     assert!(
-        matches!(socket_message(&mut replacement).await,Message::Close(Some(frame)) if u16::from(frame.code)==4101)
+        matches!(socket_message_within(&mut replacement, fence_detection).await,Message::Close(Some(frame)) if u16::from(frame.code)==4101)
     );
     assert!(
         matches!(socket_message(&mut fresh).await,Message::Close(Some(frame)) if u16::from(frame.code)==4101)

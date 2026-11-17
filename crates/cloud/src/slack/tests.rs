@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
 };
 use hmac::{Hmac, Mac};
+use sqlx::postgres::PgPoolOptions;
 use tower::ServiceExt;
 const MENTION: &str = include_str!("../../tests/fixtures/slack/mention.json");
 const DM: &str = include_str!("../../tests/fixtures/slack/dm.json");

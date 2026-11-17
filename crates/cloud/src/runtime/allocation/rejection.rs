@@ -55,10 +55,11 @@ impl RuntimeControl {
         job: &jobs::Job,
         now: i64,
     ) -> Result<bool, ApiError> {
-        let journal_exists: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_provider_creates') IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await?;
+        let journal_exists: bool = crate::db::schema::present(
+            &self.pool,
+            "SELECT to_regclass('zuse_rust_provider_creates') IS NOT NULL",
+        )
+        .await?;
         if !journal_exists {
             return Ok(false);
         }
@@ -159,9 +160,11 @@ impl RuntimeControl {
         let journal_ready: bool = if capacity_observation.is_some() {
             true
         } else {
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_provider_creates') IS NOT NULL")
-                .fetch_one(&mut *tx)
-                .await?
+            crate::db::schema::present_in(
+                &mut *tx,
+                "SELECT to_regclass('zuse_rust_provider_creates') IS NOT NULL",
+            )
+            .await?
         };
         if !journal_ready {
             tx.commit().await?;

@@ -16,6 +16,7 @@ pub struct BillingControl {
     pub(super) accounts: crate::access_policy::Accounts,
     pub(super) payments: Option<Arc<super::PaymentProviders>>,
     pub(super) native: Option<Arc<super::native::NativeBilling>>,
+    pub(super) follow_ups: Option<Arc<super::native::FollowUps>>,
 }
 impl BillingControl {
     pub fn from_pool(pool: PgPool, accounts: impl Into<crate::access_policy::Accounts>) -> Self {
@@ -25,51 +26,21 @@ impl BillingControl {
             pool,
             payments: None,
             native: None,
+            follow_ups: None,
             accounts: accounts.into(),
         }
     }
-    pub async fn connect(
-        url: &str,
+    /// Billing on separate control and receipt pools. Receipts must commit
+    /// while the control transaction keeps its ownership fence, so a separate
+    /// receipt pool keeps waiters on that fence from taking every connection.
+    pub fn from_pools(
+        pool: PgPool,
+        effects_pool: PgPool,
         accounts: impl Into<crate::access_policy::Accounts>,
-    ) -> anyhow::Result<Self> {
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(4)
-            .after_connect(|conn, _| {
-                Box::pin(async move {
-                    sqlx::query("SET statement_timeout='10s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET lock_timeout='5s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect cloud billing writer"))?;
-        // Receipts must commit while the control transaction keeps its ownership fence.
-        // A separate pool prevents waiters on that fence from occupying every receipt connection.
-        let effects_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(std::time::Duration::from_secs(5))
-            .after_connect(|conn, _| {
-                Box::pin(async move {
-                    sqlx::query("SET statement_timeout='10s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    sqlx::query("SET lock_timeout='5s'")
-                        .execute(&mut *conn)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect(url)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect cloud billing delivery writer"))?;
+    ) -> Self {
         let mut control = Self::from_pool(pool, accounts);
         control.effects_pool = effects_pool;
-        Ok(control)
+        control
     }
     pub(super) async fn owned_transaction(
         &self,

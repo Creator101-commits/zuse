@@ -125,10 +125,41 @@ async fn rpc(
 #[test]
 fn rotating_closed_windows_and_original_financial_policy() {
     let start = 1700006400000;
-    let w = windows(start, start + 30 * DAY + 3600000).unwrap();
-    assert!(w.len() <= 8);
+    // Hourly passes visit every closed day while there are few enough.
+    let w = windows(start, start + 30 * DAY + 3600000, 7).unwrap();
+    assert_eq!(w.len(), 30);
+    assert_eq!(w[0], (start, start + DAY));
     assert_eq!(w.last().unwrap().1, start + 30 * DAY);
-    assert!(windows(start, start + 20 * 60_000).unwrap().is_empty());
+    assert!(w.windows(2).all(|p| p[0].1 == p[1].0));
+    assert!(windows(start, start + 20 * 60_000, 0).unwrap().is_empty());
+    // A partial first day starts at the cutover.
+    let mid = start + 3 * 3_600_000;
+    assert_eq!(
+        windows(mid, start + DAY + 3600000, 0).unwrap(),
+        [(mid, start + DAY)]
+    );
+    // Many days: consecutive passes visit consecutive batches and always the
+    // newest day, so every window is visited within ceil(n / batch) passes.
+    let days = 2 * WINDOWS_PER_PASS + 5;
+    let now = start + days as i64 * DAY + 3600000;
+    let batches = days.div_ceil(WINDOWS_PER_PASS) as u64;
+    let mut seen = std::collections::BTreeSet::new();
+    for pass in 0..batches {
+        let w = windows(start, now, pass).unwrap();
+        assert!(w.len() <= WINDOWS_PER_PASS + 1);
+        assert_eq!(w.last().unwrap().1, start + days as i64 * DAY);
+        seen.extend(w);
+    }
+    assert_eq!(seen.len(), days);
+    // Pass numbers wrap around without skipping a batch.
+    assert_eq!(
+        windows(start, now, batches).unwrap(),
+        windows(start, now, 0).unwrap()
+    );
+    assert_eq!(
+        windows(start, now, u64::MAX).unwrap(),
+        windows(start, now, u64::MAX % batches).unwrap()
+    );
     let p = json!({"included_provider_cost_micros":35_000_000,"markup_basis_points":500,"overage_cap_micros":25_000_000,"status":"active"});
     let d = deltas(&p, 30_000_000, 0, 10_000_000).unwrap();
     assert_eq!(
@@ -265,7 +296,7 @@ async fn boxd_reports_settle_periods_old_machines_manual_caps_and_atomic_retries
         cutover_at_ms: start,
     };
     let first = control
-        .settle_boxd_once(&provider, config, now)
+        .settle_boxd_once(&provider, config, now, 0)
         .await
         .unwrap();
     assert_eq!((first.settled, first.deferred), (6, 1));
@@ -281,8 +312,8 @@ async fn boxd_reports_settle_periods_old_machines_manual_caps_and_atomic_retries
         .await
         .unwrap();
     let (a, b) = tokio::join!(
-        control.settle_boxd_once(&provider, config, now),
-        control.settle_boxd_once(&provider, config, now)
+        control.settle_boxd_once(&provider, config, now, 0),
+        control.settle_boxd_once(&provider, config, now, 0)
     );
     assert_eq!(a.unwrap().settled + b.unwrap().settled, 1);
     let costs:(i64,i64)=sqlx::query_as("SELECT (SELECT SUM(amount_micros)::bigint FROM api_cloud_billing_ledger WHERE period_id='p-first' AND kind='provider-cost'),(SELECT SUM(amount_cents)::bigint FROM api_cloud_billing_outbox WHERE period_id='p-first')").fetch_one(&pool).await.unwrap();
@@ -318,7 +349,7 @@ async fn boxd_reports_settle_periods_old_machines_manual_caps_and_atomic_retries
     );
     let calls = fixture.calls.lock().unwrap().len();
     let again = control
-        .settle_boxd_once(&provider, config, now)
+        .settle_boxd_once(&provider, config, now, 0)
         .await
         .unwrap();
     assert_eq!((again.settled, again.deferred), (0, 0));

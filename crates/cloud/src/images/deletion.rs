@@ -136,9 +136,11 @@ pub(crate) async fn snapshot_read_guard(
         .bind(format!("snapshot:{account}"))
         .execute(&mut **tx)
         .await?;
-    let present: bool = sqlx::query_scalar("SELECT to_regclass('api_cloud_snapshots') IS NOT NULL")
-        .fetch_one(&mut **tx)
-        .await?;
+    let present: bool = crate::db::schema::present_in(
+        &mut **tx,
+        "SELECT to_regclass('api_cloud_snapshots') IS NOT NULL",
+    )
+    .await?;
     if let Some(snapshot) = snapshot.filter(|_| present) {
         let unavailable:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_cloud_snapshots WHERE account_id=$1 AND provider IN ('box','boxd') AND snapshot_id=$2 AND state IN ('deleting','deleted'))").bind(account).bind(snapshot).fetch_one(&mut **tx).await?;
         if unavailable {

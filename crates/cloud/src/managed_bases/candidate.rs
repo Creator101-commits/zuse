@@ -353,7 +353,7 @@ impl StagingBasePin {
         now: i64,
         lock: bool,
     ) -> Result<ManagedBaseCandidate, ApiError> {
-        let schema:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cloud_managed_bases' AND column_name='candidate_manifest')").fetch_one(&mut **tx).await?;
+        let schema:bool=crate::db::schema::present_in(&mut **tx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cloud_managed_bases' AND column_name='candidate_manifest')").await?;
         if !schema {
             return Err(ApiError::conflict(
                 "staging_managed_base_candidate_schema_required",
