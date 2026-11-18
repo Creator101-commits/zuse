@@ -49,12 +49,35 @@ class DatabaseBootstrapTest(unittest.TestCase):
         self.url = f"postgresql://zuse_test@127.0.0.1:{self.port}/{name}?sslmode=disable"
 
     def test_release_manifest_contains_command_and_recreation_after_admission(self):
-        expected=("0034_runtime_releases.sql","0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql","0044_worker_due_index.sql","0045_auth_wakeups.sql","0046_plugin_wakeups.sql","0048_executor_wakeups.sql","0049_change_hints.sql","0050_archive_machine_deletion.sql","0051_archive_machine_due_cap.sql")
+        expected=("0035_launch_asset_release.sql","0036_harness_bundles.sql","0037_user_images.sql","0038_app_role_grants.sql","0041_user_image_repositories.sql","0042_machine_versions_grants.sql","0043_work_wakeups.sql","0044_worker_due_index.sql","0045_auth_wakeups.sql","0046_plugin_wakeups.sql","0048_executor_wakeups.sql","0049_change_hints.sql","0050_archive_machine_deletion.sql","0051_archive_machine_due_cap.sql","0052_one_environment_credential.sql")
         self.assertEqual(database.FILES[-15:],expected)
-        self.assertEqual(len(database.FILES),46)
+        self.assertEqual(len(database.FILES),47)
         self.assertIn("0026_task_command_admission.sql",database.FILES)
         self.assertNotIn("0022_computer_recreations.sql",database.FILES)
         self.assertNotIn("0022_recreation.sql",database.FILES)
+
+    def test_each_desktop_app_keeps_one_credential_row(self):
+        database.execute(self.url, database.render("production"))
+        migration = (database.MIGRATIONS / "0052_one_environment_credential.sql").read_text()
+        seed = """SET search_path TO zuse_production;
+DROP INDEX api_environment_credentials_environment_unique;
+INSERT INTO api_environments(environment_id,account_id,provider_kind,linked_at,environment_public_key,http_base_url,ws_base_url) VALUES
+ ('env-a','user-a','desktop',1,'{}','h','w'),('env-b','user-b','desktop',1,'{}','h','w'),('env-c','user-c','desktop',1,'{}','h','w');
+INSERT INTO api_environment_credentials(credential_id,environment_id,account_id,credential_hash,created_at,revoked_at) VALUES
+ ('a1','env-a','user-a','h-a1',10,NULL),('a2','env-a','user-a','h-a2',30,NULL),('a3','env-a','user-a','h-a3',20,NULL),
+ ('b1','env-b','user-b','h-b1',10,5),('b2','env-b','user-b','h-b2',5,NULL),
+ ('c1','env-c','user-c','h-c1',7,NULL);
+"""
+        database.execute(self.url, seed + migration)
+        rows = subprocess.run(["psql", self.url, "-X", "-q", "-t", "-A", "-c",
+            "SELECT string_agg(environment_id||'='||credential_hash, ',' ORDER BY environment_id) FROM zuse_production.api_environment_credentials"],
+            env=self.clean_env, check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(rows, "env-a=h-a2,env-b=h-b2,env-c=h-c1")
+        duplicate = subprocess.run(["psql", self.url, "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c",
+            "INSERT INTO zuse_production.api_environment_credentials VALUES ('a4','env-a','user-a','h-a4',40,NULL)"],
+            env=self.clean_env, capture_output=True, text=True)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertIn("api_environment_credentials_environment_unique", duplicate.stderr)
 
     def test_work_triggers_notify_only_their_schema_after_commit(self):
         database.execute(self.url, database.render("production"))

@@ -149,7 +149,11 @@ impl Store {
             uuid::Uuid::new_v4().simple()
         );
         let hash = format!("{:x}", Sha256::digest(credential.as_bytes()));
-        sqlx::query("UPDATE api_environment_credentials SET revoked_at=$1 WHERE environment_id=$2 AND account_id=$3 AND revoked_at IS NULL").bind(now).bind(environment).bind(account).execute(&mut *tx).await?;
+        // One row per app: the new credential replaces the previous one, which stops working.
+        sqlx::query("DELETE FROM api_environment_credentials WHERE environment_id=$1")
+            .bind(environment)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("INSERT INTO api_environment_credentials(credential_id,environment_id,account_id,credential_hash,created_at,revoked_at) VALUES ($1,$2,$3,$4,$5,NULL)").bind(uuid::Uuid::new_v4().to_string()).bind(environment).bind(account).bind(hash).bind(now).execute(&mut *tx).await?;
         sqlx::query("UPDATE api_link_challenges SET consumed_at=$1 WHERE challenge_id=$2")
             .bind(now)
