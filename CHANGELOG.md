@@ -8,6 +8,7 @@
 
 ### Changed
 
+- Typing `zuse` in a terminal, or an agent running it, now prints help instead of opening a second window. Open the app with `zuse app`; the desktop launcher, dock, Start menu and `zuse:` links work as before. Mistyped commands such as `zuse commands` report an unknown command.
 - Render Markdown tables with compact rows, rounded borders, clearer headers, and better wrapping.
 
 ### Fixed

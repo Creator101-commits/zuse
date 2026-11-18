@@ -169,6 +169,7 @@ cli-update = Check for a newer release and install it
 cli-update_check = Only report whether an update is available
 
 cli-appshot = Take an Appshot in the running app
+cli-open_app = Open the desktop app
 
 cli-open_url = Zuse link to open
 

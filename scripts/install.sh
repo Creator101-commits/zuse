@@ -98,9 +98,9 @@ def install(tag, download=read):
         subprocess.run([sys.executable, str(package / 'install.py')], check=True)
     bin_dir = Path(os.environ.get('ZUSE_BIN_HOME', Path.home() / '.local/bin')).expanduser()
     if str(bin_dir) not in os.environ.get('PATH', '').split(os.pathsep):
-        print(f'Add {bin_dir} to your PATH, then run zuse.')
+        print(f'Add {bin_dir} to your PATH, then run zuse app.')
     else:
-        print('Run zuse to start the app.')
+        print('Run zuse app to start the app.')
     print('Linux runtime libraries and a working Vulkan driver are required; see the release notes.')
 
 

@@ -167,6 +167,7 @@ cli-update = Rechercher une version plus récente et l’installer
 cli-update_check = Indiquer seulement si une mise à jour est disponible
 
 cli-appshot = Prendre un Appshot dans l’application ouverte
+cli-open_app = Ouvrir l’application de bureau
 
 cli-open_url = Lien Zuse à ouvrir
 

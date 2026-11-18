@@ -210,7 +210,7 @@ def linux_tree(package, target):
         link.symlink_to(f'/opt/zuse/bin/{binary}')
     desktop = target / 'usr/share/applications/sh.zuse.app.desktop'
     desktop.parent.mkdir(parents=True, exist_ok=True)
-    desktop.write_text('[Desktop Entry]\nType=Application\nName=Zuse\nComment=Local coding agents\nExec=/opt/zuse/bin/zuse %u\nIcon=sh.zuse.app\nTerminal=false\nCategories=Development;\nMimeType=x-scheme-handler/zuse;\n')
+    desktop.write_text('[Desktop Entry]\nType=Application\nName=Zuse\nComment=Local coding agents\nExec=/opt/zuse/bin/zuse app %u\nIcon=sh.zuse.app\nTerminal=false\nCategories=Development;\nMimeType=x-scheme-handler/zuse;\n')
     icon = target / 'usr/share/icons/hicolor/1024x1024/apps/sh.zuse.app.png'
     icon.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(package / 'share/icons/hicolor/1024x1024/apps/sh.zuse.app.png', icon)

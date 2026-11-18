@@ -180,6 +180,7 @@ fn subcommand_about(path: &str, l10n: &Localizer) -> Option<String> {
         "zuse daemon" => m::daemon(l10n),
         "zuse update" => m::update(l10n),
         "zuse appshot" => m::appshot(l10n),
+        "zuse app" => m::open_app(l10n),
         "daemon install" => m::daemon_install(l10n),
         "daemon uninstall" => m::daemon_uninstall(l10n),
         "daemon start" => m::daemon_start(l10n),
@@ -291,6 +292,25 @@ pub fn localize(command: clap::Command, l10n: &Localizer) -> clap::Command {
     )
 }
 
+/// The desktop app's top-level link: only `zuse:` URLs, which OS launchers
+/// pass. Any other bare word is a mistyped command, not a reason to open a
+/// window (`zuse commands` once did).
+pub fn zuse_link(value: &str) -> Result<String, String> {
+    let scheme = value.split_once(':').map(|(scheme, _)| scheme);
+    if scheme.is_some_and(|scheme| scheme.eq_ignore_ascii_case("zuse")) {
+        Ok(value.to_owned())
+    } else {
+        Err(format!("not a zuse: link: {value}"))
+    }
+}
+
+/// Full localized help, for the desktop app started without a command.
+pub fn help<T: CommandFactory>(l10n: &Localizer) -> String {
+    localize(T::command().version(zuse_update::current_version()), l10n)
+        .render_long_help()
+        .to_string()
+}
+
 /// Parse with localized help and errors; exits on help, version or misuse.
 pub fn parse<T: CommandFactory + FromArgMatches>(arguments: Vec<OsString>, l10n: &Localizer) -> T {
     parse_with(
@@ -315,6 +335,24 @@ pub(crate) fn parse_with<T: FromArgMatches>(
             ) {
                 let _ = error.print();
                 std::process::exit(0);
+            }
+            // A word `zuse_link` refused lands in the hidden link slot; report
+            // it as the unknown command it is.
+            let stray = (error.kind() == ErrorKind::ValueValidation)
+                .then(|| {
+                    error
+                        .get(clap::error::ContextKind::InvalidArg)
+                        .filter(|arg| arg.to_string() == "[URL]")
+                        .and(error.get(clap::error::ContextKind::InvalidValue))
+                })
+                .flatten();
+            if let Some(value) = stray {
+                eprintln!(
+                    "{}\n{value}\n\n{}",
+                    m::unknown_argument(l10n),
+                    command.render_help()
+                );
+                std::process::exit(2);
             }
             let detail = match error.kind() {
                 ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand => {
@@ -510,7 +548,7 @@ mod tests {
             global: Global,
             #[command(subcommand)]
             command: Option<DesktopCommand>,
-            #[arg(value_name = "URL")]
+            #[arg(value_name = "URL", hide = true, value_parser = zuse_link)]
             open_url: Option<String>,
             #[arg(long, value_name = "FILE")]
             paired_link_file: Option<PathBuf>,
@@ -519,7 +557,13 @@ mod tests {
         enum DesktopCommand {
             #[command(flatten)]
             Shared(Command),
+            App(AppArgs),
             Appshot,
+        }
+        #[derive(Args, Debug)]
+        struct AppArgs {
+            #[arg(value_name = "URL", value_parser = zuse_link)]
+            open_url: Option<String>,
         }
         let desktop = |values: &[&str]| {
             let matches = localize(Desktop::command(), &Localizer::new(Locale::En))
@@ -531,6 +575,28 @@ mod tests {
         assert!(headed.command.is_none() && headed.open_url.is_none());
         let link = desktop(&["zuse", "zuse://chat/1"]);
         assert_eq!(link.open_url.as_deref(), Some("zuse://chat/1"));
+        assert!(matches!(
+            desktop(&["zuse", "app"]).command,
+            Some(DesktopCommand::App(AppArgs { open_url: None }))
+        ));
+        assert!(matches!(
+            desktop(&["zuse", "app", "ZUSE://chat/1"]).command,
+            Some(DesktopCommand::App(AppArgs { open_url: Some(url) })) if url == "ZUSE://chat/1"
+        ));
+        // A mistyped command must not become a link that opens a window.
+        for stray in ["commands", "https://example.com", "./project"] {
+            let error = localize(Desktop::command(), &Localizer::new(Locale::En))
+                .try_get_matches_from(["zuse", stray])
+                .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            assert_eq!(
+                error
+                    .get(clap::error::ContextKind::InvalidArg)
+                    .unwrap()
+                    .to_string(),
+                "[URL]"
+            );
+        }
         let paired = desktop(&["zuse", "--paired-link-file", "/tmp/link"]);
         assert!(paired.paired_link_file.is_some());
         assert!(matches!(
@@ -547,7 +613,17 @@ mod tests {
         command.build();
         let help = command.render_long_help().to_string();
         assert!(help.contains(&m::appshot(&Localizer::new(Locale::Ja))));
-        assert!(help.contains(&m::open_url(&Localizer::new(Locale::Ja))));
+        assert!(help.contains(&m::open_app(&Localizer::new(Locale::Ja))));
+        // The bare link slot is for OS launchers only; help shows `app [URL]`.
+        assert!(!help.contains("[URL]"));
+        let mut app = localize(Desktop::command(), &Localizer::new(Locale::Ja));
+        app.build();
+        let app = app
+            .find_subcommand_mut("app")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        assert!(app.contains(&m::open_url(&Localizer::new(Locale::Ja))));
     }
 
     #[test]
