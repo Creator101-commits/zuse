@@ -26,7 +26,6 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  CARGO_TERM_COLOR: always
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"
 
@@ -173,12 +172,18 @@ jobs:
           libfontconfig-dev libfreetype-dev libxcb1-dev libxcb-shape0-dev
           libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
           libvulkan-dev libasound2-dev libwebkit2gtk-4.1-dev libjson-glib-dev
+      - run: cargo check --locked -p zuse -p zuse-cli -p zuse-relay -p zuse-remote
+      - if: runner.os == 'macOS'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # After `cargo check`: the bundle-identity test reads the pinned
+      # toolkit's legal files out of the fetched crate sources.
       - if: runner.os == 'macOS'
         name: Microphone helper cross-compilation and bundle identity
         run: |
-          python3 -m unittest discover -s scripts -p test_macos_permission.py
-          python3 scripts/test_package.py PackagingTests.test_macos_package_identity_allows_bundle_signing
-      - run: cargo check --locked -p zuse -p zuse-cli -p zuse-relay -p zuse-remote
+          python -m unittest discover -s scripts -p test_macos_permission.py
+          python scripts/test_package.py PackagingTests.test_macos_package_identity_allows_bundle_signing
       - if: runner.os == 'Linux'
         name: Tests
         run: cargo nextest run --locked --profile ci -p zuse-ui -p zuse-viewport -p zuse-text --lib

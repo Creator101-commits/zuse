@@ -88,7 +88,8 @@ class CargoDevTests(unittest.TestCase):
                 '[dependencies]\nzuse-icons = { path = "../crates/icons" }\n'
             )
             (root / "consumer/src/lib.rs").write_text('pub fn style() -> &\'static str { zuse_icons::STYLE }\n')
-            env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"), HUGEICONS_LICENSE_KEY="")
+            env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"), HUGEICONS_LICENSE_KEY="",
+                       CARGO_TERM_COLOR="never")
             env["HUGEICONS_BUILD_KEY"] = icon_fingerprint(env)
             command = ["cargo", "build", "--offline", "-v", "-p", "icon-consumer"]
             for iteration in range(2):

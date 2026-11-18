@@ -806,8 +806,15 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         zuse_update::save_channel(dir.path(), ReleaseChannel::Stable).unwrap();
+        // The test's own current-thread runtime: `gpui_tokio::init` starts a
+        // multi-thread runtime whose workers the deterministic scheduler rejects.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
         cx.update(|cx| {
-            gpui_tokio::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
             crate::localization::init(Default::default(), cx);
         });
         let update =

@@ -1290,7 +1290,7 @@ mod tests {
         let _entered = runtime.enter();
         cx.update(|cx| {
             initialize(cx);
-            gpui_tokio::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
         });
         let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
             std::sync::Arc::new(PendingController),
