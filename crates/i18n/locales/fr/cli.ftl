@@ -168,6 +168,7 @@ cli-update_check = Indiquer seulement si une mise à jour est disponible
 
 cli-appshot = Prendre un Appshot dans l’application ouverte
 cli-open_app = Ouvrir l’application de bureau
+cli-zuse_link_expected = Un lien Zuse est attendu (zuse://…)
 
 cli-open_url = Lien Zuse à ouvrir
 

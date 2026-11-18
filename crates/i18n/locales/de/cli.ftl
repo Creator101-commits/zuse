@@ -168,6 +168,7 @@ cli-update_check = Nur melden, ob ein Update verfügbar ist
 
 cli-appshot = Appshot in der laufenden App aufnehmen
 cli-open_app = Desktop-App öffnen
+cli-zuse_link_expected = Erwartet wird ein Zuse-Link (zuse://…)
 
 cli-open_url = Zu öffnender Zuse-Link
 

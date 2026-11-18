@@ -34,8 +34,9 @@ Install Stable 0.26.1 from a Linux terminal:
 
 The terminal installer requires Python 3.11+, verifies download checksums and
 installs for the current user into `~/.local/share/zuse`, with launchers in
-`~/.local/bin`. After installation, run `zuse app` or open Zuse from your
-app launcher; a bare `zuse` prints help. Linux uses Ubuntu 24.04/glibc
+`~/.local/bin`. After installation, open Zuse from your app launcher or run
+`zuse`. From the release after 0.26.1, a bare `zuse` in a terminal prints help
+instead; run `zuse app` to open the window. Linux uses Ubuntu 24.04/glibc
 2.39 as its build baseline. See [installation and runtime requirements](internal-docs/packaging.md)
 for system dependencies, alternative formats and uninstall commands.
 

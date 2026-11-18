@@ -170,6 +170,7 @@ cli-update_check = Only report whether an update is available
 
 cli-appshot = Take an Appshot in the running app
 cli-open_app = Open the desktop app
+cli-zuse_link_expected = Expected a Zuse link (zuse://…)
 
 cli-open_url = Zuse link to open
 

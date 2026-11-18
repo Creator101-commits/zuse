@@ -168,6 +168,7 @@ cli-update_check = 只報告是否有可用更新
 
 cli-appshot = 在執行中的應用程式中擷取 Appshot
 cli-open_app = 開啟桌面應用程式
+cli-zuse_link_expected = 需要 Zuse 連結（zuse://…）
 
 cli-open_url = 要開啟的 Zuse 連結
 

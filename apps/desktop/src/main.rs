@@ -67,6 +67,8 @@ fn main() -> anyhow::Result<()> {
         // SAFETY: still single-threaded; nothing has read the environment concurrently.
         unsafe { std::env::remove_var("ZUSE_LANGUAGE") };
     }
+    #[cfg(target_os = "linux")]
+    repair_desktop_entry();
     let arguments = std::env::args_os().collect::<Vec<_>>();
     let l10n = zuse_commands::localizer(&arguments);
     let cli: Cli = zuse_commands::parse(arguments, &l10n);
@@ -151,10 +153,34 @@ fn launched_by_desktop() -> bool {
         // processes inherit the variable, so only an exact match counts.
         let gio = std::env::var("GIO_LAUNCHED_DESKTOP_FILE_PID")
             .is_ok_and(|pid| pid == std::process::id().to_string());
-        // Earlier releases relaunch after an update with every stream on
-        // /dev/null; nobody could read help there anyway.
-        gio || (discarded("/proc/self/fd/1") && discarded("/proc/self/fd/2"))
+        gio || old_update_relaunch()
     }
+}
+
+/// Releases before `zuse app` relaunch after an update through a detached
+/// `/bin/sh` that waits for the old app to exit and then `exec`s a bare
+/// `zuse`: its own process group, every stream on /dev/null, orphaned to init
+/// or a systemd subreaper. A terminal or agent redirecting output still has
+/// its shell as the parent, so it gets help.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn old_update_relaunch() -> bool {
+    let Ok(stat) = std::fs::read_to_string("/proc/self/stat") else {
+        return false;
+    };
+    // `pid (comm) state ppid pgrp ...`; comm may contain spaces or ')'.
+    let Some((_, fields)) = stat.rsplit_once(')') else {
+        return false;
+    };
+    let mut fields = fields.split_whitespace().skip(1);
+    let (Some(ppid), Some(pgrp)) = (fields.next(), fields.next()) else {
+        return false;
+    };
+    let orphaned = ppid == "1"
+        || std::fs::read_to_string(format!("/proc/{ppid}/comm"))
+            .is_ok_and(|comm| comm.trim() == "systemd");
+    pgrp == std::process::id().to_string()
+        && orphaned
+        && (0..3).all(|fd| discarded(&format!("/proc/self/fd/{fd}")))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -164,6 +190,51 @@ fn discarded(stream: &str) -> bool {
         (Ok(stream), Ok(null)) => stream.rdev() == null.rdev() && stream.dev() == null.dev(),
         _ => false,
     }
+}
+
+/// Updating from a release before `zuse app` runs the old binary's embedded
+/// installer, which writes this package's desktop entry without `app`. Any
+/// start of this binary rewrites it, so the launcher works from then on even
+/// where `launched_by_desktop` cannot recognise it.
+#[cfg(target_os = "linux")]
+fn repair_desktop_entry() {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    // <package>/libexec/zuse, beside the installer's ownership marker.
+    let Some(package) = executable.parent().and_then(std::path::Path::parent) else {
+        return;
+    };
+    if !package.join(".installed-by-zuse").is_file() {
+        return;
+    }
+    let entry = package.join("share/applications/sh.zuse.app.desktop");
+    let Some(repaired) = std::fs::read_to_string(&entry)
+        .ok()
+        .and_then(|text| with_app_exec(&text))
+    else {
+        return;
+    };
+    let pending = entry.with_extension("desktop.repair");
+    if std::fs::write(&pending, repaired).is_err() || std::fs::rename(&pending, &entry).is_err() {
+        let _ = std::fs::remove_file(&pending);
+    }
+}
+
+/// The entry with `app` before `%u` on its `Exec=` line, or `None` when it
+/// already has it.
+#[cfg(any(target_os = "linux", test))]
+fn with_app_exec(text: &str) -> Option<String> {
+    let mut changed = false;
+    let lines = text.lines().map(|line| match line.strip_suffix(" %u") {
+        Some(head) if line.starts_with("Exec=") && !head.ends_with(" app") => {
+            changed = true;
+            format!("{head} app %u")
+        }
+        _ => line.to_owned(),
+    });
+    let repaired = lines.collect::<Vec<_>>().join("\n") + "\n";
+    changed.then_some(repaired)
 }
 
 /// Whether a parent console (a terminal, or an agent's shell) exists. Explorer
@@ -199,4 +270,21 @@ fn attach_parent_console() -> bool {
 fn read_paired_target(path: &std::path::Path) -> anyhow::Result<zuse_remote::PairedTarget> {
     zuse_remote::PairedTarget::read_link_file(path)
         .map_err(|_| anyhow::anyhow!("Could not read a valid private pairing link file"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_app_exec;
+
+    #[test]
+    fn old_desktop_entries_gain_app_once() {
+        let old = "[Desktop Entry]\nName=Zuse\nExec=\"/home/a b/.local/share/zuse/packages/z/bin/zuse\" %u\nTerminal=false\n";
+        let repaired = with_app_exec(old).unwrap();
+        assert_eq!(
+            repaired,
+            "[Desktop Entry]\nName=Zuse\nExec=\"/home/a b/.local/share/zuse/packages/z/bin/zuse\" app %u\nTerminal=false\n"
+        );
+        assert_eq!(with_app_exec(&repaired), None);
+        assert_eq!(with_app_exec("[Desktop Entry]\nTryExec=zuse %u\n"), None);
+    }
 }
