@@ -91,6 +91,20 @@ impl AppState {
             vec![]
         }
     }
+    /// The listed task row for `workspace`, without cloning the catalog.
+    pub(crate) fn cloud_sidebar_workspace(&self, workspace: &str) -> Option<&Value> {
+        self.cloud_sidebar
+            .scope
+            .as_ref()
+            .is_some_and(|s| s.matches(self))
+            .then(|| {
+                self.cloud_sidebar
+                    .workspaces
+                    .iter()
+                    .find(|row| row["workspaceId"].as_str() == Some(workspace))
+            })
+            .flatten()
+    }
     /// The sidebar refreshes silently; tests still observe its phases.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cloud_sidebar_loading(&self) -> bool {
