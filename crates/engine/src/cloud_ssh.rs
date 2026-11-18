@@ -159,29 +159,51 @@ pub fn terminal_command(prepared: &Prepared) -> String {
     format!(
         "ssh -t {} {}",
         prepared.host,
-        quote(&format!(
-            "cd {} && exec \"$SHELL\" -l",
-            quote(&prepared.path)
-        ))
+        quote(&remote_shell_command(prepared))
     )
 }
 
+/// What ssh runs on the computer: a login shell in the repository. Needs a
+/// TTY (`ssh -t`).
+pub fn remote_shell_command(prepared: &Prepared) -> String {
+    format!("cd {} && exec \"$SHELL\" -l", quote(&prepared.path))
+}
+
 /// A script that runs [`terminal_command`], for terminals that take a program
-/// rather than a shell line. Rewritten on every open. Blocking.
+/// rather than a shell line. Rewritten on every open: written executable to
+/// a staging file of its own, then renamed into place, so a terminal never
+/// sees a partial or non-executable script and concurrent opens don't
+/// collide. Blocking.
 pub fn write_launcher(prepared: &Prepared) -> Result<PathBuf, String> {
-    let dir = root().join("open");
-    private_dir(&dir).map_err(|e| e.to_string())?;
+    write_launcher_in(&root().join("open"), prepared)
+}
+
+fn write_launcher_in(dir: &Path, prepared: &Prepared) -> Result<PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    private_dir(dir).map_err(|e| e.to_string())?;
     let script = dir.join(format!("{}.command", prepared.host));
-    private_write(
-        &script,
-        &format!("#!/bin/sh\nexec {}\n", terminal_command(prepared)),
-    )
-    .map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| e.to_string())?;
+    let staging = dir.join(format!(
+        ".{}.{}-{}.tmp",
+        prepared.host,
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        std::fs::write(
+            &staging,
+            format!("#!/bin/sh\nexec {}\n", terminal_command(prepared)),
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+        }
+        std::fs::rename(&staging, &script)
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error.to_string());
     }
     Ok(script)
 }
@@ -232,6 +254,35 @@ mod tests {
         ));
         assert!(entry.contains("IdentitiesOnly yes"));
         assert!(entry.contains("hosts/workspace_1.known\n"));
+    }
+
+    #[test]
+    fn launchers_are_executable_in_place_and_leave_no_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let prepared = Prepared {
+            host: "zuse-w".into(),
+            user: "zuse".into(),
+            path: "/home/zuse/my repo".into(),
+        };
+        let first = write_launcher_in(dir.path(), &prepared).unwrap();
+        let again = write_launcher_in(dir.path(), &prepared).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(first, dir.path().join("zuse-w.command"));
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            format!("#!/bin/sh\nexec {}\n", terminal_command(&prepared))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&first).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["zuse-w.command"]);
     }
 
     #[test]

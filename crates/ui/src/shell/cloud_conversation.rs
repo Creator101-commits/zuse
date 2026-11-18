@@ -16,6 +16,8 @@ pub(super) enum CloudConversationEvent {
     OpenFile(String),
     /// Open a folder on this computer (the synced copy) in an app.
     OpenPathIn(super::open_in::OpenTarget, String),
+    /// Detect this computer's apps again (the Computer menu opened).
+    RefreshOpenTargets,
 }
 /// The header cloud glyph's color: the theme's success green while the
 /// computer is online, muted grey otherwise.
@@ -1046,6 +1048,7 @@ impl Shell {
                 CloudConversationEvent::OpenPathIn(target, path) => {
                     this.open_path_in(target.clone(), path.clone(), cx);
                 }
+                CloudConversationEvent::RefreshOpenTargets => this.refresh_open_targets(cx),
             }));
     }
     pub(super) fn open_cloud_conversation(

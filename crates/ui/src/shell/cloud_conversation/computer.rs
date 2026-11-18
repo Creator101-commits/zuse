@@ -485,6 +485,9 @@ impl CloudConversation {
             self.computer.open = true;
             self.computer.menu.open(());
             self.refresh_computer(cx);
+            // Apps installed since the last look show up in the SSH and
+            // open-in lists; the last snapshot stays while this runs.
+            cx.emit(CloudConversationEvent::RefreshOpenTargets);
             cx.notify();
         }
     }
@@ -904,6 +907,10 @@ impl CloudConversation {
             self.watch_environment(false, cx);
         }
     }
+    /// Whether the computer is up, so SSH can reach it.
+    fn computer_running(&self) -> bool {
+        matches!(self.computer_summary().tone, Tone::Running)
+    }
     pub(in crate::shell) fn open_computer(&mut self, cx: &mut Context<Self>) {
         if !self.computer.open {
             self.toggle_computer(cx);
@@ -913,6 +920,11 @@ impl CloudConversation {
     /// entry), then run `action`.
     fn open_ssh(&mut self, action: SshAction, cx: &mut Context<Self>) {
         if self.computer.ssh_task.is_some() {
+            return;
+        }
+        if !self.computer_running() {
+            self.computer.ssh_error = Some("Wake the computer to open it over SSH.".into());
+            cx.notify();
             return;
         }
         let Some(engine) = self.state.read(cx).engine().cloned() else {
@@ -1052,7 +1064,8 @@ impl CloudConversation {
     /// The "Open via SSH" list on its own (no back row or hint), so it can
     /// show in any menu: each installed app, then "Copy SSH command".
     fn render_ssh_entries(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let busy = self.computer.ssh_task.is_some();
+        // Like the SSH row itself: dimmed and inert unless the computer runs.
+        let enabled = self.computer.ssh_task.is_none() && self.computer_running();
         let mut rows = Vec::new();
         for entry in ssh_entries(&self.computer.ssh_targets) {
             let id = format!("computer-ssh-{}", entry.id());
@@ -1087,7 +1100,7 @@ impl CloudConversation {
                     .id(SharedString::from(id))
                     .role(gpui::Role::MenuItem)
                     .aria_label(label)
-                    .opacity(if busy { 0.5 } else { 1. })
+                    .opacity(if enabled { 1. } else { 0.5 })
                     .child(
                         div()
                             .size(px(16.))
@@ -1097,7 +1110,11 @@ impl CloudConversation {
                             .child(glyph),
                     )
                     .child(div().flex_1().min_w_0().truncate().child(label))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_ssh(action.clone(), cx)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if enabled {
+                            this.open_ssh(action.clone(), cx);
+                        }
+                    }))
                     .into_any_element(),
             );
         }

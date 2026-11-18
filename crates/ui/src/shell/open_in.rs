@@ -457,7 +457,7 @@ impl Shell {
     }
 
     /// Detect the apps again (the menu refreshes on every open).
-    fn refresh_open_targets(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_open_targets(&mut self, cx: &mut Context<Self>) {
         if self.open_in.loading {
             return;
         }

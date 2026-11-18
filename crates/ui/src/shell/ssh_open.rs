@@ -307,18 +307,35 @@ pub(super) enum Launch {
     },
 }
 
-/// How `target` opens `prepared` on `platform`. Terminals run `script` (the
-/// launcher from `cloud_ssh::write_launcher`). `None` when the app can't
-/// open an SSH session there.
+/// Whether `app` on `platform` runs the launcher script, so `open` writes
+/// it first. The others hand the ssh line to the terminal directly.
+fn uses_script(app: SshApp, platform: Platform) -> bool {
+    matches!(
+        (app, platform),
+        (SshApp::Warp, Platform::Mac)
+            | (
+                SshApp::Ghostty | SshApp::WezTerm | SshApp::Kitty | SshApp::Alacritty,
+                Platform::Mac | Platform::Linux
+            )
+    )
+}
+
+/// How `target` opens `prepared` on `platform`. Apps that [`uses_script`]
+/// run `script` (the launcher from `cloud_ssh::write_launcher`). `None` when
+/// the app can't open an SSH session there.
 pub(super) fn plan(
     target: &SshTarget,
     prepared: &Prepared,
-    script: &Path,
+    script: Option<&Path>,
     platform: Platform,
 ) -> Option<Launch> {
     let host = &prepared.host;
     let path = encode_path(&prepared.path);
-    let script = script.to_string_lossy().into_owned();
+    let script = if uses_script(target.app, platform) {
+        script?.to_string_lossy().into_owned()
+    } else {
+        String::new()
+    };
     let mac = platform == Platform::Mac;
     // `open -na <bundle> --args …`: a new instance of the app, with arguments.
     let mac_open = |args: &[&str]| {
@@ -358,7 +375,13 @@ pub(super) fn plan(
         (SshApp::Zed, Platform::Linux) => {
             program(&[&format!("ssh://{}@{host}{path}", prepared.user)])
         }
-        (SshApp::Terminal, Platform::Windows) => program(&["ssh", host]),
+        // One argument for the remote command; Windows quotes it for ssh.
+        (SshApp::Terminal, Platform::Windows) => program(&[
+            "ssh",
+            "-t",
+            host,
+            &crate::cloud_ssh::remote_shell_command(prepared),
+        ]),
         (SshApp::Terminal, _) => Some(Launch::SystemTerminal(crate::cloud_ssh::terminal_command(
             prepared,
         ))),
@@ -430,15 +453,78 @@ fn open_url(url: &str) -> Result<(), String> {
     run_to_exit(command)
 }
 
+/// How long a directly launched app is watched: one that exits non-zero
+/// within it failed to open; one still running opened.
+const LAUNCH_WATCH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Spawn an editor or terminal that keeps running. Fails when it can't start,
+/// or exits non-zero within `window` (with its stderr as the reason).
+/// Afterwards a detached thread reaps it. Blocking for up to `window`.
+fn spawn_watched(
+    mut command: std::process::Command,
+    window: std::time::Duration,
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::sync::{Arc, Mutex};
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    // Drain stderr on its own thread so a chatty app never blocks on a full
+    // pipe; a forked app may hold it open long after this returns.
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    if let Some(mut pipe) = child.stderr.take() {
+        let stderr = stderr.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(read) = pipe.read(&mut chunk) {
+                if read == 0 {
+                    break;
+                }
+                let mut buffer = stderr.lock().unwrap_or_else(|e| e.into_inner());
+                if buffer.len() < 16 * 1024 {
+                    buffer.extend_from_slice(&chunk[..read]);
+                }
+            }
+        });
+    }
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait().map_err(|error| error.to_string())? {
+            Some(status) if status.success() => return Ok(()),
+            Some(status) => {
+                // Let the reader catch the last of what it printed.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let buffer = stderr.lock().unwrap_or_else(|e| e.into_inner());
+                let detail = String::from_utf8_lossy(&buffer).trim().to_owned();
+                let detail = detail.lines().last().unwrap_or_default().to_owned();
+                return Err(if detail.is_empty() {
+                    format!("exited with {status}")
+                } else {
+                    detail
+                });
+            }
+            None if started.elapsed() >= window => break,
+            None => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// Open the computer's repository in `target`. Blocking.
 pub(super) fn open(target: &SshTarget, prepared: &Prepared) -> Result<(), String> {
     let platform = Platform::current();
-    let script = if target.app.is_terminal() {
-        crate::cloud_ssh::write_launcher(prepared)?
+    let script = if uses_script(target.app, platform) {
+        Some(crate::cloud_ssh::write_launcher(prepared)?)
     } else {
-        PathBuf::new()
+        None
     };
-    let launch = plan(target, prepared, &script, platform)
+    let launch = plan(target, prepared, script.as_deref(), platform)
         .ok_or_else(|| "it can't open SSH sessions on this system".to_owned())?;
     match launch {
         Launch::Url(url) => open_url(&url),
@@ -453,24 +539,14 @@ pub(super) fn open(target: &SshTarget, prepared: &Prepared) -> Result<(), String
             open_url(&url)
         }
         Launch::Program { program, args } => {
-            let waits = program == Path::new("open");
             let mut command = std::process::Command::new(&program);
             command.args(&args);
-            if waits {
-                return run_to_exit(command);
+            // `open` exits once the app has the request.
+            if program == Path::new("open") {
+                run_to_exit(command)
+            } else {
+                spawn_watched(command, LAUNCH_WATCH)
             }
-            // Editors and terminals launched directly keep running; a
-            // detached thread reaps them.
-            let mut child = command
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|error| error.to_string())?;
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            Ok(())
         }
     }
 }
@@ -499,7 +575,7 @@ mod tests {
         match plan(
             &target(app, Some("/Applications/X.app")),
             &prepared(path),
-            Path::new("/s"),
+            Some(Path::new("/s")),
             Platform::Mac,
         ) {
             Some(Launch::Url(url)) => url,
@@ -516,7 +592,7 @@ mod tests {
         match plan(
             &target(app, Some(launcher)),
             &prepared("/home/zuse/my repo"),
-            Path::new(script),
+            Some(Path::new(script)),
             platform,
         ) {
             Some(Launch::Program { program, args }) => {
@@ -571,7 +647,7 @@ mod tests {
             plan(
                 &target(SshApp::Zed, Some("zed")),
                 &prepared("/w"),
-                Path::new("/s"),
+                Some(Path::new("/s")),
                 Platform::Windows
             )
             .is_none()
@@ -581,7 +657,7 @@ mod tests {
             plan(
                 &target(SshApp::Cursor, None),
                 &prepared("/w"),
-                Path::new("/s"),
+                Some(Path::new("/s")),
                 Platform::Linux
             )
             .is_none()
@@ -614,7 +690,15 @@ mod tests {
         let (_, args) = program(SshApp::WezTerm, "/usr/bin/wezterm", script, Platform::Linux);
         assert_eq!(args, ["start", "--", script]);
         let (_, args) = program(SshApp::Terminal, "C:/wt.exe", script, Platform::Windows);
-        assert_eq!(args, ["ssh", "zuse-w1"]);
+        assert_eq!(
+            args,
+            [
+                "ssh",
+                "-t",
+                "zuse-w1",
+                r#"cd '/home/zuse/my repo' && exec "$SHELL" -l"#
+            ]
+        );
     }
 
     #[test]
@@ -624,14 +708,14 @@ mod tests {
         let terminal = target(SshApp::Terminal, None);
         for platform in [Platform::Mac, Platform::Linux] {
             assert_eq!(
-                plan(&terminal, &prepared, Path::new("/s"), platform),
+                plan(&terminal, &prepared, Some(Path::new("/s")), platform),
                 Some(Launch::SystemTerminal(line.clone()))
             );
         }
         let Some(Launch::AppleScript(script)) = plan(
             &target(SshApp::Iterm, Some("/Applications/iTerm.app")),
             &prepared,
-            Path::new("/s"),
+            Some(Path::new("/s")),
             Platform::Mac,
         ) else {
             panic!("iTerm2 runs an AppleScript");
@@ -644,7 +728,7 @@ mod tests {
         let Some(Launch::Warp { path, config, url }) = plan(
             &target(SshApp::Warp, Some("/Applications/Warp.app")),
             &prepared,
-            Path::new("/Users/a b/.zuse/ssh/open/zuse-w1.command"),
+            Some(Path::new("/Users/a b/.zuse/ssh/open/zuse-w1.command")),
             Platform::Mac,
         ) else {
             panic!("Warp opens a launch configuration");
@@ -658,12 +742,68 @@ mod tests {
                 plan(
                     &target(app, Some("x")),
                     &prepared,
-                    Path::new("/s"),
+                    Some(Path::new("/s")),
                     Platform::Linux
                 )
                 .is_none()
             );
         }
+    }
+
+    #[test]
+    fn only_plans_that_run_the_launcher_get_it_written() {
+        let script = Path::new("/sentinel/zuse-w1.command");
+        for platform in [Platform::Mac, Platform::Linux, Platform::Windows] {
+            for app in SshApp::ALL {
+                let launch = plan(
+                    &target(app, Some("/bin/app")),
+                    &prepared("/w"),
+                    Some(script),
+                    platform,
+                );
+                let mentions = format!("{launch:?}").contains("/sentinel/zuse-w1");
+                assert_eq!(
+                    mentions,
+                    uses_script(app, platform),
+                    "{app:?} on {platform:?}"
+                );
+                // Without the script, those apps can't plan; the rest are unchanged.
+                let without = plan(
+                    &target(app, Some("/bin/app")),
+                    &prepared("/w"),
+                    None,
+                    platform,
+                );
+                if uses_script(app, platform) {
+                    assert!(without.is_none());
+                } else {
+                    assert_eq!(without, launch);
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_launches_that_fail_quickly_report_why() {
+        let shell = |line: &str| {
+            let mut command = std::process::Command::new("/bin/sh");
+            command.args(["-c", line]);
+            command
+        };
+        let window = std::time::Duration::from_millis(300);
+        assert_eq!(
+            spawn_watched(shell("echo noise >&2; echo bad flag >&2; exit 3"), window),
+            Err("bad flag".to_owned())
+        );
+        assert_eq!(
+            spawn_watched(shell("exit 4"), window),
+            Err("exited with exit status: 4".to_owned())
+        );
+        assert_eq!(spawn_watched(shell("exit 0"), window), Ok(()));
+        // Still running after the window: it opened.
+        assert_eq!(spawn_watched(shell("echo hi >&2; sleep 5"), window), Ok(()));
+        assert!(spawn_watched(std::process::Command::new("/nonexistent/app"), window).is_err());
     }
 
     #[test]
