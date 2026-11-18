@@ -416,12 +416,17 @@ impl Pickers {
             return;
         }
         let state = self.state.read(cx);
+        // New cloud destinations are for Cloud subscribers. An open cloud
+        // chat keeps its own binding. Losing the subscription clears the
+        // loaded destinations (the owner below becomes `None`).
+        let offered = self.cloud.task_binding.is_some() || state.cloud_access().offers_cloud();
         let owner = self
             .cloud
             .task_binding
             .as_ref()
             .map(|binding| binding.target.subject.clone())
-            .or_else(|| state.cloud_user_id().map(str::to_owned));
+            .or_else(|| state.cloud_user_id().map(str::to_owned))
+            .filter(|_| offered);
         let organization = self
             .cloud
             .task_binding
@@ -492,7 +497,7 @@ impl Pickers {
             let _ = this.update(cx, |this, cx| {
                 let current=this.cloud.task_binding.as_ref().map(|binding|(Some(binding.target.subject.as_str()),binding.target.organization.as_deref()))
                     .unwrap_or_else(||(this.state.read(cx).cloud_user_id(),this.state.read(cx).cloud_organization_id()));
-                if current!=(Some(owner.as_str()),organization.as_deref()){return;}
+                if current!=(Some(owner.as_str()),organization.as_deref())||this.cloud.owner.as_deref()!=Some(owner.as_str()){return;}
                 this.cloud.task = None;
                 match result {
                     Ok(Ok(value))
@@ -842,8 +847,9 @@ impl Pickers {
                         ),
                     )
             })
-            // Cloud setup is a cloud feature; local-only builds leave it out.
-            .when(zuse_viewport::cloud_gate::enabled(), |view| {
+            // Cloud setup is for Cloud subscribers; local-only builds,
+            // signed-out and unsubscribed accounts leave it out.
+            .when(self.state.read(cx).cloud_access().offers_cloud(), |view| {
                 view.child(zuse_viewport::creation_style::separator())
                     .child(
                         zuse_viewport::creation_style::option(

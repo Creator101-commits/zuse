@@ -10,6 +10,7 @@
 ### Changed
 
 - Name the chat's agent in the composer's empty `/` menu, so a command that only exists in another agent reads as that agent's catalog instead of a missing feature.
+- Settings shows Cloud based on your Zuse account instead of the build. Signed-in accounts see Billing to subscribe. Accounts with an active Cloud subscription also see the Cloud computer group, the Cloud compute usage tab, cloud destinations in the pickers and new cloud chats. These appear or disappear as soon as the subscription changes, with no restart. Cloud computers now work against production.
 - Render Markdown tables with compact rows, rounded borders, clearer headers, and better wrapping.
 
 ### Fixed
