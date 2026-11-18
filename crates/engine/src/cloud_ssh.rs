@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prepared {
     pub host: String,
+    /// The account on the computer (also in the host entry).
+    pub user: String,
     pub path: String,
 }
 
@@ -51,7 +53,8 @@ pub fn pin_host_key(workspace: &str, host_key: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-fn quote(value: &str) -> String {
+/// Single-quote `value` for a POSIX shell.
+pub fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
@@ -163,6 +166,26 @@ pub fn terminal_command(prepared: &Prepared) -> String {
     )
 }
 
+/// A script that runs [`terminal_command`], for terminals that take a program
+/// rather than a shell line. Rewritten on every open. Blocking.
+pub fn write_launcher(prepared: &Prepared) -> Result<PathBuf, String> {
+    let dir = root().join("open");
+    private_dir(&dir).map_err(|e| e.to_string())?;
+    let script = dir.join(format!("{}.command", prepared.host));
+    private_write(
+        &script,
+        &format!("#!/bin/sh\nexec {}\n", terminal_command(prepared)),
+    )
+    .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(script)
+}
+
 /// Open the system terminal running `command`. Blocking.
 pub fn open_terminal(command: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
@@ -222,6 +245,7 @@ mod tests {
     fn terminal_commands_open_the_repository_with_quoting_intact() {
         let command = terminal_command(&Prepared {
             host: "zuse-w".into(),
+            user: "zuse".into(),
             path: "/home/zuse/my repo".into(),
         });
         assert_eq!(

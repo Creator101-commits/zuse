@@ -215,11 +215,13 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if let Some(conversation) = self.cloud_conversation.clone() {
-            // The menu can open the synced folder in this computer's apps.
+            // The menu can open the synced folder, or the computer over SSH, in
+            // this computer's apps.
             self.ensure_open_targets(cx);
             let targets = self.open_in.targets.clone();
+            let ssh_targets = self.open_in.ssh_targets.clone();
             return Some(conversation.update(cx, |view, cx| {
-                view.set_open_targets(targets);
+                view.set_open_targets(targets, ssh_targets);
                 view.render_header_control(cx)
             }));
         }

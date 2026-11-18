@@ -120,10 +120,75 @@ enum Page {
     Ssh,
 }
 /// What to do once SSH access is ready.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum SshAction {
     Terminal,
     Copy,
+    /// Open the repository in an installed editor or terminal.
+    Open(crate::shell::ssh_open::SshTarget),
+}
+/// One row of the "Open via SSH" list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SshEntry {
+    /// An installed app that opens the computer over SSH.
+    App(crate::shell::ssh_open::SshTarget),
+    /// The system terminal, before the apps are known.
+    Terminal,
+    Copy,
+}
+impl SshEntry {
+    fn id(&self) -> &'static str {
+        match self {
+            Self::App(target) => target.app.id(),
+            Self::Terminal => "terminal",
+            Self::Copy => "copy",
+        }
+    }
+    fn label(&self) -> &'static str {
+        match self {
+            Self::App(target) => target.app.label(),
+            Self::Terminal => "Terminal",
+            Self::Copy => "Copy SSH command",
+        }
+    }
+    fn action(&self) -> SshAction {
+        match self {
+            Self::App(target) => SshAction::Open(target.clone()),
+            Self::Terminal => SshAction::Terminal,
+            Self::Copy => SshAction::Copy,
+        }
+    }
+}
+/// The SSH list: every detected app in menu order (the system terminal
+/// until detection finishes), then "Copy SSH command".
+fn ssh_entries(targets: &[crate::shell::ssh_open::SshTarget]) -> Vec<SshEntry> {
+    let mut entries: Vec<SshEntry> = targets.iter().cloned().map(SshEntry::App).collect();
+    if entries.is_empty() {
+        entries.push(SshEntry::Terminal);
+    }
+    entries.push(SshEntry::Copy);
+    entries
+}
+/// Run a blocking app launch off the UI thread; a failure names the app.
+fn launch_reporting(
+    label: &'static str,
+    job: impl FnOnce() -> Result<(), String> + Send + 'static,
+    cx: &mut Context<CloudConversation>,
+) {
+    let launch = cx.background_executor().spawn(async move { job() });
+    cx.spawn(async move |this, cx| {
+        if let Err(error) = launch.await {
+            tracing::warn!(target = label, %error, "open over SSH failed");
+            let _ = this.update(cx, |_, cx| {
+                crate::toast::show(
+                    cx,
+                    crate::toast::ToastKind::Error,
+                    format!("Couldn't open {label} over SSH: {error}"),
+                );
+            });
+        }
+    })
+    .detach();
 }
 #[derive(Clone)]
 struct Pending {
@@ -157,6 +222,8 @@ pub(super) struct State {
     ssh_error: Option<String>,
     /// The apps this computer can open a folder in (the shell detects them).
     open_targets: Vec<crate::shell::open_in::OpenTarget>,
+    /// The apps this computer can open the cloud computer in over SSH.
+    ssh_targets: Vec<crate::shell::ssh_open::SshTarget>,
     /// The machine's last CPU, memory and disk snapshot, and the poll that
     /// keeps it current while the summary shows it.
     pub(super) resources: Value,
@@ -810,12 +877,15 @@ impl CloudConversation {
             }
         }));
     }
-    /// The apps the synced folder can open in, as the shell detected them.
+    /// The apps the synced folder, and the computer over SSH, can open in,
+    /// as the shell detected them.
     pub(in crate::shell) fn set_open_targets(
         &mut self,
         targets: Vec<crate::shell::open_in::OpenTarget>,
+        ssh_targets: Vec<crate::shell::ssh_open::SshTarget>,
     ) {
         self.computer.open_targets = targets;
+        self.computer.ssh_targets = ssh_targets;
     }
     /// The last machine snapshot, when one arrived.
     pub(in crate::shell) fn resources(&self) -> &Value {
@@ -877,16 +947,18 @@ impl CloudConversation {
                     .to_owned();
                 let host_key = prepared["hostKey"].as_str().map(str::to_owned);
                 let host_workspace = workspace.clone();
+                let host_user = user.clone();
                 cx.background_executor()
                     .spawn(async move {
                         if let Some(host_key) = host_key {
                             crate::cloud_ssh::pin_host_key(&host_workspace, &host_key)?;
                         }
-                        crate::cloud_ssh::install_host(&host_workspace, &user, port)
+                        crate::cloud_ssh::install_host(&host_workspace, &host_user, port)
                     })
                     .await?;
                 Ok(crate::cloud_ssh::Prepared {
                     host: crate::cloud_ssh::host_alias(&workspace),
+                    user,
                     path,
                 })
             }
@@ -906,9 +978,19 @@ impl CloudConversation {
                             }
                             SshAction::Terminal => {
                                 let command = crate::cloud_ssh::terminal_command(&prepared);
-                                cx.background_executor()
-                                    .spawn(async move { crate::cloud_ssh::open_terminal(&command) })
-                                    .detach();
+                                launch_reporting(
+                                    "Terminal",
+                                    move || crate::cloud_ssh::open_terminal(&command),
+                                    cx,
+                                );
+                                this.close_computer(cx);
+                            }
+                            SshAction::Open(target) => {
+                                launch_reporting(
+                                    target.app.label(),
+                                    move || crate::shell::ssh_open::open(&target, &prepared),
+                                    cx,
+                                );
                                 this.close_computer(cx);
                             }
                         }
@@ -920,8 +1002,7 @@ impl CloudConversation {
         }));
         cx.notify();
     }
-    /// SSH: open a terminal on the computer, or copy the command for any
-    /// terminal or editor (the host is in ~/.ssh/config once prepared).
+    /// SSH: the back row, then [`Self::render_ssh_entries`] and a hint.
     fn render_ssh_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let theme = Theme::of(cx).for_popup();
         let busy = self.computer.ssh_task.is_some();
@@ -942,22 +1023,7 @@ impl CloudConversation {
                     })),
             )
             .child(popover::menu_separator())
-            .child(
-                popover::menu_row(&theme, false, "computer-ssh-terminal")
-                    .id("computer-ssh-terminal")
-                    .opacity(if busy { 0.5 } else { 1. })
-                    .child(icon(icons::TERMINAL).size(px(14.)).text_color(theme.text_muted))
-                    .child("Open in Terminal")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_ssh(SshAction::Terminal, cx))),
-            )
-            .child(
-                popover::menu_row(&theme, false, "computer-ssh-copy")
-                    .id("computer-ssh-copy")
-                    .opacity(if busy { 0.5 } else { 1. })
-                    .child(icon(icons::COPY).size(px(14.)).text_color(theme.text_muted))
-                    .child("Copy SSH command")
-                    .on_click(cx.listener(|this, _, _, cx| this.open_ssh(SshAction::Copy, cx))),
-            )
+            .children(self.render_ssh_entries(&theme, cx))
             .child(popover::menu_separator())
             .child(
                 div()
@@ -982,6 +1048,60 @@ impl CloudConversation {
             );
         }
         page.into_any_element()
+    }
+    /// The "Open via SSH" list on its own (no back row or hint), so it can
+    /// show in any menu: each installed app, then "Copy SSH command".
+    fn render_ssh_entries(&mut self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let busy = self.computer.ssh_task.is_some();
+        let mut rows = Vec::new();
+        for entry in ssh_entries(&self.computer.ssh_targets) {
+            let id = format!("computer-ssh-{}", entry.id());
+            let glyph: AnyElement = match &entry {
+                SshEntry::App(target) => match &target.icon {
+                    Some(png) => gpui::img(png.clone()).size(px(16.)).into_any_element(),
+                    None => icon(if target.app.is_terminal() {
+                        icons::TERMINAL
+                    } else {
+                        crate::shell::open_in::fallback_glyph(target.app.id())
+                    })
+                    .size(px(14.))
+                    .text_color(theme.text_muted)
+                    .into_any_element(),
+                },
+                SshEntry::Terminal => icon(icons::TERMINAL)
+                    .size(px(14.))
+                    .text_color(theme.text_muted)
+                    .into_any_element(),
+                SshEntry::Copy => icon(icons::COPY)
+                    .size(px(14.))
+                    .text_color(theme.text_muted)
+                    .into_any_element(),
+            };
+            if entry == SshEntry::Copy {
+                rows.push(popover::menu_separator().into_any_element());
+            }
+            let label = entry.label();
+            let action = entry.action();
+            rows.push(
+                popover::menu_row(theme, false, id.clone())
+                    .id(SharedString::from(id))
+                    .role(gpui::Role::MenuItem)
+                    .aria_label(label)
+                    .opacity(if busy { 0.5 } else { 1. })
+                    .child(
+                        div()
+                            .size(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(glyph),
+                    )
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_ssh(action.clone(), cx)))
+                    .into_any_element(),
+            );
+        }
+        rows
     }
     /// The synced folder's apps: each opens it there, then copy its path.
     fn render_open_in_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -1985,7 +2105,29 @@ mod tests {
 
 #[cfg(test)]
 mod wake_label_tests {
+    use super::{SshAction, SshEntry, ssh_entries};
     use serde_json::json;
+    #[test]
+    fn ssh_list_shows_detected_apps_then_copy() {
+        use crate::shell::ssh_open::{SshApp, SshTarget};
+        let ids = |targets: &[SshTarget]| -> Vec<&'static str> {
+            ssh_entries(targets).iter().map(SshEntry::id).collect()
+        };
+        // Before detection: the system terminal, so the menu still works.
+        assert_eq!(ids(&[]), ["terminal", "copy"]);
+        let targets = [
+            SshTarget::for_test(SshApp::Cursor),
+            SshTarget::for_test(SshApp::Zed),
+            SshTarget::for_test(SshApp::Ghostty),
+        ];
+        assert_eq!(ids(&targets), ["cursor", "zed", "ghostty", "copy"]);
+        assert_eq!(
+            ssh_entries(&targets)[0].action(),
+            SshAction::Open(SshTarget::for_test(SshApp::Cursor))
+        );
+        assert_eq!(SshEntry::Copy.label(), "Copy SSH command");
+    }
+
     #[test]
     fn last_wake_says_whether_memory_was_kept() {
         assert_eq!(
