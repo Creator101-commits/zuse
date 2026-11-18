@@ -87,6 +87,7 @@ fn harness(provider: &str) -> Result<HarnessId> {
         "hermes" => HarnessId::Hermes,
         "pi" => HarnessId::Pi,
         "muse" => HarnessId::Muse,
+        "omp" => HarnessId::OhMyPi,
         "antigravity" => HarnessId::Antigravity,
         "zuse" => HarnessId::Zuse,
         _ => bail!("Unsupported Electron provider: {provider}"),

@@ -318,6 +318,7 @@ async fn gateway_ack_and_early_readiness_preserve_checkout_and_initial_command_f
         Arc::new(control),
         Arc::new(registry),
         2,
+        Arc::new(tokio::sync::Notify::new()),
         Duration::from_secs(60),
         cancel.clone(),
     ));

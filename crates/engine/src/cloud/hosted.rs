@@ -325,6 +325,7 @@ fn allowed(method: &str) -> bool {
             | methods::CLOUD_CREATE
             | methods::CLOUD_DELETE
             | methods::CLOUD_UNARCHIVE
+            | methods::CLOUD_ARCHIVE
             | methods::CLOUD_TASK_COMMAND
             | methods::CLOUD_TASK_ASSET
             | methods::CLOUD_COMPUTER_RECREATION

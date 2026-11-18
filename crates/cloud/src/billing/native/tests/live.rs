@@ -163,6 +163,7 @@ async fn stripe_merchant_checkout_wallet_refund_and_compute() -> anyhow::Result<
     .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let native = NativeBilling {
         engine: engine.clone(),
+        environment: Environment::Test,
         provider,
         accounts: HashSet::from([owner.clone()]),
         default_provider: "stripe".into(),

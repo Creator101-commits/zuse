@@ -2619,6 +2619,7 @@ impl Harness for AcpHarness {
         let (scratch, mut child, stderr_tail, sign_in_prompted, external_auth, live_credentials) =
             self.spawn_agent(Some(&request.cwd), true, &launch_args, request.mcp.as_ref())
                 .await?;
+        controls.turn.adopt_agent(child.id()).await;
         let stdin = child
             .stdin
             .take()

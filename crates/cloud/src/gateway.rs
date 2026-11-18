@@ -21,6 +21,9 @@ const EXPIRED: (u16, &str) = (4102, "workspace authorization expired");
 const PRESSURE: (u16, &str) = (4104, "workspace gateway backpressure");
 
 #[cfg(test)]
+#[path = "gateway/command_hint_tests.rs"]
+mod command_hint_tests;
+#[cfg(test)]
 #[path = "gateway/native_acceptance.rs"]
 mod native_acceptance;
 
@@ -81,6 +84,8 @@ struct State {
 struct Room {
     control: Option<Arc<RuntimeControl>>,
     activity: tokio::sync::Mutex<Option<Instant>>,
+    /// This room tells its runtime "you have a command" (push_command_hints).
+    command_hints: bool,
     workspace: String,
     token: String,
     fence: (i64, i64),
@@ -111,6 +116,14 @@ trait LeaseControl: Send + Sync + 'static {
     fn runtime_control(self: &Arc<Self>) -> Option<Arc<RuntimeControl>> {
         None
     }
+    /// Mailbox changes committed in this process (and, where the database
+    /// forwards them, in others). None: this control sends no command hints.
+    fn mailbox_changes(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
+        None
+    }
+    async fn mailbox_revision(&self, _workspace: &str) -> Result<i64, ApiError> {
+        Ok(0)
+    }
 }
 #[async_trait::async_trait]
 impl LeaseControl for RuntimeControl {
@@ -130,6 +143,58 @@ impl LeaseControl for RuntimeControl {
     }
     fn runtime_control(self: &Arc<Self>) -> Option<Arc<RuntimeControl>> {
         Some(self.clone())
+    }
+    fn mailbox_changes(&self) -> Option<tokio::sync::broadcast::Receiver<()>> {
+        Some(self.mailbox_changes.subscribe())
+    }
+    async fn mailbox_revision(&self, workspace: &str) -> Result<i64, ApiError> {
+        RuntimeControl::mailbox_revision(self, workspace).await
+    }
+}
+
+/// How often a room re-reads its mailbox revision when no change event
+/// arrives. Commands committed by another process are seen within this.
+const COMMAND_HINT_RECHECK: Duration = Duration::from_secs(2);
+const COMMAND_HINT: &str = "runtime.command";
+
+/// Tells the room's runtime "you have a command" whenever its mailbox
+/// revision moves. The hint carries nothing: the runtime still leases.
+async fn push_command_hints<C: LeaseControl>(
+    room: Weak<Room>,
+    control: Arc<C>,
+    mut changes: tokio::sync::broadcast::Receiver<()>,
+) {
+    use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+    let mut hinted: Option<i64> = None;
+    loop {
+        tokio::select! {
+            change = changes.recv() => if matches!(change, Err(RecvError::Closed)) { break },
+            _ = tokio::time::sleep(COMMAND_HINT_RECHECK) => {}
+        }
+        // One read covers every change queued so far.
+        while !matches!(
+            changes.try_recv(),
+            Err(TryRecvError::Empty | TryRecvError::Closed)
+        ) {}
+        let Some(room) = room.upgrade() else { break };
+        if lock(&room.state).closed {
+            break;
+        }
+        if !room.has_command_runtime() {
+            continue;
+        }
+        let revision = match tokio::time::timeout(
+            Duration::from_secs(3),
+            control.mailbox_revision(&room.workspace),
+        )
+        .await
+        {
+            Ok(Ok(revision)) => revision,
+            _ => continue,
+        };
+        if hinted != Some(revision) && room.hint_command() {
+            hinted = Some(revision);
+        }
     }
 }
 
@@ -202,13 +267,15 @@ impl Hub {
             let token = uuid::Uuid::new_v4().to_string();
             let lease_requested_at = Instant::now();
             control.gateway_lease(&workspace, &token, fence).await?;
+            let changes = control.mailbox_changes();
             let room = Arc::new(Room {
                 control: control.runtime_control(),
                 activity: tokio::sync::Mutex::new(None),
+                command_hints: changes.is_some(),
                 workspace,
                 token,
                 fence,
-                lease_valid_until: Mutex::new(lease_requested_at + Duration::from_secs(9)),
+                lease_valid_until: Mutex::new(lease_requested_at + LEASE_CONFIRMED_FOR),
                 bytes,
                 state: Mutex::new(State {
                     peers: HashMap::new(),
@@ -217,11 +284,21 @@ impl Hub {
                 }),
             });
             *slot = Arc::downgrade(&room);
+            if let Some(changes) = changes {
+                tokio::spawn(push_command_hints(
+                    Arc::downgrade(&room),
+                    control.clone(),
+                    changes,
+                ));
+            }
             let supervisor = room.clone();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(Duration::from_secs(2));
+                // Local checks (empty room, expired peers) run every second;
+                // the database renewal and peer revalidation every 5s.
+                let mut tick = tokio::time::interval(Duration::from_secs(1));
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 tick.tick().await;
+                let mut renewed_at = Instant::now();
                 loop {
                     tick.tick().await;
                     let room = &supervisor;
@@ -233,6 +310,10 @@ impl Hub {
                         }
                     }
                     room.expire();
+                    if renewed_at.elapsed() < LEASE_RENEW_EVERY {
+                        continue;
+                    }
+                    renewed_at = Instant::now();
                     let peers: Vec<_> = {
                         lock(&room.state)
                             .peers
@@ -269,7 +350,7 @@ impl Hub {
                     .await;
                     match lease {
                         Ok(Ok(())) => {
-                            *lock(&room.lease_valid_until) = requested_at + Duration::from_secs(9);
+                            *lock(&room.lease_valid_until) = requested_at + LEASE_CONFIRMED_FOR;
                         }
                         failure => {
                             let transient = match &failure {
@@ -304,6 +385,14 @@ impl Hub {
         .map_err(|_| ApiError::unavailable("workspace_gateway_setup_failed"))?
     }
 }
+/// How often a room renews its gateway lease and revalidates its peers. Each
+/// renewal locks the workspace row, so it stays well below the lease length.
+const LEASE_RENEW_EVERY: Duration = Duration::from_secs(5);
+/// How long a successful renewal is trusted locally. It ends before the
+/// database lease (`GATEWAY_LEASE_MS`) so another process can never forward
+/// for the same workspace at the same time.
+const LEASE_CONFIRMED_FOR: Duration = Duration::from_secs(20);
+
 fn retain_lease(transient: bool, confirmed_until: Instant, now: Instant) -> bool {
     transient && now < confirmed_until
 }
@@ -335,6 +424,7 @@ mod capacity_tests {
                     Arc::new(SessionRoom(Arc::new(Room {
                         control: None,
                         activity: tokio::sync::Mutex::new(None),
+                        command_hints: false,
                         workspace: format!("machine-{i}"),
                         token: "test".into(),
                         fence: (1, 1),
@@ -442,6 +532,7 @@ mod capacity_tests {
         let room = Arc::new(Room {
             control: None,
             activity: tokio::sync::Mutex::new(None),
+            command_hints: false,
             workspace: "test".into(),
             token: "test".into(),
             fence: (1, 1),
@@ -715,6 +806,30 @@ impl Room {
     fn control(&self, peer: &Peer, value: serde_json::Value) -> bool {
         self.send(peer, Message::Text(value.to_string().into()))
     }
+    /// Every Rust runtime understands command hints; older protocols do not.
+    fn takes_command_hints(peer: &Peer) -> bool {
+        peer.grant.protocol == zuse_protocol::cloud_gateway::RUST_PROTOCOL
+    }
+    fn has_command_runtime(&self) -> bool {
+        let state = lock(&self.state);
+        state
+            .runtime
+            .as_ref()
+            .and_then(|id| state.peers.get(id))
+            .is_some_and(Self::takes_command_hints)
+    }
+    fn hint_command(&self) -> bool {
+        let state = lock(&self.state);
+        if state.closed {
+            return false;
+        }
+        match state.runtime.as_ref().and_then(|id| state.peers.get(id)) {
+            Some(runtime) if Self::takes_command_hints(runtime) => {
+                self.control(runtime, json!({"type": COMMAND_HINT}))
+            }
+            _ => false,
+        }
+    }
     fn pending(&self, peer: &mut Peer) {
         if !supports_availability(&peer.grant.protocol) {
             let _ = peer.close.send(Some(UNAVAILABLE));
@@ -780,6 +895,11 @@ impl Room {
                 }
             }
             state.runtime = Some(id.clone());
+            // The first hint tells the runtime this gateway pushes commands,
+            // and makes it lease anything that waited for it.
+            if self.command_hints && Self::takes_command_hints(&peer) {
+                self.control(&peer, json!({"type": COMMAND_HINT}));
+            }
         } else if let Some(runtime) = state.runtime.as_ref().and_then(|id| state.peers.get(id)) {
             self.open(runtime, &id, &mut peer);
         } else {

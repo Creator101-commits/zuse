@@ -874,10 +874,18 @@ impl Composer {
             return true;
         }
         let Some(engine) = state.engine().cloned() else {
+            self.cloud_start_refused(
+                "Engine not connected. Reconnect, then send again; your draft is preserved.",
+                cx,
+            );
             return true;
         };
         let controller = engine.controller();
         let Some(subject) = state.cloud_user_id().map(str::to_owned) else {
+            self.cloud_start_refused(
+                "Sign in to your Zuse account to start a cloud thread. Your draft is preserved.",
+                cx,
+            );
             return true;
         };
         let organization = state.cloud_organization_id().map(str::to_owned);
@@ -929,6 +937,10 @@ impl Composer {
                 .source_cloud_ref(project["defaultBranch"].as_str().unwrap_or("main"), cx);
             let config = self.pickers.read(cx).resolved(cx);
             let (Some(agent), Some(model)) = (config.harness, config.model) else {
+                self.cloud_start_refused(
+                    "Choose a coding agent and model before starting. Your draft is preserved.",
+                    cx,
+                );
                 return true;
             };
             if config.plan {
@@ -1214,6 +1226,14 @@ impl Composer {
             }
         }
         self.sync_attachment_chips(cx);
+    }
+    /// A cloud start refused before any request: shown inline and logged,
+    /// never a silent no-op.
+    fn cloud_start_refused(&mut self, reason: &str, cx: &mut Context<Self>) {
+        tracing::warn!(%reason, "cloud thread start refused");
+        self.failure = Some(reason.to_owned().into());
+        self.failure_key = None;
+        cx.notify();
     }
     fn cloud_failure(&mut self, message: String, cx: &mut Context<Self>) {
         self.cloud.task = None;
@@ -1677,6 +1697,54 @@ mod cached_tests {
             composer.cloud_failure("Delivery interrupted".into(),cx);
             assert!(!composer.cloud_creation_activity(cx).unwrap().1,"failure stops spinner");
             assert_eq!(composer.cloud.request.as_ref(),Some(&pending),"uncertain failure retains exact request identity and prompt");
+        });
+        drop(receive);
+    }
+    /// Enter on a new cloud thread whose send is refused says why inline
+    /// instead of doing nothing, and keeps the draft.
+    #[gpui::test]
+    fn a_refused_new_cloud_send_explains_itself(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let (send, receive) = tokio::sync::mpsc::channel(1);
+        let (_replies, replies) = tokio::sync::mpsc::channel(1);
+        let controller =
+            crate::state::EngineHandle::from_test_client(zuse_rpc::RpcClient::new(send, replies));
+        let state = cx.new(|_| {
+            let mut state = crate::state::AppState::new();
+            state.apply_cloud_account(json!({"user":{"id":"fixture-user"},"orgId":null}));
+            state.set_test_engine(controller);
+            state.cloud_project = Some(json!({"projectId":"repository","accountId":"fixture-user","providerId":"boat","defaultBranch":"main","canCreate":true}));
+            state
+        });
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |composer, cx| {
+            // The cloud catalog has not arrived: the model tray stays quiet.
+            assert!(composer.send_blocked(cx));
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("Start the task", cx));
+            composer.on_submit(cx);
+            assert!(composer.cloud.request.is_none());
+            assert_eq!(composer.input.read(cx).text(), "Start the task");
+            assert!(
+                composer
+                    .failure
+                    .as_deref()
+                    .is_some_and(|failure| failure.contains("still loading")),
+                "{:?}",
+                composer.failure
+            );
+            // A request already in flight explains why another can't start.
+            composer.failure = None;
+            composer.seed_pending_cloud_creation_for_test(json!({"projectId":"repository"}));
+            composer.on_submit(cx);
+            assert!(
+                composer
+                    .failure
+                    .as_deref()
+                    .is_some_and(|failure| failure.contains("still starting a cloud thread"))
+            );
         });
         drop(receive);
     }

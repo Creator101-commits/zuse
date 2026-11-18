@@ -8,8 +8,7 @@ const MAX_PAGE_BYTES: usize = 1024 * 1024;
 const MAX_ENTRY_BYTES: usize = 512 * 1024;
 
 async fn enabled(tx: &mut Transaction<'_, Postgres>) -> Result<bool, ApiError> {
-    Ok(sqlx::query_scalar("SELECT to_regclass('zuse_rust_task_admissions') IS NOT NULL AND to_regclass('zuse_rust_task_history_messages') IS NOT NULL")
-        .fetch_one(&mut **tx).await?)
+    Ok(crate::db::schema::present_in(&mut **tx, "SELECT to_regclass('zuse_rust_task_admissions') IS NOT NULL AND to_regclass('zuse_rust_task_history_messages') IS NOT NULL").await?)
 }
 fn admission_context(owner: &str, id: &str) -> String {
     format!("task-admission:{owner}:{id}")

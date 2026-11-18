@@ -381,6 +381,7 @@ impl Harness for PiHarness {
             request.mcp.as_ref(),
             Some(&request),
         )?;
+        controls.turn.adopt_agent(process.child.id()).await;
         let (tx, rx) = mpsc::channel(256);
         let kill_grace = self.kill_grace;
         let interrupt_grace = self.interrupt_grace;

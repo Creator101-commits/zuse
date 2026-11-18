@@ -19,12 +19,12 @@ FILES = ("0000_application.sql", "0001_control_plane.sql", "0002_gateway_leases.
          "0010_managed_bases.sql", "0011_transcript_heads.sql", "0012_provider_receipts.sql",
          "0013_recovery_receipts.sql", "0014_restore_receipts.sql", "0015_github.sql",
          "0016_task_history.sql", "0017_account_events.sql", "0018_github_joining_jobs.sql", "0019_workload_secrets.sql",
-         "0020_staging_managed_base_candidates.sql", "0021_runtime_repairs.sql", "0023_managed_base_admission_lock.sql", "0024_credential_delivery_journal.sql", "0025_admission_read_batch.sql", "0026_task_command_admission.sql", "0027_computer_recreations.sql", "0031_machine_images.sql", "0033_prized_provider.sql", "0034_runtime_releases.sql", "0035_launch_asset_release.sql", "0036_harness_bundles.sql", "0037_user_images.sql", "0038_app_role_grants.sql", "0041_user_image_repositories.sql", "0042_machine_versions_grants.sql")
+         "0020_staging_managed_base_candidates.sql", "0021_runtime_repairs.sql", "0023_managed_base_admission_lock.sql", "0024_credential_delivery_journal.sql", "0025_admission_read_batch.sql", "0026_task_command_admission.sql", "0027_computer_recreations.sql", "0031_machine_images.sql", "0033_prized_provider.sql", "0034_runtime_releases.sql", "0035_launch_asset_release.sql", "0036_harness_bundles.sql", "0037_user_images.sql", "0038_app_role_grants.sql", "0041_user_image_repositories.sql", "0042_machine_versions_grants.sql", "0043_work_wakeups.sql", "0044_worker_due_index.sql", "0045_auth_wakeups.sql", "0046_plugin_wakeups.sql", "0048_executor_wakeups.sql", "0049_change_hints.sql", "0050_archive_machine_deletion.sql", "0051_archive_machine_due_cap.sql", "0052_one_environment_credential.sql")
 
 
 # Accepted only when separately installed by its explicit operator workflow.
 # Ordinary bootstrap never executes or backfills an optional migration.
-OPTIONAL_FILES = ("0028_project_environment_caches.sql", "0029_runtime_statement_batch.sql", "0030_transcript_write_intents.sql", "0032_brokeboy.sql", "0033_shared_credits.sql")
+OPTIONAL_FILES = ("0028_project_environment_caches.sql", "0029_runtime_statement_batch.sql", "0030_transcript_write_intents.sql", "0032_brokeboy.sql", "0033_shared_credits.sql", "0047_billing_wakeups.sql")
 
 
 def optional_migrations(root=MIGRATIONS):
@@ -149,7 +149,7 @@ def render_brokeboy(environment):
     permitted = base + optional_migrations()
     matches = " OR ".join(f"(name={literal(item['name'])} AND sha256={literal(item['sha256'])})" for item in permitted)
     required = " OR ".join(f"(name={literal(item['name'])} AND sha256={literal(item['sha256'])})" for item in base)
-    selected=[item for item in permitted if item["name"] in (name,"0033_shared_credits.sql")]
+    selected=[item for item in permitted if item["name"] in (name,"0033_shared_credits.sql","0047_billing_wakeups.sql")]
     install="\n".join(f"SELECT {literal(item['sql'])} WHERE NOT EXISTS(SELECT 1 FROM zuse_cloud_schema_migrations WHERE name={literal(item['name'])})\n\\gexec\nINSERT INTO zuse_cloud_schema_migrations(name,sha256) VALUES({literal(item['name'])},{literal(item['sha256'])}) ON CONFLICT DO NOTHING;" for item in selected)
     return f'''BEGIN;
 SET LOCAL search_path TO "{schema}", pg_catalog;

@@ -461,7 +461,7 @@ async fn tool_dispatch_keeps_background_commands_alive_and_routes_search_and_que
             .await
             .unwrap(),
     );
-    assert_eq!(grep["process"]["exitCode"], 0);
+    assert_eq!(grep["process"]["exitCode"], 0, "{grep}");
     assert!(
         grep["text"]
             .as_str()

@@ -519,10 +519,11 @@ impl RuntimeControl {
     /// upload share this account lock, so cleanup cannot race final launch admission.
     pub async fn sweep_launch_assets_once(&self, at: i64) -> Result<bool, ApiError> {
         let mut tx = self.pool.begin().await?;
-        let exists: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_launch_staging') IS NOT NULL")
-                .fetch_one(&mut *tx)
-                .await?;
+        let exists: bool = crate::db::schema::present_in(
+            &mut *tx,
+            "SELECT to_regclass('zuse_rust_launch_staging') IS NOT NULL",
+        )
+        .await?;
         if !exists {
             return Ok(false);
         }

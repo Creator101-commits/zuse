@@ -2426,6 +2426,8 @@ pub struct Shell {
     user_menu: popover::Popup<()>,
     /// Inline sidebar error strip (mutation failures); click dismisses.
     sidebar_notice: Option<SharedString>,
+    /// Cloud tasks with an archive request in flight (one per task).
+    cloud_archiving: std::collections::HashSet<String>,
     /// Repaints the update strip and dialog as the app-level update
     /// lifecycle ([`crate::app_update`]) moves. `None` when the app runs
     /// without a desktop checker (tests).
@@ -3042,6 +3044,7 @@ impl Shell {
             harness_update_scroll: settings::widgets::PageScroll::default(),
             user_menu: popover::Popup::default(),
             sidebar_notice: None,
+            cloud_archiving: Default::default(),
             update_restart: None,
             update_restart_task: None,
             _app_update_observation: crate::app_update::AppUpdate::global(cx).map(|update| {
@@ -7247,6 +7250,14 @@ impl Shell {
         archived: bool,
         cx: &mut Context<Self>,
     ) {
+        // Cloud task rows archive through the account control plane; they
+        // are restored from Settings → Archived, never from the sidebar.
+        if chat_id.starts_with(CLOUD_ROW_PREFIX) {
+            if archived {
+                self.archive_cloud_sidebar_row(&chat_id, cx);
+            }
+            return;
+        }
         self.close_chat_menu(cx);
         // An archived row leaves the sidebar under the pointer, so it never
         // hears the hover end; drop its wash now, or it would come back lit
@@ -9371,11 +9382,17 @@ impl Shell {
         let project_icon = (project_icon && search_query.is_none() && !nested).then(|| {
             self.render_project_icon(&id, spaces::SIDEBAR_PROJECT_AVATAR_SIZE, selected, cx)
         });
-        // A cloud task row (`cloud:<workspace>`) opens its conversation; the
-        // local-only actions (archive, rename, the chat menu) don't apply.
+        // A cloud task row (`cloud:<workspace>`) opens its conversation. Its
+        // menu and hover pill only archive (through the account control
+        // plane); the local-only actions (rename, pin, copy) don't apply.
         let cloud = id.starts_with(CLOUD_ROW_PREFIX);
-        let corner_hovered =
-            !preview && !cloud && self.chat_status_hover.as_deref() == Some(row_id.as_str());
+        // Archived organization tasks have no restore list yet (Settings →
+        // Archived lists personal computers), so they are not offered.
+        let cloud_locked = cloud && self.state.read(cx).cloud_organization_id().is_some();
+        let corner_hovered = !preview
+            && !cloud_locked
+            && !(cloud && archived)
+            && self.chat_status_hover.as_deref() == Some(row_id.as_str());
         let archived_muted = archived && search_query.is_none() && !selected && !corner_hovered;
         let project_icon = project_icon.map(|icon| {
             div()
@@ -9745,7 +9762,7 @@ impl Shell {
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                        if cloud {
+                        if cloud_locked {
                             return;
                         }
                         this.chat_menu.open(ChatMenuState {
@@ -12637,6 +12654,22 @@ impl Shell {
             let copy_open = menu_state.page == ChatMenuPage::Copy;
             let menu = if chat_id.is_empty() {
                 menu
+            } else if chat_id.starts_with(CLOUD_ROW_PREFIX) {
+                // Cloud tasks archive through the account control plane;
+                // deleting one stays in its Computer menu.
+                let archive =
+                    popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
+                        .id("chat-menu-archive")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.archive_cloud_sidebar_row(&archive_id, cx)
+                        }))
+                        .child(
+                            icon(icons::ARCHIVE_MINIMALISTIC)
+                                .size(px(16.0))
+                                .text_color(theme.text_muted),
+                        )
+                        .child(SharedString::from("Archive"));
+                menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_ARCHIVE, archive, cx))
             } else {
                 let rename =
                     popover::menu_row(&theme, false, format!("chat-menu-rename-{chat_id}"))
@@ -18251,6 +18284,7 @@ mod exit_regressions {
                             settings::SkillCompletionSettings {
                                 dollar: open_links_in_zuse,
                                 separate_from_slash: true,
+                                provider_commands: true,
                             },
                         );
                     });

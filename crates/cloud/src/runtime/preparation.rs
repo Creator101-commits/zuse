@@ -226,10 +226,11 @@ impl RuntimeControl {
                 log.stdout = log.stdout.replace(credential, "[redacted]");
                 log.stderr = log.stderr.replace(credential, "[redacted]");
             }
-            let available: bool =
-                sqlx::query_scalar("SELECT to_regclass('zuse_rust_preparation_logs') IS NOT NULL")
-                    .fetch_one(&mut *tx)
-                    .await?;
+            let available: bool = crate::db::schema::present_in(
+                &mut *tx,
+                "SELECT to_regclass('zuse_rust_preparation_logs') IS NOT NULL",
+            )
+            .await?;
             if available {
                 let owner = row["account_id"]
                     .as_str()
@@ -275,10 +276,11 @@ impl RuntimeControl {
         {
             return Err(ApiError::not_found("cloud_workspace_not_found"));
         }
-        let available: bool =
-            sqlx::query_scalar("SELECT to_regclass('zuse_rust_preparation_logs') IS NOT NULL")
-                .fetch_one(&mut *tx)
-                .await?;
+        let available: bool = crate::db::schema::present_in(
+            &mut *tx,
+            "SELECT to_regclass('zuse_rust_preparation_logs') IS NOT NULL",
+        )
+        .await?;
         if !available {
             return Err(ApiError::unavailable("preparation_log_schema_not_ready"));
         }

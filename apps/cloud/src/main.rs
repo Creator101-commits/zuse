@@ -4,10 +4,20 @@ use std::{env, sync::Arc};
 use zuse_cloud::{
     auth::WorkosIdentity,
     config::Config,
+    db::{
+        Budget, ProcessDb, Role,
+        wake::{Cadence, Reason, Work, sleep_or_notify},
+    },
     routes::{AppState, router},
-    runtime::{RuntimeConfig, RuntimeControl},
+    runtime::{
+        RuntimeConfig, RuntimeControl,
+        due::{WorkerDue, should_run},
+    },
     store::Store,
 };
+
+/// Hourly maintenance: cleanup sweeps and condition-based retirement.
+const MAINTENANCE_MS: i64 = 3_600_000;
 
 #[derive(Parser)]
 #[command(about = "Zuse hosted cloud control plane")]
@@ -212,7 +222,8 @@ enum Command {
         /// Validate configuration and schema without claiming jobs or contacting providers.
         #[arg(long, default_value_t = false, conflicts_with = "once")]
         check: bool,
-        /// Bound idle database polling while preserving durable job reconciliation.
+        /// Shortest wait while work stays due. Idle waits end on NOTIFY, the next
+        /// due time, or ZUSE_CLOUD_WORKER_IDLE_POLL_MS.
         #[arg(long, env = "ZUSE_CLOUD_WORKER_POLL_MS", default_value_t = 1000,
             value_parser = clap::value_parser!(u64).range(250..=60_000))]
         poll_interval_ms: u64,
@@ -242,10 +253,14 @@ async fn main() -> Result<()> {
                 .context("ZUSE_CLOUD_DATABASE_URL is required")?;
             let accounts =
                 zuse_cloud::access_policy::Accounts::from_env("ZUSE_CLOUD_BILLING_WRITE_ACCOUNTS")?;
-            let mut control = zuse_cloud::billing::BillingControl::connect(&url, accounts)
-                .await?
-                .connect_native_from_env(&url)
-                .await?;
+            let db = process_db(&url, Role::BillingWorker).await?;
+            let mut control = zuse_cloud::billing::BillingControl::from_pools(
+                db.pool.clone(),
+                db.receipts_pool(),
+                accounts,
+            )
+            .connect_native_from_env(&url)
+            .await?;
             if matches!(&command, Command::BillingEnroll { .. }) {
                 if let Some(providers) = zuse_cloud::billing::PaymentProviders::from_env()? {
                     control = control.with_payment_providers(providers);
@@ -317,9 +332,11 @@ async fn main() -> Result<()> {
                 env::var("CLOUD_DATA_ENCRYPTION_KEY").context("Authority key unavailable")?;
             let master = zuse_cloud::crypto::MasterKey::parse(&encryption)
                 .map_err(|_| anyhow::anyhow!("Invalid authority key"))?;
-            let control = Arc::new(
-                zuse_cloud::connections::ConnectionControl::connect(&url, master, accounts).await?,
-            );
+            let control = Arc::new(zuse_cloud::connections::ConnectionControl::from_pool(
+                process_db(&url, Role::Operator).await?.pool,
+                master,
+                accounts,
+            ));
             let driver = Arc::new(zuse_cloud::connections::worker::CommandDriver::new(
                 &driver,
             )?);
@@ -375,8 +392,11 @@ async fn main() -> Result<()> {
                 env::var("CLOUD_DATA_ENCRYPTION_KEY").context("Authority key unavailable")?;
             let master = zuse_cloud::crypto::MasterKey::parse(&encryption)
                 .map_err(|_| anyhow::anyhow!("Invalid authority key"))?;
-            let control =
-                zuse_cloud::connections::ConnectionControl::connect(&url, master, accounts).await?;
+            let control = zuse_cloud::connections::ConnectionControl::from_pool(
+                process_db(&url, Role::Operator).await?.pool,
+                master,
+                accounts,
+            );
             let driver = zuse_cloud::connections::worker::CommandDriver::new(&driver)?;
             let receipt = control
                 .renew_codex_connection(&owner, &connection, &driver)
@@ -598,8 +618,12 @@ async fn main() -> Result<()> {
                 .context("Credential authority requires its encryption key")?;
             let master = zuse_cloud::crypto::MasterKey::parse(&encryption)
                 .map_err(|_| anyhow::anyhow!("Invalid credential authority encryption key"))?;
-            let control =
-                zuse_cloud::connections::ConnectionControl::connect(&url, master, accounts).await?;
+            let db = process_db(&url, Role::AuthWorker).await?;
+            let control = zuse_cloud::connections::ConnectionControl::from_pool(
+                db.pool.clone(),
+                master,
+                accounts,
+            );
             zuse_cloud::connections::worker::CommandDriver::deployment_ready(&driver)?;
             let driver = zuse_cloud::connections::worker::CommandDriver::new(&driver)?;
             control
@@ -609,28 +633,106 @@ async fn main() -> Result<()> {
             if check {
                 return Ok(());
             }
-            loop {
+            if once {
                 let result = control.work_once(&driver).await;
                 if matches!(result, Ok(true)) {
                     zuse_cloud::events::hint::send();
                 }
-                if once {
-                    println!("{}", result.map_err(|e| anyhow::anyhow!("{}", e.code))?);
-                    break;
+                println!("{}", result.map_err(|e| anyhow::anyhow!("{}", e.code))?);
+                return Ok(());
+            }
+            // Sleeps until NOTIFY (a sign-in or proposal became claimable, a
+            // refresh started or went stale), the next known deadline, or the
+            // idle safety net. NOTIFY only shortens waits; without `LISTEN`
+            // the short `ZUSE_CLOUD_AUTH_WORKER_POLL_MS` fallback applies.
+            let wakeups = db.wakeups().await;
+            let poll = std::time::Duration::from_millis(env_ms(
+                "ZUSE_CLOUD_AUTH_WORKER_POLL_MS",
+                2_000,
+                250..=60_000,
+            )?);
+            // Before migration 0045 no sign-in ever notifies: keep polling.
+            let notified = wakeups.enabled()
+                && control
+                    .auth_wakeups_installed()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e.code))?;
+            if wakeups.enabled() && !notified {
+                tracing::warn!(
+                    code = "auth_wakeups_missing",
+                    "Credential worker wakeups are not installed; polling instead"
+                );
+            }
+            let cadence = Cadence {
+                idle: if notified {
+                    std::time::Duration::from_secs(300)
+                } else {
+                    poll
+                },
+                busy: std::time::Duration::from_secs(1).min(poll),
+            };
+            tracing::info!(
+                idle_ms = cadence.idle.as_millis() as u64,
+                busy_ms = cadence.busy.as_millis() as u64,
+                listen = notified,
+                "Credential worker schedule"
+            );
+            let mut notifications = wakeups.subscribe();
+            let interest = [Work::Auth];
+            let mut failures = 0u32;
+            // Startup runs a full round: anything may have changed meanwhile.
+            let mut run = true;
+            loop {
+                let outcome = async {
+                    let mut next = None;
+                    if !run {
+                        // Idle safety pass: one statement decides whether a
+                        // round is needed at all.
+                        let now = now_ms();
+                        next = control.auth_due(now).await?.next(now);
+                        run = next.is_some_and(|at| at <= now);
+                    }
+                    if run {
+                        while control.work_once(&driver).await? {
+                            zuse_cloud::events::hint::send();
+                        }
+                        let now = now_ms();
+                        next = control.auth_due(now).await?.next(now);
+                    }
+                    Ok::<_, zuse_cloud::error::ApiError>(next)
                 }
-                let idle = match result {
-                    Ok(worked) => !worked,
+                .await;
+                let (wait, timer) = match outcome {
+                    Ok(next) => {
+                        failures = 0;
+                        zuse_cloud::db::wake::next_wait(now_ms(), next, cadence)
+                    }
                     Err(error) => {
+                        failures = failures.saturating_add(1);
+                        let wait = zuse_cloud::db::failure_backoff(
+                            failures,
+                            poll,
+                            std::time::Duration::from_secs(30),
+                        );
                         tracing::warn!(
                             code = error.code,
+                            retry_ms = wait.as_millis() as u64,
                             "Credential authority operation deferred"
                         );
-                        true
+                        (wait, Reason::Due)
                     }
                 };
-                if idle {
-                    tokio::select! {_=tokio::signal::ctrl_c()=>break,_=tokio::time::sleep(std::time::Duration::from_secs(1))=>{}}
-                }
+                let reason = tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    reason = sleep_or_notify(&mut notifications, &interest, wait, timer) => reason,
+                };
+                // An idle wake first asks whether anything is due.
+                run = reason != Reason::Idle;
+                tracing::debug!(
+                    reason = reason.as_str(),
+                    waited_ms = wait.as_millis() as u64,
+                    "Credential worker woke"
+                );
             }
         }
         Command::PluginMigrate => {
@@ -661,7 +763,7 @@ async fn main() -> Result<()> {
             workspace_id,
             snapshot,
         } => {
-            let runtime = writable_runtime().await?;
+            let (runtime, _db) = writable_runtime(Role::Operator).await?;
             let operation = runtime
                 .queue_allocation(&workspace_id, &snapshot, now_ms())
                 .await
@@ -677,8 +779,11 @@ async fn main() -> Result<()> {
                 zuse_cloud::access_policy::Accounts::from_env("ZUSE_CLOUD_IMAGE_WRITE_ACCOUNTS")?;
             let url = env::var("ZUSE_CLOUD_DATABASE_URL")
                 .context("Image worker requires ZUSE_CLOUD_DATABASE_URL")?;
-            let control =
-                zuse_cloud::images::ImageControl::connect(&url, accounts, settings).await?;
+            let control = zuse_cloud::images::ImageControl::from_pool(
+                process_db(&url, Role::ImageWorker).await?.pool,
+                accounts,
+                settings,
+            );
             let mut provider = zuse_cloud::providers::boxd::Boxd::new(
                 env::var("BOXD_API_KEY").context("Image worker requires BOXD_API_KEY")?,
                 env::var("BOXD_ORG").ok(),
@@ -764,43 +869,91 @@ async fn main() -> Result<()> {
             };
             let url = env::var("ZUSE_CLOUD_DATABASE_URL")
                 .context("ZUSE_CLOUD_DATABASE_URL is required")?;
-            let mut control = zuse_cloud::billing::BillingControl::connect(&url, accounts)
-                .await?
-                .with_meter_exports(settings);
+            let db = process_db(&url, Role::BillingWorker).await?;
+            let mut control = zuse_cloud::billing::BillingControl::from_pools(
+                db.pool.clone(),
+                db.receipts_pool(),
+                accounts,
+            )
+            .with_meter_exports(settings);
             if let Some(providers) = providers {
                 control = control.with_payment_providers(providers);
             }
             control = control.connect_native_from_env(&url).await?;
+            // Settlement and export run hourly, at the instant a closed day
+            // becomes settleable, and at the earliest known due time of
+            // outbox retries, engine work and reservation or grant expiries.
+            // Between those instants the worker runs no statements. Spending
+            // holds are recomputed by every event that changes them (see
+            // infra/cloud/DATABASE.md, "Billing schedule and spending caps").
+            use zuse_cloud::billing::schedule;
+            let mut pass: u64 = 0;
+            let mut retry: Option<u32> = None;
+            let mut next_settlement = i64::MIN; // settle at startup
+            let mut next_reconcile: Option<i64> = None;
             loop {
+                let started = now_ms();
+                if started >= next_settlement {
+                    let mut latest_pending = false;
+                    if let Some(config) = storage {
+                        match control.settle_snapshot_storage_once(config, now_ms()).await {
+                            Ok(report) => println!("{}", serde_json::to_string(&report)?),
+                            Err(error) if once => anyhow::bail!("{}", error.code),
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Snapshot storage settlement failed"
+                                )
+                            }
+                        }
+                    }
+                    if let (Some(provider), Some(config)) = (&provider, settlement) {
+                        match control
+                            .settle_boxd_once(provider, config, now_ms(), pass)
+                            .await
+                        {
+                            Ok(report) => {
+                                latest_pending = report.latest_pending;
+                                println!("{}", serde_json::to_string(&report)?)
+                            }
+                            Err(error) if once => anyhow::bail!("{}", error.code),
+                            Err(error) => {
+                                latest_pending = true;
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Provider settlement maintenance failed"
+                                )
+                            }
+                        }
+                    }
+                    pass = pass.wrapping_add(1);
+                    retry = latest_pending.then(|| retry.map_or(0, |n| n.saturating_add(1)));
+                    next_settlement = schedule::next_settlement(now_ms(), retry);
+                }
+                // Right after settlement: debit new compute charges from the
+                // shared wallet and recompute the spending hold.
+                let mut more = false;
                 match control.native_maintenance().await {
-                    Ok(report) => println!("{}", report),
+                    Ok(report) => {
+                        more = report["reports"]
+                            .as_array()
+                            .is_some_and(|r| r.iter().any(|r| r["more"] == true));
+                        println!("{}", report)
+                    }
                     Err(error) if once => anyhow::bail!("{}", error.code),
                     Err(error) => {
                         tracing::warn!(code = error.code, "Embedded billing maintenance deferred")
                     }
                 }
-                if let Some(config) = storage {
-                    match control.settle_snapshot_storage_once(config, now_ms()).await {
-                        Ok(report) => println!("{}", serde_json::to_string(&report)?),
-                        Err(error) if once => anyhow::bail!("{}", error.code),
-                        Err(error) => {
-                            tracing::warn!(code = error.code, "Snapshot storage settlement failed")
-                        }
-                    }
-                }
-
-                if let (Some(provider), Some(config)) = (&provider, settlement) {
-                    match control.settle_boxd_once(provider, config, now_ms()).await {
-                        Ok(report) => println!("{}", serde_json::to_string(&report)?),
-                        Err(error) if once => anyhow::bail!("{}", error.code),
-                        Err(error) => tracing::warn!(
-                            code = error.code,
-                            "Provider settlement maintenance failed"
-                        ),
-                    }
-                }
+                next_reconcile = next_reconcile.filter(|at| *at > started);
                 match control.export_once(now_ms(), 25).await {
-                    Ok(report) => println!("{}", serde_json::to_string(&report)?),
+                    Ok(report) => {
+                        next_reconcile = zuse_cloud::db::wake::earliest([
+                            next_reconcile,
+                            schedule::next_reconciliation(now_ms(), report.financial),
+                        ]);
+                        println!("{}", serde_json::to_string(&report)?)
+                    }
                     Err(error) if once => anyhow::bail!("{}", error.code),
                     Err(error) => {
                         tracing::warn!(code = error.code, "Billing export maintenance failed")
@@ -809,7 +962,30 @@ async fn main() -> Result<()> {
                 if once {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let native_due = control
+                    .native_next_due(started)
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(code = error.code, "Embedded billing due time unavailable");
+                        None
+                    });
+                let export_due = control.export_next_due().await.unwrap_or_else(|error| {
+                    tracing::warn!(code = error.code, "Billing export due time unavailable");
+                    None
+                });
+                let due = zuse_cloud::db::wake::earliest([
+                    Some(next_settlement),
+                    native_due,
+                    export_due,
+                    next_reconcile,
+                    more.then_some(started),
+                ]);
+                let wait = schedule::wait_until(now_ms(), due);
+                tracing::debug!(wait_ms = wait.as_millis() as u64, "Billing worker sleeping");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => break,
+                    _ = tokio::time::sleep(wait) => {}
+                }
             }
             control
                 .close_native_billing()
@@ -821,7 +997,7 @@ async fn main() -> Result<()> {
             check,
             poll_interval_ms,
         } => {
-            let runtime = writable_runtime().await?;
+            let (runtime, _db) = writable_runtime(Role::ProjectPreparationWorker).await?;
             runtime
                 .configure_public_project_preparation()
                 .await
@@ -853,7 +1029,7 @@ async fn main() -> Result<()> {
             check,
             poll_interval_ms,
         } => {
-            let runtime = writable_runtime().await?;
+            let (runtime, db) = writable_runtime(Role::Worker).await?;
             let registry = Arc::new(zuse_cloud::providers::registry::Registry::from_environment());
             if let Err(error) = runtime.configure_public_project_preparation().await {
                 tracing::warn!(
@@ -893,27 +1069,65 @@ async fn main() -> Result<()> {
                 );
                 return Ok(());
             }
+            // Idle loops sleep until NOTIFY, the next known due time, or the idle
+            // fallback; NOTIFY only shortens waits, it is never required.
+            let wakeups = if once {
+                zuse_cloud::db::wake::Wakeups::disabled()
+            } else {
+                db.wakeups().await
+            };
+            let cadence = Cadence::from_env(wakeups.enabled(), poll_interval_ms)?;
+            tracing::info!(
+                idle_ms = cadence.idle.as_millis() as u64,
+                busy_ms = cadence.busy.as_millis() as u64,
+                listen = wakeups.enabled(),
+                "Worker schedule"
+            );
+            let recovery_kick = Arc::new(tokio::sync::Notify::new());
             let recovery_task = if once {
                 None
             } else {
                 let recovery_runtime = runtime.clone();
                 let recovery_registry = registry.clone();
+                let kick = recovery_kick.clone();
                 Some(tokio::spawn(async move {
+                    let mut failures = 0u32;
                     loop {
+                        let mut failed = false;
                         if let Err(error) = recovery_runtime
                             .recovery_registry_once(&recovery_registry, now_ms())
                             .await
                         {
+                            failed = true;
                             tracing::warn!(code = error.code, "Recovery stage deferred");
                         }
                         if let Err(error) = recovery_runtime
                             .restore_registry_once(&recovery_registry, now_ms())
                             .await
                         {
+                            failed = true;
                             tracing::warn!(code = error.code, "Restore stage deferred");
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms))
-                            .await;
+                        // Kicked by the worker loop when recovery/restore jobs are
+                        // due (including expired leases of crashed attempts) or
+                        // an archived computer's deletion is due
+                        // (`machine_delete_due_at`); the idle timer is only a
+                        // safety net.
+                        let wait = if failed {
+                            failures = failures.saturating_add(1);
+                            zuse_cloud::db::failure_backoff(
+                                failures,
+                                cadence.busy,
+                                cadence.failure_cap(),
+                            )
+                        } else {
+                            failures = 0;
+                            cadence.idle
+                        };
+                        tokio::select! {
+                            _ = kick.notified() => {},
+                            _ = tokio::time::sleep(wait) => {},
+                        }
                     }
                 }))
             };
@@ -946,7 +1160,9 @@ async fn main() -> Result<()> {
                 let runtime = runtime.clone();
                 Some(tokio::spawn(async move {
                     loop {
-                        for _ in 0..4 {
+                        // Hourly maintenance; the same throughput bound as the
+                        // former four reconciles a minute.
+                        for _ in 0..240 {
                             match runtime.reconcile_object_write_once(now_ms()).await {
                                 Ok(true) => {}
                                 Ok(false) => break,
@@ -959,7 +1175,8 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(MAINTENANCE_MS as u64))
+                            .await;
                     }
                 }))
             };
@@ -976,6 +1193,7 @@ async fn main() -> Result<()> {
                 };
             let mut grant_cleanup_at = 0;
             let allocation_cancel = tokio_util::sync::CancellationToken::new();
+            let allocation_kick = Arc::new(tokio::sync::Notify::new());
             let allocation_task = if once {
                 None
             } else {
@@ -990,12 +1208,27 @@ async fn main() -> Result<()> {
                     runtime.clone(),
                     registry.clone(),
                     concurrency,
-                    std::time::Duration::from_millis(poll_interval_ms),
+                    allocation_kick.clone(),
+                    cadence.idle,
                     allocation_cancel.clone(),
                 )))
             };
+            let mut notifications = wakeups.subscribe();
+            let interest = [
+                Work::Jobs,
+                Work::TaskDrain,
+                Work::Recreation,
+                Work::MachineImages,
+                Work::ProjectCache,
+                Work::IdleSleep,
+                Work::ArchiveRetention,
+            ];
             let mut asset_cleanup_at = 0;
             let mut idle_sleep_at = 0;
+            // Condition-based retirement sweeps have no due time; they run as
+            // hourly maintenance (and after a missed-notification wake).
+            let mut idle_stages_at = 0;
+            let mut due_failures = 0u32;
             let mut lifecycle_priority = false;
             loop {
                 if allocation_task
@@ -1035,11 +1268,47 @@ async fn main() -> Result<()> {
                         tracing::warn!(code = error.code, "Retained lifecycle stage deferred");
                     }
                 }
-                if now_ms() >= grant_cleanup_at {
-                    if let Err(error) = runtime.cleanup_grant_receipts(now_ms()).await {
-                        tracing::warn!(code = error.code, "Credential receipt cleanup deferred");
+                // One statement says which stages have due work. If it fails,
+                // every stage runs as it did before this schedule existed.
+                let now = now_ms();
+                let due = if once {
+                    None
+                } else {
+                    match runtime.worker_due().await {
+                        Ok(due) => {
+                            due_failures = 0;
+                            Some(due)
+                        }
+                        Err(error) => {
+                            due_failures = due_failures.saturating_add(1);
+                            tracing::warn!(code = error.code, "Worker due-time query deferred");
+                            None
+                        }
                     }
-                    grant_cleanup_at = now_ms() + 60_000;
+                };
+                let run = |at: fn(&WorkerDue) -> Option<i64>| should_run(due.as_ref(), at, now);
+                let idle_round = now >= idle_stages_at;
+                if idle_round {
+                    idle_stages_at = now + MAINTENANCE_MS;
+                }
+                let mut worked = false;
+                if now_ms() >= grant_cleanup_at {
+                    // Bounded batches until caught up (former cadence: one
+                    // batch a minute).
+                    for _ in 0..60 {
+                        match runtime.cleanup_grant_receipts(now_ms()).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Credential receipt cleanup deferred"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    grant_cleanup_at = now_ms() + MAINTENANCE_MS;
                 }
                 if now_ms() >= idle_sleep_at {
                     match runtime.idle_sleep_once(now_ms()).await {
@@ -1048,9 +1317,29 @@ async fn main() -> Result<()> {
                             lifecycle_priority = true;
                             zuse_cloud::events::hint::send();
                         }
-                        Ok(false) => idle_sleep_at = now_ms() + 10_000,
+                        // Sleep until the earliest computer's idle deadline. A
+                        // shared-credit hold wakes the loop with NOTIFY; a newly
+                        // idle-eligible computer's deadline is at least the idle
+                        // timeout away, which the bounded sweep never misses.
+                        Ok(false) => {
+                            let now = now_ms();
+                            idle_sleep_at = match runtime.idle_sleep_due(now).await {
+                                Ok(due) => zuse_cloud::runtime::lifecycle::idle::next_check(
+                                    now,
+                                    due,
+                                    runtime.idle_sweep_ms(),
+                                ),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        code = error.code,
+                                        "Idle sleep deadline deferred"
+                                    );
+                                    now + cadence.failure_cap().as_millis() as i64
+                                }
+                            };
+                        }
                         Err(error) => {
-                            idle_sleep_at = now_ms() + 10_000;
+                            idle_sleep_at = now_ms() + cadence.failure_cap().as_millis() as i64;
                             tracing::warn!(code = error.code, "Idle sleep admission deferred");
                         }
                     }
@@ -1058,6 +1347,9 @@ async fn main() -> Result<()> {
                 let allocation = if once {
                     runtime.allocate_registry_once(&registry, now_ms()).await
                 } else {
+                    if run(|d| d.allocation) {
+                        allocation_kick.notify_one();
+                    }
                     Ok(false)
                 };
                 if matches!(allocation, Ok(true)) {
@@ -1069,38 +1361,61 @@ async fn main() -> Result<()> {
                         anyhow::bail!("{}", error.code);
                     }
                 }
-                let repair = runtime
-                    .runtime_repair_registry_once(&registry, now_ms())
-                    .await;
-                if matches!(repair, Ok(true)) {
-                    zuse_cloud::events::hint::send();
+                // Archived computers whose retention ended are admitted by the
+                // recovery task; the idle timer there is only a safety net.
+                if run(|d| d.recovery) || run(|d| d.restore) || run(|d| d.archive_retention) {
+                    recovery_kick.notify_one();
                 }
-                if let Err(error) = repair {
-                    tracing::warn!(code = error.code, "Runtime repair stage deferred");
-                    if once {
-                        anyhow::bail!("{}", error.code);
+                if run(|d| d.repair) {
+                    let repair = runtime
+                        .runtime_repair_registry_once(&registry, now_ms())
+                        .await;
+                    if matches!(repair, Ok(true)) {
+                        worked = true;
+                        zuse_cloud::events::hint::send();
+                    }
+                    if let Err(error) = repair {
+                        tracing::warn!(code = error.code, "Runtime repair stage deferred");
+                        if once {
+                            anyhow::bail!("{}", error.code);
+                        }
                     }
                 }
                 // One durable due task drain per ordinary round; never inside
                 // the priority lifecycle burst. Missing optional schema is cached.
                 // Provider preparation cannot hold up lifecycle/control dispatch.
-                runtime.dispatch_project_preparation(now_ms());
-                runtime.dispatch_user_images(now_ms());
-                match runtime.work_task_drain_once(now_ms()).await {
-                    Ok(true) => zuse_cloud::events::hint::send(),
-                    Err(error) => tracing::warn!(code = error.code, "Task drain deferred"),
-                    _ => {}
+                if idle_round || run(|d| d.project_cache) {
+                    runtime.dispatch_project_preparation(now_ms());
                 }
-                match runtime.recreation_once(now_ms()).await {
-                    Ok(true) => zuse_cloud::events::hint::send(),
-                    Err(error) => {
-                        tracing::warn!(code = error.code, "Computer recreation stage deferred")
+                if idle_round || run(|d| d.user_images) {
+                    runtime.dispatch_user_images(now_ms());
+                }
+                if run(|d| d.task_drain) {
+                    match runtime.work_task_drain_once(now_ms()).await {
+                        Ok(true) => {
+                            worked = true;
+                            zuse_cloud::events::hint::send()
+                        }
+                        Err(error) => tracing::warn!(code = error.code, "Task drain deferred"),
+                        _ => {}
                     }
-                    _ => {}
                 }
-                if !hinted_cycle {
+                if run(|d| d.recreation) {
+                    match runtime.recreation_once(now_ms()).await {
+                        Ok(true) => {
+                            worked = true;
+                            zuse_cloud::events::hint::send()
+                        }
+                        Err(error) => {
+                            tracing::warn!(code = error.code, "Computer recreation stage deferred")
+                        }
+                        _ => {}
+                    }
+                }
+                if !hinted_cycle && run(|d| d.lifecycle) {
                     let lifecycle = runtime.lifecycle_registry_once(&registry, now_ms()).await;
                     if matches!(lifecycle, Ok(true)) {
+                        worked = true;
                         zuse_cloud::events::hint::send();
                     }
                     if let Err(error) = lifecycle {
@@ -1110,29 +1425,52 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                let deletion = runtime.delete_registry_once(&registry, now_ms()).await;
-                if matches!(deletion, Ok(true)) {
-                    zuse_cloud::events::hint::send();
-                }
-                if let Err(error) = deletion {
-                    tracing::warn!(code = error.code, "Deletion stage deferred");
-                    if once {
-                        anyhow::bail!("{}", error.code);
+                if run(|d| d.deletion) {
+                    let deletion = runtime.delete_registry_once(&registry, now_ms()).await;
+                    if matches!(deletion, Ok(true)) {
+                        worked = true;
+                        zuse_cloud::events::hint::send();
+                    }
+                    if let Err(error) = deletion {
+                        tracing::warn!(code = error.code, "Deletion stage deferred");
+                        if once {
+                            anyhow::bail!("{}", error.code);
+                        }
                     }
                 }
                 // Expired uploads are already unauthorized. Their physical
                 // purge is bounded maintenance, not part of every task wake.
                 if now_ms() >= asset_cleanup_at {
-                    if let Err(error) = runtime.sweep_launch_assets_once(now_ms()).await {
-                        tracing::warn!(
-                            code = error.code,
-                            "Abandoned launch upload cleanup deferred"
-                        );
+                    // Bounded batches until caught up (former cadence: one
+                    // pass a minute).
+                    for _ in 0..60 {
+                        match runtime.sweep_launch_assets_once(now_ms()).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Abandoned launch upload cleanup deferred"
+                                );
+                                break;
+                            }
+                        }
                     }
-                    if let Err(error) = runtime.sweep_asset_releases_once(now_ms()).await {
-                        tracing::warn!(code = error.code, "Attachment release sweep deferred");
+                    // Failed remote deletes stay `releasing`; never retry them in a burst.
+                    for _ in 0..10 {
+                        match runtime.sweep_asset_releases_once(now_ms()).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::warn!(
+                                    code = error.code,
+                                    "Attachment release sweep deferred"
+                                );
+                                break;
+                            }
+                        }
                     }
-                    asset_cleanup_at = now_ms() + 60_000;
+                    asset_cleanup_at = now_ms() + MAINTENANCE_MS;
                 }
                 if once {
                     runtime
@@ -1154,7 +1492,29 @@ async fn main() -> Result<()> {
                 if lifecycle_priority {
                     continue;
                 }
-                tokio::select! {
+                let (wait, timer) = if due.is_none() {
+                    // The due query failed (for example an exhausted pool):
+                    // back off instead of retrying in a tight loop.
+                    let wait = zuse_cloud::db::failure_backoff(
+                        due_failures,
+                        cadence.busy,
+                        cadence.failure_cap(),
+                    );
+                    (wait, Reason::Due)
+                } else if worked {
+                    // More may be ready; look again after the busy floor.
+                    (cadence.busy, Reason::Due)
+                } else {
+                    let next = zuse_cloud::db::wake::earliest([
+                        due.as_ref().and_then(WorkerDue::earliest),
+                        Some(idle_stages_at),
+                        Some(grant_cleanup_at),
+                        Some(idle_sleep_at),
+                        Some(asset_cleanup_at),
+                    ]);
+                    zuse_cloud::db::wake::next_wait(now_ms(), next, cadence)
+                };
+                let reason = tokio::select! {
                     _ = tokio::signal::ctrl_c() => break,
                     result = lifecycle_signal.receive() => {
                         if result.is_ok() {lifecycle_priority=true;}
@@ -1162,9 +1522,23 @@ async fn main() -> Result<()> {
                             tracing::warn!(code="lifecycle_wake_hint_disconnected","Using durable lifecycle reconciliation");
                             lifecycle_signal=zuse_cloud::runtime::lifecycle::wakeup::Listener::disabled();
                         }
+                        Reason::Hint
                     },
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(poll_interval_ms)) => {},
+                    reason = sleep_or_notify(&mut notifications, &interest, wait, timer) => reason,
+                };
+                if reason == Reason::Notify(Work::All) {
+                    // Notifications may have been missed: rerun the idle stages too.
+                    idle_stages_at = 0;
+                    idle_sleep_at = 0;
                 }
+                if reason == Reason::Notify(Work::IdleSleep) {
+                    idle_sleep_at = 0;
+                }
+                tracing::debug!(
+                    reason = reason.as_str(),
+                    waited_ms = wait.as_millis() as u64,
+                    "Worker woke"
+                );
             }
             allocation_cancel.cancel();
             if let Some(task) = allocation_task {
@@ -1182,15 +1556,18 @@ async fn main() -> Result<()> {
         }
         Command::Serve => {
             let config = Config::from_env()?;
+            // Every subsystem below shares these pools; none opens its own.
+            let db = process_db(&config.database_url, Role::Serve).await?;
             let runtime = match RuntimeConfig::from_env()? {
-                Some(settings) => {
-                    Some(RuntimeControl::connect(&config.database_url, settings).await?)
-                }
+                Some(settings) => Some(RuntimeControl::open(db.pool.clone(), settings).await?),
                 None => None,
             };
             let runtime_enabled = runtime.is_some();
-            let mut store = Store::connect_read_only(&config.database_url)
-                .await?
+            let wakeups = db.wakeups().await;
+            if let Some(runtime) = &runtime {
+                runtime.attach_wakeups(wakeups.clone());
+            }
+            let mut store = Store::from_pool(db.read_only_pool())
                 .configure_transcripts()?
                 .with_staging_base_pin(runtime.as_ref().and_then(|r| r.staging_base_pin()));
             let auth_accounts =
@@ -1205,16 +1582,14 @@ async fn main() -> Result<()> {
                     .context("Credential authority requires CLOUD_DATA_ENCRYPTION_KEY")?;
                 let master = zuse_cloud::crypto::MasterKey::parse(&key)
                     .map_err(|_| anyhow::anyhow!("Invalid credential authority encryption key"))?;
-                store = store.with_connections(
-                    zuse_cloud::connections::ConnectionControl::connect(
-                        &config.database_url,
+                store =
+                    store.with_connections(zuse_cloud::connections::ConnectionControl::from_pool(
+                        db.pool.clone(),
                         master,
                         auth_accounts,
-                    )
-                    .await?,
-                );
+                    ));
             }
-            store.devices = zuse_cloud::devices::Authority::from_env().await?;
+            store.devices = zuse_cloud::devices::Authority::from_env(&db).await?;
             store =
                 store.with_project_templates(zuse_cloud::projects::template_versions_from_env()?);
             if let Ok(origin) = env::var("ZUSE_CLOUD_LEGACY_GITHUB_URL") {
@@ -1227,75 +1602,45 @@ async fn main() -> Result<()> {
             let project_accounts =
                 zuse_cloud::access_policy::Accounts::from_env("ZUSE_CLOUD_PROJECT_WRITE_ACCOUNTS")?;
             if !project_accounts.is_empty() {
-                if let Some(runtime) = &runtime {
-                    store = store
-                        .with_computer_control(zuse_cloud::computers::ComputerControl::from_pool(
-                            runtime.shared_pool(),
-                            project_accounts.clone(),
-                        ))
-                        .with_project_control(zuse_cloud::projects::ProjectControl::from_pool(
-                            runtime.shared_pool(),
-                            project_accounts,
-                        ));
-                } else {
-                    store = store.with_computer_control(
-                        zuse_cloud::computers::ComputerControl::connect(
-                            &config.database_url,
-                            project_accounts.clone(),
-                        )
-                        .await?,
-                    );
-                    store = store.with_project_control(
-                        zuse_cloud::projects::ProjectControl::connect(
-                            &config.database_url,
-                            project_accounts,
-                        )
-                        .await?,
-                    );
-                }
+                store = store
+                    .with_computer_control(zuse_cloud::computers::ComputerControl::from_pool(
+                        db.pool.clone(),
+                        project_accounts.clone(),
+                    ))
+                    .with_project_control(zuse_cloud::projects::ProjectControl::from_pool(
+                        db.pool.clone(),
+                        project_accounts,
+                    ));
             }
             if let Some(settings) = zuse_cloud::images::ImageConfig::from_env()? {
                 let accounts = zuse_cloud::access_policy::Accounts::from_env(
                     "ZUSE_CLOUD_IMAGE_WRITE_ACCOUNTS",
                 )?;
-                if let Some(runtime) = &runtime {
-                    store = store.with_image_control(zuse_cloud::images::ImageControl::from_pool(
-                        runtime.shared_pool(),
-                        accounts,
-                        settings,
-                    ));
-                } else {
-                    store = store.with_image_control(
-                        zuse_cloud::images::ImageControl::connect(
-                            &config.database_url,
-                            accounts,
-                            settings,
-                        )
-                        .await?,
-                    );
-                }
+                store = store.with_image_control(zuse_cloud::images::ImageControl::from_pool(
+                    db.pool.clone(),
+                    accounts,
+                    settings,
+                ));
             }
             let billing_accounts =
                 zuse_cloud::access_policy::Accounts::from_env("ZUSE_CLOUD_BILLING_WRITE_ACCOUNTS")?;
             if !billing_accounts.is_empty() {
-                let mut billing = if let Some(runtime) = &runtime {
-                    zuse_cloud::billing::BillingControl::from_pool(
-                        runtime.shared_pool(),
-                        billing_accounts,
-                    )
-                } else {
-                    zuse_cloud::billing::BillingControl::connect(
-                        &config.database_url,
-                        billing_accounts,
-                    )
-                    .await?
-                };
+                // Checkout takes a receipt connection while its control
+                // transaction is open: keep receipts on their own pool.
+                let mut billing = zuse_cloud::billing::BillingControl::from_pools(
+                    db.pool.clone(),
+                    db.receipts_pool(),
+                    billing_accounts,
+                );
                 if let Some(providers) = zuse_cloud::billing::PaymentProviders::from_env()? {
                     billing = billing.with_payment_providers(providers);
                 }
+                // Payment notifications for embedded billing accounts are
+                // projected in this process right after they commit.
                 billing = billing
                     .connect_native_from_env(&config.database_url)
-                    .await?;
+                    .await?
+                    .with_native_follow_ups();
                 store = store.with_billing_control(billing);
             }
             let identity = WorkosIdentity::new(&config)?;
@@ -1338,17 +1683,19 @@ async fn main() -> Result<()> {
                                 }
                             }
                         }
-                        joining.wait_for_dispatch().await;
+                        joining.wait_for_dispatch(now_ms()).await;
                     }
                 });
             }
-            store = store.with_account_events_from_env(runtime.as_ref()).await?;
+            store = store
+                .with_account_events_from_env(runtime.as_ref(), wakeups.clone())
+                .await?;
             #[cfg(feature = "hosted-browser")]
             let hosted_browser = zuse_cloud::hosted_browser::from_env(&config)?;
             if let Some(settings) = zuse_cloud::plugins::PluginConfig::from_env()? {
                 let plugins =
-                    zuse_cloud::plugins::PluginControl::connect(&config.database_url, settings)
-                        .await?;
+                    zuse_cloud::plugins::PluginControl::from_pool(db.pool.clone(), settings)?;
+                plugins.attach_wakeups(wakeups.clone()).await;
                 let maintenance = plugins.clone();
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -1392,9 +1739,14 @@ async fn main() -> Result<()> {
             };
             let mut app = app;
             let slack_worker = if let Some(slack_config) = zuse_cloud::slack::Config::from_env()? {
+                // The Slack worker queries the pool while its advisory-lock
+                // transaction holds one shared connection.
+                anyhow::ensure!(
+                    db.budget.shared_connections() >= 2,
+                    "Slack requires at least two shared database connections; raise ZUSE_CLOUD_DB_MAX_CONNECTIONS"
+                );
                 let slack =
-                    zuse_cloud::slack::Slack::connect(state, slack_config, &config.database_url)
-                        .await?;
+                    zuse_cloud::slack::Slack::connect(state, slack_config, db.pool.clone()).await?;
                 let worker = slack.start_worker();
                 app = app.merge(slack.router());
                 Some(worker)
@@ -1414,6 +1766,23 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn env_ms(name: &str, default: u64, range: std::ops::RangeInclusive<u64>) -> Result<u64> {
+    match env::var(name) {
+        Err(_) => Ok(default),
+        Ok(raw) => raw
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|ms| range.contains(ms))
+            .with_context(|| format!("Invalid {name}")),
+    }
+}
+
+/// The single capped pool set of this process (see `zuse_cloud::db`).
+async fn process_db(url: &str, role: Role) -> Result<ProcessDb> {
+    ProcessDb::connect(url, Budget::from_env(role)?).await
+}
+
 fn serde_pretty(value: &serde_json::Value) -> Result<String> {
     Ok(serde_json::to_string_pretty(value)?)
 }
@@ -1422,9 +1791,10 @@ async fn serve_gateway() -> Result<()> {
     let config = Config::from_env()?;
     let settings = RuntimeConfig::from_env()?
         .context("Gateway requires ZUSE_CLOUD_RUNTIME_WRITES=true for lease fencing")?;
-    let runtime = RuntimeControl::connect(&config.database_url, settings).await?;
+    let db = process_db(&config.database_url, Role::Gateway).await?;
+    let runtime = RuntimeControl::open(db.pool.clone(), settings).await?;
     let state = AppState {
-        store: Store::connect_read_only(&config.database_url).await?,
+        store: Store::from_pool(db.read_only_pool()),
         identity: WorkosIdentity::new(&config)?,
         organizations_enabled: config.organizations_enabled,
         organization_ids: Arc::new(config.organization_ids),
@@ -1471,11 +1841,12 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
         .as_millis() as i64
 }
-async fn writable_runtime() -> Result<Arc<RuntimeControl>> {
+async fn writable_runtime(role: Role) -> Result<(Arc<RuntimeControl>, ProcessDb)> {
     let settings = RuntimeConfig::from_env()?
         .context("This command requires ZUSE_CLOUD_RUNTIME_WRITES=true")?;
     let url = env::var("ZUSE_CLOUD_DATABASE_URL").context("ZUSE_CLOUD_DATABASE_URL is required")?;
-    let runtime = RuntimeControl::connect(&url, settings).await?;
+    let db = process_db(&url, role).await?;
+    let runtime = RuntimeControl::open(db.pool.clone(), settings).await?;
     runtime.allocation_ready().await.map_err(|error| {
         anyhow::anyhow!(
             "{}; apply migration 0004_allocations.sql before running the allocation worker",
@@ -1486,5 +1857,5 @@ async fn writable_runtime() -> Result<Arc<RuntimeControl>> {
         .lifecycle_ready()
         .await
         .map_err(|error| anyhow::anyhow!("{}; apply migration 0005_lifecycle.sql", error.code))?;
-    Ok(runtime)
+    Ok((runtime, db))
 }

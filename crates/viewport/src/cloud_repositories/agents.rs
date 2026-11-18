@@ -144,16 +144,33 @@ impl RepositoryPanel {
             }
         }
     }
-    pub(crate) fn set_account_feed_live(&mut self, live: bool, cx: &mut Context<Self>) {
-        self.account_feed_live = live;
+    pub fn set_account_feed_live(&mut self, live: bool, cx: &mut Context<Self>) {
+        let was = std::mem::replace(&mut self.account_feed_live, live);
         if live {
             self.agents.poll = None;
             self.github_poll = None;
+            self.image.stop_polling();
+            self.machine.stop_polling();
+            // Hints sent while disconnected were missed: read once now.
+            if !was && self.loaded {
+                self.machine_image_changed(cx);
+            }
         } else {
             self.schedule_agent_poll(cx);
+            if was {
+                self.schedule_image_poll(cx);
+                self.schedule_machine_poll(cx);
+            }
         }
     }
-    pub(crate) fn account_event(&mut self, kind: &str, resource: &str, cx: &mut Context<Self>) {
+    /// A build, image or recipe changed on the server (`machine-image` hint).
+    fn machine_image_changed(&mut self, cx: &mut Context<Self>) {
+        self.refresh_image(cx);
+        if !self.pending.values().any(|p| p.kind.starts_with("machine")) {
+            self.load_machine(cx);
+        }
+    }
+    pub fn account_event(&mut self, kind: &str, resource: &str, cx: &mut Context<Self>) {
         match kind {
             "authentication" => {
                 if self.agents.login_binding.is_some()
@@ -215,6 +232,7 @@ impl RepositoryPanel {
                 }
             }
             "environment" => self.environment_event(resource, cx),
+            "machine-image" if self.loaded => self.machine_image_changed(cx),
             _ => {}
         }
     }

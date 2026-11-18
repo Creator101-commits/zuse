@@ -31,7 +31,8 @@ impl PluginCredentials for Account {
             .map_err(|e| match e {
                 AccountError::SignedOut => PluginError::SignedOut,
                 AccountError::Changed => PluginError::AccountChanged,
-                _ => PluginError::Unavailable,
+                // Keep the account's own reason (refresh failure, storage, ...).
+                error => PluginError::Account(error.to_string()),
             })
     }
 }
@@ -643,6 +644,147 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+    /// The hosted list as the API sends it: ~1200 catalog entries (about 400 KB)
+    /// and a hosted connection, the shape the Rust cloud serializes.
+    #[cfg(feature = "test-support")]
+    fn hosted_snapshot(tenant: &str) -> serde_json::Value {
+        let catalog: Vec<_> = (0..1232)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("plugin-{i}"),
+                    "name": format!("Plugin {i}"),
+                    "description": "Find and update issues, projects, and documents across the workspace. ".repeat(3),
+                    "domain": format!("plugin-{i}.example"),
+                    "category": if i % 3 == 0 { serde_json::Value::Null } else { serde_json::json!("productivity") },
+                    "featured": i < 12,
+                    "custom": false,
+                    "url": null,
+                    "apiKeyHeader": null,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "kind": "snapshot",
+            "canManage": true,
+            "tenants": [{"id": tenant, "kind": "personal", "name": "Personal"}],
+            "tenantId": tenant,
+            "endpoint": format!("https://api.example/v1/plugins/{tenant}/mcp"),
+            "catalog": catalog,
+            "connections": [{"id":"conn-1","pluginId":"plugin-1","label":"Plugin 1","owner":"user","state":"connected","createdAt":1763380000000_i64,"enabled":true}],
+        })
+    }
+    #[cfg(feature = "test-support")]
+    async fn hosted_fixture(
+        list: axum::response::Response,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        use axum::{
+            Router,
+            routing::{get, post},
+        };
+        let list = Arc::new(Mutex::new(Some(list)));
+        let app = Router::new()
+            .route(
+                "/v1/plugins",
+                post(move || {
+                    let list = list.clone();
+                    async move { list.lock().unwrap().take().expect("one list request") }
+                }),
+            )
+            .route(
+                "/v1/organizations",
+                get(|| async { axum::Json(serde_json::json!([])) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (origin, server)
+    }
+    #[cfg(feature = "test-support")]
+    async fn hosted_plugins(root: &Path, origin: String) -> (crate::EngineCore, Plugins) {
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(root).unwrap(),
+            Arc::new(crate::HarnessRegistry::new()),
+            zuse_protocol::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let account = Account::fixture_signed_in(root, origin, "user_a");
+        let plugins = Plugins::open(root, account, core.workspace.clone(), true).unwrap();
+        (core, plugins)
+    }
+    /// The full desktop read: engine list over HTTP, the RPC value it returns,
+    /// and the shared view state the plugins page renders from.
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn hosted_list_reaches_the_plugins_page_state_with_the_full_catalog() {
+        use axum::response::IntoResponse;
+        let root = tempfile::tempdir().unwrap();
+        let body = hosted_snapshot("personal:user_a");
+        assert!(serde_json::to_vec(&body).unwrap().len() > 300_000);
+        let (origin, server) = hosted_fixture(axum::Json(body).into_response()).await;
+        let (core, plugins) = hosted_plugins(root.path(), origin).await;
+        let response = plugins
+            .request(&PluginRequest::List { tenant_id: None })
+            .await
+            .unwrap();
+        let mut page = zuse_protocol::plugin_state::PluginState::default();
+        let request = page.begin(serde_json::json!({"action":"list"})).unwrap();
+        assert_eq!(request, serde_json::json!({"action":"list"}));
+        let rpc_value = serde_json::to_value(&response).unwrap();
+        assert_eq!(page.apply(&rpc_value).unwrap(), None);
+        assert_eq!(page.snapshot["catalog"].as_array().unwrap().len(), 1232);
+        assert_eq!(page.snapshot["connections"][0]["id"], "conn-1");
+        assert_eq!(page.tenant(), Some("personal:user_a"));
+        assert!(page.load_error.is_none());
+        server.abort();
+        core.shutdown().await;
+    }
+    /// A failed read names its cause instead of a generic "unavailable".
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn hosted_list_failures_keep_their_reason() {
+        use axum::{http::StatusCode, response::IntoResponse};
+        let cases = [
+            (
+                (
+                    StatusCode::OK,
+                    r#"{"kind":"snapshot","tenantId":"personal:user_a"}"#,
+                )
+                    .into_response(),
+                "missing field",
+            ),
+            (
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    r#"{"error":"plugins_unavailable"}"#,
+                )
+                    .into_response(),
+                "plugins_unavailable",
+            ),
+        ];
+        for (reply, reason) in cases {
+            let root = tempfile::tempdir().unwrap();
+            let (origin, server) = hosted_fixture(reply).await;
+            let (core, plugins) = hosted_plugins(root.path(), origin).await;
+            let error = plugins
+                .request(&PluginRequest::List { tenant_id: None })
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(reason), "{error}");
+            let mut page = zuse_protocol::plugin_state::PluginState::default();
+            page.begin(serde_json::json!({"action":"list"})).unwrap();
+            assert!(page.failed_with(error.clone()).is_none());
+            assert_eq!(
+                page.unavailable_message(),
+                format!("Plugins are unavailable: {error}")
+            );
+            server.abort();
+            core.shutdown().await;
+        }
     }
     #[test]
     fn local_environment_keeps_an_allowlist_and_a_usable_path() {

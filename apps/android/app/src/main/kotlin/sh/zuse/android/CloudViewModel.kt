@@ -1,10 +1,13 @@
 package sh.zuse.android
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.HttpUrl
 import sh.zuse.core.*
@@ -44,7 +47,13 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
         private set
 
     private var polling: Job? = null
+    private val visible = MutableStateFlow(true)
     private var activeIntentKey: String? = null
+
+    /** Sign-in polling runs only while the cloud sheet is on screen. */
+    fun setVisible(value: Boolean) {
+        visible.value = value
+    }
 
     private fun encoded(value: String) =
         HttpUrl.Builder()
@@ -210,10 +219,18 @@ class CloudViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 try {
                     val id = operation.text("operationId") ?: return@launch
+                    val started = SystemClock.elapsedRealtime()
                     while (
                         operation.text("state") == "authorizing" && identity == app.account.identity
                     ) {
-                        delay(3000)
+                        // Leaving the screen pauses polling; returning (often from the browser)
+                        // checks right away.
+                        withTimeoutOrNull(
+                            PollSchedule.loginDelay(SystemClock.elapsedRealtime() - started)
+                        ) {
+                            visible.first { !it }
+                        }
+                        visible.first { it }
                         val next = cloud.request("/v1/cloud/auth/login/${encoded(id)}")
                         if (identity != app.account.identity) return@launch
                         operation = next

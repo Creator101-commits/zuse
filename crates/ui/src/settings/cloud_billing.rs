@@ -130,8 +130,50 @@ pub struct CloudBillingPage {
     cap_request: Option<(i64, String)>,
     credit_request: Option<(i64, String)>,
     checkout_request: Option<String>,
+    /// The account feed subscription for `events_owner`. Billing and machine
+    /// image views refetch on its hints instead of polling.
+    events: Option<Task<()>>,
+    events_owner: Option<Owner>,
+    /// A billing hint arrived while a billing read was in flight.
+    reload: bool,
 }
 impl EventEmitter<Navigate> for CloudBillingPage {}
+/// What one account feed frame asks the Cloud settings pages to do.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FeedEffect {
+    live: Option<bool>,
+    billing: bool,
+    /// Non-billing hints for the repository/machine panel.
+    hints: Vec<(String, String)>,
+}
+fn feed_effect(data: &Value) -> FeedEffect {
+    let mut effect = FeedEffect::default();
+    match data["type"].as_str() {
+        Some("connected") => {
+            effect.live = Some(true);
+            effect.billing = true;
+        }
+        Some("revalidate") if data["live"] == true => effect.live = Some(true),
+        Some("reset") => effect.billing = true,
+        Some("events") => {
+            for event in data["events"].as_array().into_iter().flatten() {
+                let (Some(kind), Some(resource)) =
+                    (event["kind"].as_str(), event["resourceId"].as_str())
+                else {
+                    continue;
+                };
+                if kind == "billing" {
+                    effect.billing = true;
+                } else if !effect.hints.iter().any(|(k, r)| k == kind && r == resource) {
+                    effect.hints.push((kind.into(), resource.into()));
+                }
+            }
+        }
+        Some("reconnecting" | "disabled" | "closed" | "error") => effect.live = Some(false),
+        _ => {}
+    }
+    effect
+}
 impl CloudBillingPage {
     pub fn set_view(&mut self, view: CloudView, cx: &mut Context<Self>) {
         if self.view == view {
@@ -283,6 +325,77 @@ impl CloudBillingPage {
             cap_request: None,
             credit_request: None,
             checkout_request: None,
+            events: None,
+            events_owner: None,
+            reload: false,
+        }
+    }
+    /// Follows the account feed while this page exists. Hints carry only kinds
+    /// and IDs; every refetch goes through the authorized reads above.
+    fn watch_events(&mut self, cx: &mut Context<Self>) {
+        self.events_owner = self.owner.clone();
+        self.events = None;
+        self.repository_panel
+            .update(cx, |panel, cx| panel.set_account_feed_live(false, cx));
+        let Some(owner) = self.owner.clone() else {
+            return;
+        };
+        let Some(engine) = self.state.read(cx).engine().map(|e| e.controller()) else {
+            self.events_owner = None;
+            return;
+        };
+        self.events = Some(cx.spawn(async move |this, cx| {
+            let params = request_params(&owner, json!({}));
+            if let Ok(mut stream) = engine
+                .client()
+                .subscribe_scoped(methods::CLOUD_EVENTS, params)
+                .await
+            {
+                while let Some(value) = stream.recv().await {
+                    if !bound(&value, &owner) {
+                        continue;
+                    }
+                    let effect = feed_effect(&value["data"]);
+                    if this
+                        .update(cx, |this, cx| this.apply_feed(effect, cx))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            // Polls resume until a new subscription connects.
+            let _ = this.update(cx, |this, cx| {
+                this.repository_panel
+                    .update(cx, |panel, cx| panel.set_account_feed_live(false, cx));
+            });
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(5))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.events_owner = None;
+                cx.notify();
+            });
+        }));
+    }
+    fn apply_feed(&mut self, effect: FeedEffect, cx: &mut Context<Self>) {
+        if let Some(live) = effect.live {
+            self.repository_panel
+                .update(cx, |panel, cx| panel.set_account_feed_live(live, cx));
+        }
+        for (kind, resource) in &effect.hints {
+            self.repository_panel
+                .update(cx, |panel, cx| panel.account_event(kind, resource, cx));
+        }
+        if effect.billing
+            && self.loaded
+            && matches!(self.view, CloudView::Compute | CloudView::Billing)
+        {
+            if self.task.is_some() {
+                self.reload = true;
+            } else {
+                self.load(false, cx);
+            }
         }
     }
     fn sign_in(&mut self, cx: &mut Context<Self>) {
@@ -372,6 +485,10 @@ impl CloudBillingPage {
                     return;
                 }
                 this.task = None;
+                if std::mem::take(&mut this.reload) {
+                    this.load(false, cx);
+                    return;
+                }
                 match result {
                     Ok(Ok((summary, page))) if bound(&summary, &owner) && bound(&page, &owner) => {
                         let data =
@@ -797,6 +914,9 @@ impl Render for CloudBillingPage {
         }
         self.repository_panel
             .update(cx, |panel, cx| panel.bind_owner(self.owner.clone(), cx));
+        if self.events_owner != self.owner {
+            self.watch_events(cx);
+        }
         self.slack_panel
             .update(cx, |panel, cx| panel.bind_owner(self.owner.clone(), cx));
         let theme = Theme::of(cx).for_settings_surface();
@@ -984,5 +1104,52 @@ impl CloudBillingPage {
                 ))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod feed_tests {
+    use super::*;
+    use std::prelude::v1::test;
+    #[test]
+    fn billing_hints_reload_billing_and_other_hints_reach_the_panel_once() {
+        let effect = feed_effect(&json!({"type":"events","events":[
+            {"kind":"billing","resourceId":"period"},
+            {"kind":"machine-image","resourceId":"uimg"},
+            {"kind":"machine-image","resourceId":"uimg"},
+            {"kind":"connection","resourceId":"agent"}
+        ],"revokedWorkspaceIds":[]}));
+        assert_eq!(
+            effect,
+            FeedEffect {
+                live: None,
+                billing: true,
+                hints: vec![
+                    ("machine-image".into(), "uimg".into()),
+                    ("connection".into(), "agent".into())
+                ],
+            }
+        );
+        // Reconnecting reads billing again (hints may have been missed);
+        // joining an already connected feed only marks it live.
+        assert_eq!(
+            feed_effect(&json!({"type":"connected","revalidate":true})),
+            FeedEffect {
+                live: Some(true),
+                billing: true,
+                hints: vec![]
+            }
+        );
+        assert_eq!(
+            feed_effect(&json!({"type":"revalidate","cacheRevoked":false,"live":true})).live,
+            Some(true)
+        );
+        assert_eq!(
+            feed_effect(&json!({"type":"revalidate","cacheRevoked":false,"live":false})),
+            FeedEffect::default()
+        );
+        for down in ["reconnecting", "disabled", "closed", "error"] {
+            assert_eq!(feed_effect(&json!({"type":down})).live, Some(false));
+        }
     }
 }

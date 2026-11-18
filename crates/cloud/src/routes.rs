@@ -1783,7 +1783,7 @@ async fn command_watch(
         {
             return Ok(Json(page));
         }
-        tokio::select! { _=events.recv()=>{}, _=tokio::time::sleep_until(deadline.min(tokio::time::Instant::now()+std::time::Duration::from_secs(1)))=>{} }
+        tokio::select! { _=events.recv()=>{}, _=tokio::time::sleep_until(deadline.min(tokio::time::Instant::now()+runtime.mailbox_recheck()))=>{} }
     }
 }
 async fn command_data_key(
@@ -1836,7 +1836,7 @@ async fn command_lease(
         {
             return Ok(Json(page));
         }
-        tokio::select! {_=events.recv()=>{},_=tokio::time::sleep_until(deadline.min(tokio::time::Instant::now()+std::time::Duration::from_secs(1)))=>{}}
+        tokio::select! {_=events.recv()=>{},_=tokio::time::sleep_until(deadline.min(tokio::time::Instant::now()+runtime.mailbox_recheck()))=>{}}
     }
 }
 async fn command_ack(

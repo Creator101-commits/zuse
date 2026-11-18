@@ -3690,7 +3690,10 @@ impl EngineRpc {
                 } else {
                     gateway.request(&request).await
                 }
-                .map_err(|e| RpcError::Failed(e.to_string()))?;
+                .map_err(|error| {
+                    tracing::warn!(method, ?error, "plugin request failed: {error}");
+                    RpcError::Failed(error.to_string())
+                })?;
                 RpcReply::value(&response)
             }
             methods::PLUGIN_TOOLS => {
@@ -3708,7 +3711,10 @@ impl EngineRpc {
                 let response = gateway
                     .tools(&p.chat_id, &p.request)
                     .await
-                    .map_err(|e| RpcError::Failed(e.to_string()))?;
+                    .map_err(|error| {
+                        tracing::warn!(?error, "plugin tool request failed: {error:#}");
+                        RpcError::Failed(error.to_string())
+                    })?;
                 RpcReply::value(&response)
             }
             methods::ENGINE_INFO => RpcReply::value(&self.engine_info),
@@ -7978,15 +7984,16 @@ impl EngineRpc {
                 "Another active thread uses this checkout, so its files were kept.",
             ));
         }
-        if self.terminals.has_live_checkout(&checkout) {
-            return Err(RpcError::Failed("Close the worktree’s terminals before archiving it. Running processes have not been stopped.".into()));
-        }
         for row in &sharing {
             self.sessions
                 .end_for_archive(&row.id)
                 .await
                 .map_err(failed)?;
         }
+        self.terminals
+            .close_checkout(&checkout)
+            .await
+            .map_err(failed)?;
         for row in &sharing {
             if let Some(path) = row.cwd.as_deref() {
                 self.archives

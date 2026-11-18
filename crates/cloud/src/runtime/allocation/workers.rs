@@ -9,7 +9,8 @@ pub async fn run(
     runtime: Arc<RuntimeControl>,
     registry: Arc<crate::providers::registry::Registry>,
     concurrency: usize,
-    poll: std::time::Duration,
+    kick: Arc<tokio::sync::Notify>,
+    idle: std::time::Duration,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -57,7 +58,11 @@ pub async fn run(
                     None => {},
                 }
             },
-            _ = tokio::time::sleep(poll) => {},
+            // The worker loop kicks this when an allocation job is due (it
+            // learns that from NOTIFY and the due-time query); the idle timer
+            // is only a safety net.
+            _ = kick.notified() => {},
+            _ = tokio::time::sleep(idle) => {},
         }
     }
     let mut failed = false;

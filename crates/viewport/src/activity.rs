@@ -35,7 +35,27 @@ impl WorkspaceView {
             "mcp" => (call["tool"].as_str().unwrap_or("Connected tool"), "globe"),
             _ => (call["name"].as_str().unwrap_or("Tool call"), "terminal"),
         };
-        let name = if reasoning { "Thought process" } else { name };
+        // Zuse's plugin tools name the plugin and what it did, with its logo.
+        let plugin_call = (kind == "mcp")
+            .then(|| {
+                zuse_protocol::plugin_tools::plugin_tool_call(
+                    call["server"].as_str().unwrap_or_default(),
+                    call["tool"].as_str().unwrap_or_default(),
+                    call.get("input"),
+                )
+            })
+            .flatten();
+        let plugin_logo = plugin_call.as_ref().and_then(|call| {
+            let domain = zuse_protocol::plugin_tools::bundled_domain(call.plugin_id.as_deref()?)?;
+            let path = format!("plugin-icons/{domain}");
+            zuse_icons::load_plugin_icon(&path).map(|_| SharedString::from(path))
+        });
+        let plugin_label = plugin_call.as_ref().map(|call| call.label());
+        let name = if reasoning {
+            "Thought process"
+        } else {
+            plugin_label.as_deref().unwrap_or(name)
+        };
         let detail = ["command", "path", "pattern", "query", "url"]
             .into_iter()
             .find_map(|field| call[field].as_str());
@@ -72,11 +92,13 @@ impl WorkspaceView {
                     .size(px(11.))
                     .text_color(rgb(0x777777)),
                 )
-                .child(
-                    icon(if reasoning { "clock-circle" } else { glyph })
+                .child(match plugin_logo.filter(|_| !reasoning) {
+                    Some(logo) => img(logo).size(px(14.)).rounded(px(3.)).into_any_element(),
+                    None => icon(if reasoning { "clock-circle" } else { glyph })
                         .size(px(14.))
-                        .text_color(rgb(color)),
-                )
+                        .text_color(rgb(color))
+                        .into_any_element(),
+                })
                 .child(div().text_size(px(12.)).child(name.to_owned()))
                 .when_some(detail.map(str::to_owned), |d, text| {
                     d.child(

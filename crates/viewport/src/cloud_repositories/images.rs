@@ -19,6 +19,8 @@ pub(super) struct ImageView {
     error: Option<String>,
     build_key: Option<(String, String)>,
     poll: Option<Task<()>>,
+    /// Fallback reads since the last change, for the backoff.
+    polls: u32,
     failures: u8,
     expanded: BTreeSet<String>,
     settings: BTreeSet<String>,
@@ -33,6 +35,16 @@ pub(super) struct ImageView {
 impl ImageView {
     pub(super) fn has_storage(&self) -> bool {
         self.value.as_ref().is_some_and(|i| i.storage.is_some())
+    }
+    pub(super) fn stop_polling(&mut self) {
+        self.poll = None;
+        self.polls = 0;
+    }
+    /// Still changing on the server: a build runs or storage is deleting.
+    fn changing(&self) -> bool {
+        self.value.as_ref().is_some_and(|v| {
+            v.state == "building" || v.storage.as_ref().is_some_and(|s| s.state == "deleting")
+        })
     }
     pub(super) fn interrupted(&mut self) {
         self.poll = None;
@@ -102,7 +114,7 @@ impl RepositoryPanel {
             .get_or_insert_with(|| (mode.to_owned(), uuid::Uuid::new_v4().to_string()))
             .clone();
         self.image.error = None;
-        self.image.poll = None;
+        self.image.stop_polling();
         self.call(
             "image-build",
             methods::CLOUD_IMAGE_BUILD,
@@ -160,21 +172,27 @@ impl RepositoryPanel {
                 self.image.error = Some(error);
             }
         }
-        if self.image.value.as_ref().is_some_and(|v| {
-            v.state == "building" || v.storage.as_ref().is_some_and(|s| s.state == "deleting")
-        }) && self.image.failures < 3
-        {
-            self.image.poll = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_secs(2))
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.image.poll = None;
-                    this.refresh_image(cx);
-                });
-            }));
-        }
+        self.schedule_image_poll(cx);
         cx.notify();
+    }
+    /// Polls a changing image only while the account feed is disconnected.
+    pub(super) fn schedule_image_poll(&mut self, cx: &mut Context<Self>) {
+        if self.account_feed_live || !self.image.changing() || self.image.failures >= 3 {
+            self.image.stop_polling();
+            return;
+        }
+        if self.image.poll.is_some() {
+            return;
+        }
+        let delay = fallback_delay(std::time::Duration::from_secs(2), self.image.polls);
+        self.image.polls = self.image.polls.saturating_add(1);
+        self.image.poll = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |this, cx| {
+                this.image.poll = None;
+                this.refresh_image(cx);
+            });
+        }));
     }
     fn dismiss_image_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.image.confirm_delete = None;
@@ -196,7 +214,7 @@ impl RepositoryPanel {
             return;
         }
         self.image.error = None;
-        self.image.poll = None;
+        self.image.stop_polling();
         self.call(
             "image-delete",
             methods::CLOUD_IMAGE_DELETE,

@@ -218,7 +218,7 @@ impl crate::store::Store {
                 zuse_protocol::cloud_catalog::CloudAgentCatalog { providers: vec![] },
             );
         }
-        let schema:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cloud_managed_bases' AND column_name='runtime_manifest')").fetch_one(&self.pool).await?;
+        let schema:bool=crate::db::schema::present(&self.pool, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cloud_managed_bases' AND column_name='runtime_manifest')").await?;
         if !schema {
             return Ok(catalogs);
         }
@@ -444,8 +444,7 @@ pub(crate) async fn source_for(
     size: &str,
     organization: bool,
 ) -> Result<Value, ApiError> {
-    let ready: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cloud_managed_bases' AND column_name='runtime_manifest')")
-        .fetch_one(&mut **tx).await?;
+    let ready: bool = crate::db::schema::present_in(&mut **tx, "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cloud_managed_bases' AND column_name='runtime_manifest')").await?;
     if !ready {
         return Err(ApiError::conflict("managed_base_unavailable"));
     }

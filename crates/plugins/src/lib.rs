@@ -28,6 +28,17 @@ pub enum PluginError {
     Rejected { status: u16, code: String },
     #[error("Plugin service returned an invalid response.")]
     InvalidResponse,
+    /// The service could not be reached or the response stream broke; the
+    /// reason names the transport failure (never a credential or URL).
+    #[error("Plugin service is unavailable ({0}). Check the account connection and try again.")]
+    Transport(String),
+    /// A successful reply that does not match the expected shape, with the
+    /// decoder's reason (field and position, never response content).
+    #[error("Plugin service returned an invalid response ({0}).")]
+    Malformed(String),
+    /// The account could not provide a credential, with the account's reason.
+    #[error("{0}")]
+    Account(String),
     #[error("Plugin service URL must be an HTTPS base URL.")]
     InvalidEndpoint,
     #[error("Choose a valid plugin workspace belonging to this account.")]
@@ -170,7 +181,7 @@ impl PluginClient {
                 .bearer_auth(credential.access_token)
                 .send()
                 .await
-                .map_err(|_| PluginError::Unavailable)?;
+                .map_err(transport)?;
             let organizations: Vec<Organization> = match self.decode(response).await {
                 // Older deployments or disabled organization rollout still support Personal.
                 Err(PluginError::Rejected {
@@ -248,7 +259,7 @@ impl PluginClient {
             .json(input)
             .send()
             .await
-            .map_err(|_| PluginError::Unavailable)?;
+            .map_err(transport)?;
         self.decode(response).await
     }
 
@@ -272,8 +283,22 @@ impl PluginClient {
         if self.credentials.current().await?.subject != self.subject.as_ref() {
             return Err(PluginError::AccountChanged);
         }
-        serde_json::from_slice(&body).map_err(|_| PluginError::InvalidResponse)
+        serde_json::from_slice(&body).map_err(|error| PluginError::Malformed(error.to_string()))
     }
+}
+
+/// A reqwest failure as a short, credential-free reason.
+fn transport(error: reqwest::Error) -> PluginError {
+    let reason = if error.is_timeout() {
+        "the request timed out".to_owned()
+    } else if error.is_connect() {
+        "could not connect".to_owned()
+    } else if error.is_body() || error.is_decode() {
+        "the response was interrupted".to_owned()
+    } else {
+        error.without_url().to_string()
+    };
+    PluginError::Transport(reason)
 }
 
 async fn read_body(response: reqwest::Response) -> Result<Vec<u8>, PluginError> {
@@ -281,14 +306,14 @@ async fn read_body(response: reqwest::Response) -> Result<Vec<u8>, PluginError> 
         .content_length()
         .is_some_and(|n| n > MAX_RESPONSE_BYTES as u64)
     {
-        return Err(PluginError::InvalidResponse);
+        return Err(PluginError::Malformed("response is too large".into()));
     }
     let mut body = Vec::new();
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.map_err(|_| PluginError::Unavailable)?;
+        let chunk = chunk.map_err(transport)?;
         if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-            return Err(PluginError::InvalidResponse);
+            return Err(PluginError::Malformed("response is too large".into()));
         }
         body.extend_from_slice(&chunk);
     }

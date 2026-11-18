@@ -140,21 +140,22 @@ impl RuntimeControl {
         }
         Ok(())
     }
-    pub async fn cleanup_grant_receipts(&self, now: i64) -> Result<(), ApiError> {
+    /// Whether a full batch was cleaned (more may remain).
+    pub async fn cleanup_grant_receipts(&self, now: i64) -> Result<bool, ApiError> {
         cleanup_grant_receipts_on(&self.pool, now).await
     }
 }
 
 /// Bounded housekeeping. It never decides the outcome of a current request:
 /// `begin_grant_receipt` independently rejects expired or uncertain receipts.
-pub(super) async fn cleanup_grant_receipts_on(pool: &PgPool, now: i64) -> Result<(), ApiError> {
+pub(super) async fn cleanup_grant_receipts_on(pool: &PgPool, now: i64) -> Result<bool, ApiError> {
     {
         // Reuse one connection; preserve statement order and autocommit behavior.
         let mut connection = pool.acquire().await?;
         // Keep current generation request tombstones. Erasing them while bearer is valid
         // would let a delayed Unauthorized request perform another vendor refresh.
-        sqlx::query("UPDATE zuse_rust_provider_grant_receipts SET phase='uncertain',grant_ciphertext=NULL,updated_at=$1 WHERE (workspace_id,runtime_generation,recipient_thumbprint,request_id) IN (SELECT workspace_id,runtime_generation,recipient_thumbprint,request_id FROM zuse_rust_provider_grant_receipts WHERE phase='ready' AND expires_at<=$1 ORDER BY expires_at LIMIT 32)").bind(now).execute(&mut *connection).await?;
-        sqlx::query("DELETE FROM zuse_rust_provider_grant_receipts r WHERE (workspace_id,runtime_generation,recipient_thumbprint,request_id) IN (SELECT p.workspace_id,p.runtime_generation,p.recipient_thumbprint,p.request_id FROM zuse_rust_provider_grant_receipts p WHERE p.expires_at<$1 AND NOT EXISTS(SELECT 1 FROM api_cloud_workspaces w WHERE w.workspace_id=p.workspace_id AND w.request_config->'runtimeGeneration'=to_jsonb(p.runtime_generation)) ORDER BY p.expires_at LIMIT 32)").bind(now-86_400_000).execute(&mut *connection).await?;
-        Ok(())
+        let expired = sqlx::query("UPDATE zuse_rust_provider_grant_receipts SET phase='uncertain',grant_ciphertext=NULL,updated_at=$1 WHERE (workspace_id,runtime_generation,recipient_thumbprint,request_id) IN (SELECT workspace_id,runtime_generation,recipient_thumbprint,request_id FROM zuse_rust_provider_grant_receipts WHERE phase='ready' AND expires_at<=$1 ORDER BY expires_at LIMIT 32)").bind(now).execute(&mut *connection).await?.rows_affected();
+        let deleted = sqlx::query("DELETE FROM zuse_rust_provider_grant_receipts r WHERE (workspace_id,runtime_generation,recipient_thumbprint,request_id) IN (SELECT p.workspace_id,p.runtime_generation,p.recipient_thumbprint,p.request_id FROM zuse_rust_provider_grant_receipts p WHERE p.expires_at<$1 AND NOT EXISTS(SELECT 1 FROM api_cloud_workspaces w WHERE w.workspace_id=p.workspace_id AND w.request_config->'runtimeGeneration'=to_jsonb(p.runtime_generation)) ORDER BY p.expires_at LIMIT 32)").bind(now-86_400_000).execute(&mut *connection).await?.rows_affected();
+        Ok(expired >= 32 || deleted >= 32)
     }
 }

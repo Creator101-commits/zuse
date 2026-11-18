@@ -5,7 +5,8 @@
 //!   bounded 1MB window (resumable via `afterSeq`) then tails live output, batched
 //!   at [`TERMINAL_OUTPUT_BATCH_MS`]; data rides base64 (PTY bytes ≠ UTF-8).
 //! - Live shells survive subscriber detach — a detached session is the user's
-//!   running process, kept until its tab is explicitly closed or the engine exits.
+//!   running process, kept until its tab is explicitly closed, its managed
+//!   checkout is archived, or the engine exits.
 //!   Only EXITED sessions expire (30min TTL on their inert replay buffers), and
 //!   [`MAX_TERMINALS`] bounds leakage from renderers that lost their tab state.
 //! - Ownership: M5 is single-user local — every IPC/relay caller is the device
@@ -202,7 +203,7 @@ impl Terminals {
     }
 
     /// Open a login shell in `cwd`. The PTY outlives every subscriber; it dies on
-    /// [`Self::close`], shell exit + TTL, or engine shutdown.
+    /// [`Self::close`], managed-checkout archive, shell exit + TTL, or engine shutdown.
     pub fn open(&self, cwd: &str, cols: u16, rows: u16) -> Result<TerminalSession, EngineError> {
         self.open_with_environment(cwd, cols, rows, &HashMap::new())
     }
@@ -660,6 +661,96 @@ impl Terminals {
             let cwd = std::fs::canonicalize(&session.cwd).unwrap_or_else(|_| session.cwd.clone());
             cwd.starts_with(checkout)
         })
+    }
+
+    /// Archive owns filesystem admission while retiring a managed checkout.
+    /// Remove every matching tab, including detached shells and exited replay
+    /// buffers, without touching terminals in other checkouts.
+    pub(crate) async fn close_checkout(
+        &self,
+        checkout: &std::path::Path,
+    ) -> Result<(), EngineError> {
+        let mut removed = Vec::new();
+        lock(&self.inner.sessions).retain(|id, session| {
+            let cwd = {
+                let session = lock(session);
+                std::fs::canonicalize(&session.cwd).unwrap_or_else(|_| session.cwd.clone())
+            };
+            if cwd.starts_with(checkout) {
+                removed.push((id.clone(), session.clone()));
+                false
+            } else {
+                true
+            }
+        });
+        if removed.is_empty() {
+            return Ok(());
+        }
+        let mut exits = Vec::new();
+        for (_, session) in &removed {
+            let mut session = lock(session);
+            if !session.exited {
+                let (tx, rx) = mpsc::unbounded_channel();
+                session.subscribers.push(tx);
+                exits.push(rx);
+            }
+        }
+        // Keep the sessions alive until their wait/output tasks observe real
+        // exit. On Unix a stop request only sends SIGHUP; shutdown handlers may
+        // still be saving files that must reach the checkpoint.
+        let stopping = removed.clone();
+        let stopped = tokio::task::spawn_blocking(move || {
+            for (_, session) in stopping {
+                let mut session = lock(&session);
+                if !session.exited
+                    && let Err(error) = session.killer.kill()
+                {
+                    tracing::debug!(%error, "archive terminal stop request failed");
+                }
+            }
+        })
+        .await
+        .is_ok();
+        let confirmed = stopped
+            && tokio::time::timeout(
+                Duration::from_secs(5),
+                futures::future::join_all(exits.into_iter().map(|mut rx| async move {
+                    while let Some(event) = rx.recv().await {
+                        if matches!(event, TerminalEvent::Exit { .. }) {
+                            return true;
+                        }
+                    }
+                    false
+                })),
+            )
+            .await
+            .is_ok_and(|exited| exited.into_iter().all(|exited| exited));
+        // Platform cleanup can wait for reader threads. Keep it off the async
+        // worker, and finish every session even if one cleanup fails.
+        let mut finished = false;
+        if confirmed {
+            let cleanup = removed.clone();
+            finished = tokio::task::spawn_blocking(move || {
+                let mut finished = true;
+                for (_, session) in cleanup {
+                    finished &= dispose(&session, true);
+                }
+                finished
+            })
+            .await
+            .unwrap_or(false);
+        }
+        if finished {
+            self.remember();
+            Ok(())
+        } else {
+            lock(&self.inner.sessions).extend(removed);
+            self.remember();
+            Err(EngineError::Other(
+                "Could not finish stopping the worktree terminals. The worktree was retained."
+                    .into(),
+            ))
+        }
     }
 
     /// Any live PTY (the reaper prunes exited ones) — restarts kill shells, so

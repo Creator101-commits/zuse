@@ -56,6 +56,9 @@ pub struct PluginsCard {
     account_view: Option<Entity<zuse_viewport::account_settings::AccountCard>>,
     account_view_events: Option<Subscription>,
     plugins: zuse_protocol::plugin_state::PluginState,
+    /// The sign-in attempt whose browser page was already opened, so polling
+    /// the same attempt never opens another tab.
+    opened_attempt: Option<String>,
     error: Option<String>,
     epoch: u64,
     busy: bool,
@@ -87,6 +90,15 @@ struct LocalImport {
     error: Option<String>,
     /// Set once requests are queued: (queued, skipped by validation).
     submitted: Option<(usize, usize)>,
+}
+
+/// Longer than the engine's own bounds for one list (two 60 s HTTP calls).
+const PLUGIN_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(150);
+fn plugin_timeout_message() -> String {
+    format!(
+        "The plugin request did not finish within {} seconds. Refresh to try again.",
+        PLUGIN_REQUEST_TIMEOUT.as_secs()
+    )
 }
 
 struct SharedPlugins(Entity<PluginsCard>);
@@ -145,6 +157,7 @@ impl PluginsCard {
             account_view: None,
             account_view_events: None,
             plugins: Default::default(),
+            opened_attempt: None,
             error: None,
             epoch: 0,
             busy: false,
@@ -333,6 +346,16 @@ impl PluginsCard {
         }
         cx.notify();
     }
+    /// Opens the provider's sign-in page once for each new pending attempt.
+    fn open_new_attempt(&mut self, cx: &mut Context<Self>) {
+        if let Some((id, url)) =
+            attempt_to_open(&self.plugins.attempt, self.opened_attempt.as_deref())
+        {
+            self.opened_attempt = Some(id);
+            cx.open_url(&url);
+        }
+    }
+
     fn request(&mut self, method: &'static str, params: Value, cx: &mut Context<Self>) {
         if self.busy || self.account_watch_error.is_some() {
             return;
@@ -365,7 +388,24 @@ impl PluginsCard {
         self.error = None;
         let epoch = self.epoch;
         self.action = Some(cx.spawn(async move |this, cx| {
-            let result = engine.client().call(method, params).await;
+            let plugin = matches!(method, methods::PLUGINS | methods::SELECT_PLUGIN_WORKSPACE);
+            let call = engine.client().call(method, params);
+            // A plugin read can never leave the page "busy" forever: past the
+            // engine's own HTTP bounds the reply is abandoned and reported.
+            let result = if plugin {
+                let timer = cx.background_executor().timer(PLUGIN_REQUEST_TIMEOUT);
+                match futures::future::select(std::pin::pin!(call), timer).await {
+                    futures::future::Either::Left((result, _)) => {
+                        result.map_err(|error| error.to_string())
+                    }
+                    futures::future::Either::Right(_) => Err(plugin_timeout_message()),
+                }
+            } else {
+                call.await.map_err(|error| error.to_string())
+            };
+            if plugin && let Err(error) = &result {
+                tracing::warn!(method, "plugin request failed: {error}");
+            }
             let _ = this.update(cx, |card, cx| {
                 if card.epoch != epoch {
                     return;
@@ -381,10 +421,12 @@ impl PluginsCard {
                         let next = match card.plugins.apply(&value) {
                             Ok(next) => next,
                             Err(error) => {
-                                card.error = Some(error.into());
-                                card.plugins.failed()
+                                tracing::warn!(method, "plugin response rejected: {error}");
+                                card.error = Some(error.clone().into());
+                                card.plugins.failed_with(error)
                             }
                         };
+                        card.open_new_attempt(cx);
                         if let Some(next) = next {
                             card.request(methods::PLUGINS, next, cx);
                         }
@@ -402,11 +444,9 @@ impl PluginsCard {
                         if card.import_inflight {
                             card.import_failed += 1;
                         }
-                        card.error = Some(error.to_string());
-                        if matches!(method, methods::PLUGINS | methods::SELECT_PLUGIN_WORKSPACE) {
-                            if let Some(next) = card.plugins.failed() {
-                                card.request(methods::PLUGINS, next, cx);
-                            }
+                        card.error = Some(error.clone());
+                        if plugin && let Some(next) = card.plugins.failed_with(error) {
+                            card.request(methods::PLUGINS, next, cx);
                         }
                     }
                 }
@@ -889,6 +929,15 @@ impl PluginsCard {
     /// account's device login, errors, the setup form, a removal to confirm
     /// and a hosted sign-in in flight.
     fn render_status(&self, theme: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.render_status_except(theme, None, cx)
+    }
+    /// [`Self::render_status`] without an error the page already shows inline.
+    fn render_status_except(
+        &self,
+        theme: &Theme,
+        shown: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mut items: Vec<AnyElement> = Vec::new();
         let button = |id: &'static str, label: &str| {
             widgets::text_action(theme, widgets::ActionTone::Outlined, label.to_owned())
@@ -925,6 +974,7 @@ impl PluginsCard {
             .clone()
             .or_else(|| self.error.clone())
             .or_else(|| self.account.error.clone())
+            .filter(|error| Some(error.as_str()) != shown)
         {
             items.push(widgets::error_strip(theme, error).mt_0().into_any_element());
         }
@@ -1271,7 +1321,7 @@ impl PluginsCard {
                     .child(if self.busy {
                         crate::localization::text("plugins-plugins_loading", cx)
                     } else {
-                        ("Plugins are unavailable. Refresh to try again.").to_string()
+                        self.plugins.unavailable_message()
                     })
                     .into_any_element(),
             );
@@ -1359,7 +1409,11 @@ impl PluginsCard {
                 .when(self.busy, |el| el.opacity(0.5))
                 .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
             );
-        let status = self.render_status(&theme, cx);
+        // The empty page names the read failure itself; don't repeat it above.
+        let inline_error = (self.signed_in() && !self.plugins.snapshot["catalog"].is_array())
+            .then(|| self.plugins.load_error.clone())
+            .flatten();
+        let status = self.render_status_except(&theme, inline_error.as_deref(), cx);
         div()
             .id("plugins-page")
             .size_full()
@@ -1865,4 +1919,40 @@ pub(crate) fn connected_mention_plugins(
             })
         })
         .collect()
+}
+
+/// The pending attempt's https sign-in page, if it hasn't been opened yet.
+fn attempt_to_open(attempt: &Value, opened: Option<&str>) -> Option<(String, String)> {
+    let id = attempt["id"].as_str()?;
+    let url = attempt["authorizationUrl"].as_str()?;
+    (attempt["state"] == "pending" && url.starts_with("https://") && opened != Some(id))
+        .then(|| (id.to_owned(), url.to_owned()))
+}
+
+#[cfg(test)]
+mod attempt_open_tests {
+    use super::attempt_to_open;
+    use serde_json::json;
+
+    #[test]
+    fn opens_a_new_pending_attempt_once() {
+        let attempt = json!({"id":"a1","state":"pending","authorizationUrl":"https://mcp.linear.app/authorize?x=1"});
+        assert_eq!(
+            attempt_to_open(&attempt, None),
+            Some(("a1".into(), "https://mcp.linear.app/authorize?x=1".into()))
+        );
+        assert_eq!(attempt_to_open(&attempt, Some("a1")), None);
+    }
+
+    #[test]
+    fn never_opens_finished_missing_or_unsafe_links() {
+        for attempt in [
+            json!({"id":"a1","state":"connected","authorizationUrl":"https://x.example"}),
+            json!({"id":"a1","state":"pending","authorizationUrl":null}),
+            json!({"id":"a1","state":"pending","authorizationUrl":"http://x.example"}),
+            json!({}),
+        ] {
+            assert_eq!(attempt_to_open(&attempt, None), None);
+        }
+    }
 }

@@ -1,10 +1,6 @@
 use crate::{access::Access, error::ApiError};
 use serde_json::{Value, json};
-use sqlx::{
-    PgPool, Row,
-    postgres::{PgConnectOptions, PgPoolOptions},
-};
-use std::{str::FromStr, time::Duration};
+use sqlx::{PgPool, Row};
 
 #[derive(Clone)]
 pub struct Store {
@@ -153,7 +149,11 @@ impl Store {
             uuid::Uuid::new_v4().simple()
         );
         let hash = format!("{:x}", Sha256::digest(credential.as_bytes()));
-        sqlx::query("UPDATE api_environment_credentials SET revoked_at=$1 WHERE environment_id=$2 AND account_id=$3 AND revoked_at IS NULL").bind(now).bind(environment).bind(account).execute(&mut *tx).await?;
+        // One row per app: the new credential replaces the previous one, which stops working.
+        sqlx::query("DELETE FROM api_environment_credentials WHERE environment_id=$1")
+            .bind(environment)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("INSERT INTO api_environment_credentials(credential_id,environment_id,account_id,credential_hash,created_at,revoked_at) VALUES ($1,$2,$3,$4,$5,NULL)").bind(uuid::Uuid::new_v4().to_string()).bind(environment).bind(account).bind(hash).bind(now).execute(&mut *tx).await?;
         sqlx::query("UPDATE api_link_challenges SET consumed_at=$1 WHERE challenge_id=$2")
             .bind(now)
@@ -322,44 +322,11 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// One-shot read-only catalog (operator commands and tests). Long-running
+    /// processes pass [`crate::db::ProcessDb::read_only_pool`] to
+    /// [`Self::from_pool`] instead, so the connection stays in their budget.
     pub async fn connect_read_only(url: &str) -> anyhow::Result<Self> {
-        let options = PgConnectOptions::from_str(url)
-            .map_err(|_| anyhow::anyhow!("Invalid cloud PostgreSQL connection configuration"))?
-            .application_name("zuse-cloud-api");
-        let pool = PgPoolOptions::new()
-            .max_connections(8)
-            .acquire_timeout(Duration::from_secs(5))
-            .after_connect(|connection, _| {
-                Box::pin(async move {
-                    sqlx::query("SET default_transaction_read_only = on")
-                        .execute(&mut *connection)
-                        .await?;
-                    sqlx::query("SET statement_timeout = '10s'")
-                        .execute(&mut *connection)
-                        .await?;
-                    Ok(())
-                })
-            })
-            .connect_with(options)
-            .await
-            .map_err(|_| anyhow::anyhow!("Cannot connect to cloud PostgreSQL"))?;
-        Ok(Self {
-            staging_candidate: None,
-            events: None,
-            connections: None,
-            computers: None,
-            devices: None,
-            plugins: None,
-            pool,
-            billing: None,
-            images: None,
-            projects: None,
-            github: None,
-            github_native: None,
-            github_joining: None,
-            project_templates: Default::default(),
-            transcripts: None,
-        })
+        Ok(Self::from_pool(crate::db::read_only_pool(url).await?))
     }
 
     pub fn from_pool(pool: PgPool) -> Self {
@@ -418,7 +385,7 @@ impl Store {
 
     /// Launch summaries contain no environment values, credentials or secret bindings.
     pub async fn launch_projects(&self, owner: &str) -> Result<Vec<Value>, ApiError> {
-        let present: bool = sqlx::query_scalar("SELECT to_regclass('api_cloud_projects') IS NOT NULL AND to_regclass('api_cloud_project_builds') IS NOT NULL AND to_regclass('api_cloud_snapshots') IS NOT NULL").fetch_one(&self.pool).await?;
+        let present: bool = crate::db::schema::present(&self.pool, "SELECT to_regclass('api_cloud_projects') IS NOT NULL AND to_regclass('api_cloud_project_builds') IS NOT NULL AND to_regclass('api_cloud_snapshots') IS NOT NULL").await?;
         if !present {
             return Ok(vec![]);
         }
@@ -869,7 +836,7 @@ mod archive_projection_tests {
         assert_eq!(public["archiveStatus"]["computeRetired"], false);
         assert_eq!(
             public["archiveStatus"]["retentionDeadline"],
-            100 + 10 * 86400000_i64
+            100 + zuse_protocol::cloud::ARCHIVE_RETENTION_MS
         );
         row["request_config"]["recoveryArchive"] = json!({"version":1,"id":"operation","sourceSandboxId":"PRIVATE-SOURCE",
             "archivedAtMs":100,"expiresAtMs":200,"phase":"retired","verifiedChunks":1,

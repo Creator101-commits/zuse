@@ -57,6 +57,10 @@ pub(super) struct Catalog {
     loading: bool,
     error: Option<String>,
     refresh: Arc<tokio::sync::Notify>,
+    /// Bumped whenever a fresh workspace list lands (after a `workspace`
+    /// account event) or a task is archived here, so views of archived
+    /// tasks reload without polling.
+    workspaces_revision: u64,
 }
 fn access_denied(error: &RpcError) -> bool {
     matches!(error,RpcError::Capability(code) if code=="workspace_access_denied"||code=="workspace_not_found")
@@ -96,6 +100,9 @@ impl AppState {
     pub(crate) fn cloud_sidebar_stale(&self) -> bool {
         !self.cloud_sidebar.projects_fresh || !self.cloud_sidebar.workspaces_fresh
     }
+    pub(crate) fn cloud_sidebar_workspaces_revision(&self) -> u64 {
+        self.cloud_sidebar.workspaces_revision
+    }
     pub(crate) fn cloud_sidebar_error(&self) -> Option<&str> {
         self.cloud_sidebar.error.as_deref()
     }
@@ -103,6 +110,17 @@ impl AppState {
         self.cloud_sidebar.refresh.notify_one();
         self.cloud_sidebar.loading = true;
         cx.notify();
+    }
+    /// Drop an archived (or archiving) task from the visible catalog at once;
+    /// the `workspace` account event that follows refreshes it for real.
+    pub(crate) fn hide_cloud_sidebar_workspace(&mut self, workspace: &str) -> bool {
+        let before = self.cloud_sidebar.workspaces.len();
+        self.cloud_sidebar
+            .workspaces
+            .retain(|row| row["workspaceId"].as_str() != Some(workspace));
+        self.cloud_sidebar.workspaces_revision =
+            self.cloud_sidebar.workspaces_revision.wrapping_add(1);
+        self.cloud_sidebar.workspaces.len() != before
     }
     pub(super) fn clear_cloud_sidebar(&mut self) {
         self.cloud_sidebar = Catalog::default();
@@ -211,6 +229,10 @@ impl AppState {
                     .cloned()
                     .collect();
                 self.cloud_sidebar.workspaces_fresh = !provisional;
+                if !provisional {
+                    self.cloud_sidebar.workspaces_revision =
+                        self.cloud_sidebar.workspaces_revision.wrapping_add(1);
+                }
             }
         }
         if !provisional && self.cloud_sidebar.projects_fresh && self.cloud_sidebar.workspaces_fresh
@@ -255,6 +277,15 @@ async fn request(
     futures::pin_mut!(read);
     let result = tokio::select! { result=&mut read=>result, _=executor.timer(std::time::Duration::from_secs(30))=>Err(RpcError::Failed("Cloud sidebar request timed out.".into())) };
     (part, provisional, result)
+}
+/// Account event kinds that can change the sidebar's projects or workspaces.
+/// Project rows change through `environment` events; there is no separate
+/// project or catalog kind.
+fn refreshes_catalog(kind: &str) -> bool {
+    matches!(
+        kind,
+        "workspace" | "environment" | "github" | "connection" | "authentication"
+    )
 }
 pub(super) fn spawn(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()> {
     // Cloud computers are a beta; without it there is nothing to list.
@@ -321,7 +352,7 @@ pub(super) fn spawn(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()
                                 let disconnected=matches!(data["type"].as_str(),Some("error"|"closed"));
                                 if this.update(cx,|state,cx|{if !scope.matches(state){return;}if let Some(revoked)=data["revokedWorkspaceIds"].as_array(){state.cloud_sidebar.workspaces.retain(|row|!revoked.iter().any(|id|row["workspaceId"]==*id));}if authority_denied{state.sidebar_error(&scope,Part::Projects,&RpcError::Capability("workspace_access_denied".into()));}else if disconnected{state.sidebar_error(&scope,Part::Projects,&RpcError::Transport("Cloud events disconnected".into()));}cx.notify();}).is_err(){return;}
                                 if disconnected&&!authority_denied{events=None;retry=true;retry_projects=true;continue;}
-                                let refresh=matches!(data["type"].as_str(),Some("connected"|"reset"|"revalidate"))||data["events"].as_array().into_iter().flatten().any(|e|matches!(e["kind"].as_str(),Some("workspace"|"project"|"image-catalog"|"project-catalog"|"github"|"environment"|"connection"|"authentication")));
+                                let refresh=matches!(data["type"].as_str(),Some("connected"|"reset"|"revalidate"))||data["events"].as_array().into_iter().flatten().any(|e|e["kind"].as_str().is_some_and(refreshes_catalog));
                                 if refresh{load_projects=true;break;}
                             }
                         }
@@ -335,6 +366,30 @@ pub(super) fn spawn(cx: &mut Context<AppState>, handle: EngineHandle) -> Task<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sidebar_refreshes_only_on_kinds_the_server_sends() {
+        for kind in [
+            "workspace",
+            "environment",
+            "github",
+            "connection",
+            "authentication",
+        ] {
+            assert!(refreshes_catalog(kind), "{kind}");
+        }
+        // Hints for other views, and kinds no server has ever sent.
+        for kind in [
+            "billing",
+            "machine-image",
+            "conversation",
+            "task-command-progress",
+            "project",
+            "image-catalog",
+            "project-catalog",
+        ] {
+            assert!(!refreshes_catalog(kind), "{kind}");
+        }
+    }
     #[test]
     fn cloud_only_catalog_needs_no_local_chat_and_scope_changes_clear_it() {
         let mut state = AppState::new();
@@ -381,6 +436,37 @@ mod cache_tests {
         assert!(!state.apply_sidebar_part(Part::Projects, &projects(true, "old")));
         assert_eq!(state.cloud_sidebar_projects()[0]["projectId"], "fresh");
         assert!(state.cloud_sidebar_stale());
+    }
+    #[test]
+    fn archived_tasks_leave_the_list_and_fresh_lists_bump_the_revision() {
+        let mut state = AppState::new();
+        state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+        let start = state.cloud_sidebar_workspaces_revision();
+        // Saved (provisional) rows paint but do not count as a refresh.
+        assert!(state.apply_sidebar_part(Part::Workspaces, &workspaces(true)));
+        assert_eq!(state.cloud_sidebar_workspaces_revision(), start);
+        let fresh = json!({"accountId":"owner","organizationId":null,"apiOrigin":"https://cloud.test","provisional":false,"workspaces":[
+            {"workspaceId":"saved","state":"paused","initialSessionId":"session"},
+            {"workspaceId":"archiving","state":"archiving","desiredState":"archived","initialSessionId":"a"},
+            {"workspaceId":"archived","state":"archived","desiredState":"archived","initialSessionId":"b"}]});
+        assert!(state.apply_sidebar_part(Part::Workspaces, &fresh));
+        let ids: Vec<_> = state
+            .cloud_sidebar_workspaces()
+            .iter()
+            .map(|row| row["workspaceId"].clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![json!("saved")],
+            "archived tasks stay out of Threads"
+        );
+        let refreshed = state.cloud_sidebar_workspaces_revision();
+        assert_ne!(refreshed, start);
+        // Archiving from the sidebar hides the row before the event arrives.
+        assert!(state.hide_cloud_sidebar_workspace("saved"));
+        assert!(state.cloud_sidebar_workspaces().is_empty());
+        assert_ne!(state.cloud_sidebar_workspaces_revision(), refreshed);
+        assert!(!state.hide_cloud_sidebar_workspace("saved"));
     }
     #[test]
     fn denial_and_account_org_or_api_changes_do_not_resurrect_saved_catalog() {

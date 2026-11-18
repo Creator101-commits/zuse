@@ -1376,6 +1376,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn archive_rpc_closes_checkout_terminals_and_preserves_other_checkouts() {
+        use serde_json::json;
+        use zuse_rpc::{RpcReply, RpcService, methods};
+
+        let f = Fixture::new().await;
+        f.edit();
+        let core = crate::EngineCore::assemble(
+            &f.data,
+            std::sync::Arc::new(crate::HarnessRegistry::new()),
+            zuse_protocol::HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        core.workspace
+            .create_space(
+                "project",
+                &core.device_id,
+                &f.repo.to_string_lossy(),
+                None,
+                true,
+            )
+            .unwrap();
+        let rpc = core.rpc_service();
+        let terminal_state = f.data.join("terminal-state.json");
+        core.terminals.persist_to(terminal_state.clone());
+        rpc.handle(
+            methods::MUTATE,
+            json!({"op":"createChat","chatId":"chat","spaceId":"project","cwd":f.checkout}),
+        )
+        .await
+        .unwrap();
+        let RpcReply::Value(terminal) = rpc
+            .handle(
+                methods::OPEN_TERMINAL,
+                json!({"chatId":"chat","cols":80,"rows":24}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected terminal")
+        };
+        let terminal_id = terminal["id"].as_str().unwrap();
+        let mut output = core.terminals.subscribe(terminal_id, None).unwrap();
+        let nested = core
+            .terminals
+            .open(f.checkout.join(".context").to_str().unwrap(), 80, 24)
+            .unwrap();
+        let unrelated = core
+            .terminals
+            .open_owned("other", f.repo.to_str().unwrap(), 80, 24)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            core.terminals
+                .write_bytes(
+                    terminal_id,
+                    b"exec /bin/sh -c 'trap \"\" HUP; touch .context/terminal-waiting; read ignored; trap \"sleep 0.4; printf stopped > tracked.txt; exit 0\" HUP; touch .context/terminal-ready; while :; do sleep 0.05; done'\r",
+                )
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !f.checkout.join(".context/terminal-waiting").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("terminal must ignore shutdown before testing archive timeout");
+            let refused = rpc
+                .handle(
+                    methods::MUTATE,
+                    json!({"op":"setChatArchived","chatId":"chat","archived":true}),
+                )
+                .await;
+            assert!(
+                refused.is_err(),
+                "archive must retain a shell that has not exited"
+            );
+            assert!(f.checkout.exists());
+            assert!(!core.workspace.chat("chat").unwrap().unwrap().archived);
+            assert_eq!(core.terminals.list_owned("chat")[0].id, terminal_id);
+            assert!(core.terminals.subscribe(terminal_id, None).is_ok());
+            let saved: Vec<serde_json::Value> =
+                serde_json::from_slice(&std::fs::read(&terminal_state).unwrap()).unwrap();
+            assert!(saved.iter().any(|entry| entry["id"] == terminal_id));
+            // Let the same retained shell install a graceful shutdown handler;
+            // retry must preserve its final write in the archived checkpoint.
+            core.terminals.write_bytes(terminal_id, b"\r").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !f.checkout.join(".context/terminal-ready").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("terminal shutdown handler must be installed before archive");
+        }
+
+        let archived = rpc
+            .handle(
+                methods::MUTATE,
+                json!({"op":"setChatArchived","chatId":"chat","archived":true}),
+            )
+            .await;
+        if archived.is_err() {
+            core.shutdown().await;
+        }
+        let RpcReply::Value(receipt) = archived.expect("an open terminal must not block archiving")
+        else {
+            panic!("expected archive receipt")
+        };
+        assert_eq!(receipt["archive"]["storageReclaimed"], true);
+        assert!(core.workspace.chat("chat").unwrap().unwrap().archived);
+        assert!(!f.checkout.exists());
+        assert!(core.terminals.list_owned("chat").is_empty());
+        assert!(
+            core.terminals
+                .write_bytes(terminal_id, b"echo stale\n")
+                .is_err()
+        );
+        assert!(core.terminals.subscribe(&nested.id, None).is_err());
+        let exited = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut exited = false;
+            while let Some(event) = output.recv().await {
+                exited |= matches!(event, zuse_protocol::TerminalEvent::Exit { .. });
+            }
+            exited
+        })
+        .await
+        .expect("archive must end the terminal subscription");
+        assert!(exited, "archive must tell viewers the terminal has exited");
+        assert!(core.terminals.write_bytes(&unrelated.id, b"\n").is_ok());
+        let saved: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(&terminal_state).unwrap()).unwrap();
+        assert_eq!(
+            saved.len(),
+            1,
+            "archived terminals must not reopen on restart"
+        );
+        assert_eq!(saved[0]["id"], unrelated.id);
+        rpc.handle(
+            methods::MUTATE,
+            json!({"op":"setChatArchived","chatId":"chat","archived":false}),
+        )
+        .await
+        .unwrap();
+        let restored = std::fs::read_to_string(f.checkout.join("tracked.txt")).unwrap();
+        let terminals = core.terminals.list_owned("chat");
+        core.shutdown().await;
+        assert_eq!(restored, if cfg!(unix) { "stopped" } else { "changed\n" });
+        assert!(terminals.is_empty());
+    }
+
+    #[tokio::test]
     async fn archive_rpc_reclaims_only_after_last_shared_thread_and_restores_before_activation() {
         use serde_json::json;
         use zuse_rpc::{RpcReply, RpcService, methods};
@@ -1413,6 +1564,10 @@ mod tests {
         for (id, cwd) in [("first", &first_checkout), ("second", &f.checkout)] {
             rpc.handle(methods::MUTATE,json!({"op":"createChat","chatId":id,"spaceId":"project","cwd":cwd,"config":{"harness":"mock","sandbox":"workspace-write"}})).await.unwrap();
         }
+        let terminal = core
+            .terminals
+            .open_owned("first", first_checkout.to_str().unwrap(), 80, 24)
+            .unwrap();
         let handle = core.doc_host.open("first").unwrap();
         handle
             .doc()
@@ -1444,6 +1599,7 @@ mod tests {
         };
         assert_eq!(first["archive"]["storageReclaimed"], false);
         assert!(f.checkout.exists());
+        assert!(core.terminals.write_bytes(&terminal.id, b"\n").is_ok());
         use futures::StreamExt;
         let RpcReply::Stream(mut review_watch) = rpc
             .handle(methods::WATCH_CHECKOUT_DIFFS, json!({"chatId":"first"}))
@@ -1465,6 +1621,7 @@ mod tests {
         };
         assert_eq!(second["archive"]["storageReclaimed"], true);
         assert!(!f.checkout.exists());
+        assert!(core.terminals.list_owned("first").is_empty());
         let RpcReply::Value(status) = rpc
             .handle(methods::GET_CHAT_ARCHIVE_STATUS, json!({"chatId":"first"}))
             .await

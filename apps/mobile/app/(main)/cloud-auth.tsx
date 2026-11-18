@@ -20,6 +20,7 @@ import {
 import { Button } from "~/components/ui/button";
 import { connectionErrorMessage } from "~/lib/connection-error-message";
 import { PROVIDER_LABEL } from "~/lib/model-options";
+import { loginPollDelay } from "~/lib/poll-schedule";
 import { cloudControlClient } from "~/rpc/api-client";
 import { authAccountAtom, signIn } from "~/store/auth";
 import { cloudCatalogAtom, refreshCloudCatalog } from "~/store/cloud-catalog";
@@ -50,19 +51,26 @@ export default function CloudAuthenticationScreen() {
 	useEffect(() => {
 		if (operation?.state !== "authorizing") return;
 		let disposed = false;
-		let timer: ReturnType<typeof setTimeout>;
+		let paused = AppState.currentState === "background";
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const startedAt = Date.now();
+		const next = () => {
+			clearTimeout(timer);
+			if (!disposed && !paused)
+				timer = setTimeout(poll, loginPollDelay(Date.now() - startedAt));
+		};
+		let polling = false;
 		const poll = async () => {
-			if (disposed) return;
-			if (AppState.currentState === "background") {
-				timer = setTimeout(poll, 2_000);
-				return;
-			}
+			if (disposed || paused || polling) return;
 			try {
+				polling = true;
 				const result = await Effect.runPromise(
 					cloudControlClient["cloud.auth.login.poll"]({
 						operationId: operation.operationId,
 					}),
-				);
+				).finally(() => {
+					polling = false;
+				});
 				if (disposed) return;
 				setOperation(result);
 				if (result.state === "connected") {
@@ -73,12 +81,23 @@ export default function CloudAuthenticationScreen() {
 			} catch (cause) {
 				if (!disposed) setError(connectionErrorMessage(cause));
 			}
-			if (!disposed) timer = setTimeout(poll, 2_000);
+			next();
 		};
-		timer = setTimeout(poll, 1_000);
+		// Returning from the browser is usually the moment sign-in finished; check right away.
+		const subscription = AppState.addEventListener("change", (state) => {
+			const wasPaused = paused;
+			paused = state === "background";
+			if (paused) clearTimeout(timer);
+			else if (wasPaused) {
+				clearTimeout(timer);
+				void poll();
+			}
+		});
+		if (!paused) timer = setTimeout(poll, 1_000);
 		return () => {
 			disposed = true;
 			clearTimeout(timer);
+			subscription.remove();
 		};
 	}, [operation?.operationId, operation?.state]);
 	const configure = async () => {

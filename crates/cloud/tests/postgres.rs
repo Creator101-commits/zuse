@@ -535,6 +535,14 @@ async fn personal_computer_discovery_is_account_scoped_and_excludes_host_secrets
 
         let active:i64=sqlx::query_scalar("SELECT count(*) FROM api_environment_credentials WHERE environment_id='linked-host' AND revoked_at IS NULL").fetch_one(&pool).await.unwrap();
         assert_eq!(active, 1);
+        // Relinking replaces the row instead of piling up revoked ones.
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM api_environment_credentials WHERE environment_id='linked-host'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
         let stored_plain:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_environment_credentials WHERE credential_hash=$1 OR credential_hash=$2)").bind(&credential).bind(&next).fetch_one(&pool).await.unwrap();
         assert!(!stored_plain);
         let mint_jwk = json!({"kty":"OKP","crv":"Ed25519","d":URL_SAFE_NO_PAD.encode(seed),"x":URL_SAFE_NO_PAD.encode(mint_key.verifying_key().as_bytes())});
@@ -798,7 +806,10 @@ async fn catalog_authorization_archive_reads_and_durable_job_recovery() {
         None,
     )
     .await;
-    assert_eq!(archive["retentionDeadline"], 100 + 10 * 86400000_i64);
+    assert_eq!(
+        archive["retentionDeadline"],
+        100 + zuse_protocol::cloud::ARCHIVE_RETENTION_MS
+    );
     assert_eq!(archive["machineRetained"], true);
     assert_eq!(archive["backupVerified"], false);
     assert_eq!(archive["computeRetired"], false);
@@ -1354,8 +1365,14 @@ async fn socket_connect(url: &str, protocol: &str, credential: &str) -> TestSock
     socket
 }
 async fn socket_message(socket: &mut TestSocket) -> tokio_tungstenite::tungstenite::Message {
+    socket_message_within(socket, std::time::Duration::from_secs(5)).await
+}
+async fn socket_message_within(
+    socket: &mut TestSocket,
+    wait: std::time::Duration,
+) -> tokio_tungstenite::tungstenite::Message {
     use futures::StreamExt;
-    tokio::time::timeout(std::time::Duration::from_secs(5), socket.next())
+    tokio::time::timeout(wait, socket.next())
         .await
         .unwrap()
         .unwrap()
@@ -1594,8 +1611,11 @@ async fn gateway_multiplexes_live_sockets_and_fences_runtime_ownership() {
         .execute(&pool)
         .await
         .unwrap();
+    // A changed fence is found at the room's next lease renewal (every 5s), so
+    // allow one full renewal interval plus the renewal timeout.
+    let fence_detection = std::time::Duration::from_secs(15);
     assert!(
-        matches!(socket_message(&mut replacement).await,Message::Close(Some(frame)) if u16::from(frame.code)==4101)
+        matches!(socket_message_within(&mut replacement, fence_detection).await,Message::Close(Some(frame)) if u16::from(frame.code)==4101)
     );
     assert!(
         matches!(socket_message(&mut fresh).await,Message::Close(Some(frame)) if u16::from(frame.code)==4101)
@@ -4818,7 +4838,7 @@ for line in sys.stdin:
         assert_eq!(paused["state"], "paused");
         assert_eq!(paused["desiredState"], "paused");
         assert_eq!(provider.wakes.load(Ordering::SeqCst), 0);
-        // Re-archive asleep starts a new ten-day window without launching anything.
+        // Re-archive asleep starts a new retention window without launching anything.
         let (status, _) = runtime_post_for_url(
             &endpoint,
             "bob",

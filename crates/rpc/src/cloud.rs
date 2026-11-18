@@ -277,6 +277,64 @@ pub fn runtime_update_poll_requests() -> &'static tokio::sync::Notify {
     static REQUESTS: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
     REQUESTS.get_or_init(tokio::sync::Notify::new)
 }
+/// "You have a command" hints from the gateway. A hint carries no command and
+/// no authority: the runtime still leases from its durable mailbox, which
+/// stays the only source of truth. Hints only decide when to ask.
+pub struct CommandPush {
+    hints: tokio::sync::Notify,
+    active: tokio::sync::watch::Sender<bool>,
+}
+impl Default for CommandPush {
+    fn default() -> Self {
+        Self {
+            hints: tokio::sync::Notify::new(),
+            active: tokio::sync::watch::Sender::new(false),
+        }
+    }
+}
+impl CommandPush {
+    /// Ask the mailbox to lease now. Hints that arrive while it is busy
+    /// coalesce into one pending wake, so none is lost.
+    pub fn hint(&self) {
+        self.hints.notify_one();
+    }
+    /// Resolves at the next hint, or at once for a hint already pending.
+    pub async fn hinted(&self) {
+        self.hints.notified().await
+    }
+    /// True while the current gateway connection has proven it sends hints.
+    /// Older servers never send them, so the runtime keeps long-polling there.
+    pub fn active(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.active.subscribe()
+    }
+    /// The gateway sent a hint on this connection, so it pushes commands.
+    pub fn received(&self) {
+        self.active.send_replace(true);
+        self.hint();
+    }
+    /// A gateway connection opened. Commands may have arrived while it was
+    /// down, so lease now. Push is not trusted until the gateway sends a hint.
+    pub fn connected(&self) {
+        self.active.send_replace(false);
+        self.hint();
+    }
+    /// The gateway connection ended: fall back to long-polling.
+    pub fn disconnected(&self) {
+        self.active.send_replace(false);
+    }
+}
+/// The process-wide hints fed by this runtime's gateway attachment.
+pub fn command_push() -> &'static Arc<CommandPush> {
+    static PUSH: std::sync::OnceLock<Arc<CommandPush>> = std::sync::OnceLock::new();
+    PUSH.get_or_init(Default::default)
+}
+/// Ends push mode however the gateway attachment returns.
+struct PushConnection<'a>(&'a CommandPush);
+impl Drop for PushConnection<'_> {
+    fn drop(&mut self) {
+        self.0.disconnected();
+    }
+}
 /// Runs the already assembled engine on one authenticated gateway attachment.
 /// Returning tears down transport subscriptions; the caller retains engine ownership.
 pub async fn serve_guest(
@@ -307,6 +365,9 @@ pub async fn serve_guest_connected(
     if let Some(connected) = connected {
         let _ = connected.send(());
     }
+    let push = command_push();
+    push.connected();
+    let _push_connection = PushConnection(push);
     let mut peers = HashMap::<String, Peer>::new();
     let (output, mut outgoing) = mpsc::channel::<(String, String)>(16);
     let mut liveness = Liveness::new(std::time::Instant::now());
@@ -345,8 +406,8 @@ pub async fn serve_guest_connected(
                             peers.insert(connection_id,Peer {input,_task:AbortOnDropHandle::new(task)});
                         }
                         Control::Close {connection_id}=>{peers.remove(&connection_id);}
-                        // Notifications grant no execution authority; the guest polls its durable mailbox.
-                        Control::Command=>{},
+                        // A hint grants no execution authority; the mailbox still leases.
+                        Control::Command=>push.received(),
                         Control::RuntimeUpdatePollNow=>runtime_update_poll_requests().notify_one(),
                     }
                 }
@@ -379,6 +440,43 @@ pub async fn serve_guest_connected(
 #[cfg(test)]
 mod control_tests {
     use super::*;
+    #[test]
+    fn command_hint_control_parses_with_or_without_extra_fields() {
+        for text in [
+            r#"{"type":"runtime.command"}"#,
+            r#"{"type":"runtime.command","reason":"mailbox"}"#,
+        ] {
+            assert!(matches!(
+                serde_json::from_str::<Control>(text).unwrap(),
+                Control::Command
+            ));
+        }
+    }
+    #[tokio::test]
+    async fn command_push_is_trusted_only_after_a_hint_on_the_current_connection() {
+        let push = CommandPush::default();
+        let active = push.active();
+        push.connected();
+        assert!(!*active.borrow(), "a new connection has not proven push");
+        tokio::time::timeout(Duration::from_millis(100), push.hinted())
+            .await
+            .expect("connecting wakes the mailbox");
+        push.received();
+        assert!(*active.borrow());
+        // Hints sent while nobody waits coalesce into one pending wake.
+        push.hint();
+        tokio::time::timeout(Duration::from_millis(100), push.hinted())
+            .await
+            .expect("a received hint stays pending");
+        tokio::time::timeout(Duration::from_millis(100), push.hinted())
+            .await
+            .expect_err("hints coalesce");
+        drop(PushConnection(&push));
+        assert!(
+            !*active.borrow(),
+            "a closed connection falls back to polling"
+        );
+    }
     #[test]
     fn poll_now_control_matches_the_update_contract() {
         let text = format!(

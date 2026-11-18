@@ -234,12 +234,14 @@ impl Authority {
             .client
             .request(method, url)
             // Native OAuth refresh may take fifteen seconds plus checkpoint writes.
+            // A command lease may long-poll for the server's 25s maximum.
             // Keep unrelated control calls at the original ten-second budget.
             .timeout(Duration::from_secs(
-                if suffix.len() == 4
+                if (suffix.len() == 4
                     && suffix[0] == "runtime"
                     && suffix[1] == "providers"
-                    && suffix[3] == "grant"
+                    && suffix[3] == "grant")
+                    || suffix == ["runtime", "commands", "lease"]
                 {
                     35
                 } else {

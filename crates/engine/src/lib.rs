@@ -46,6 +46,7 @@ pub mod change_requests;
 pub mod chat2_host;
 mod chat_persistence;
 pub mod desktop_import;
+pub mod desktop_shutdown;
 pub mod diff_sync;
 pub mod direct_access;
 pub mod doc_host;
@@ -53,6 +54,7 @@ pub mod execution;
 pub mod execution_progress;
 pub mod local_mcp;
 pub mod machine_resources;
+mod memory_watchdog;
 pub mod model_prefs;
 pub mod ssh_access;
 pub use cloud::hosted as hosted_cloud;
@@ -199,6 +201,7 @@ pub struct EngineCore {
     pub direct_access: direct_access::Owner,
     pub zots: zots::Zots,
     _zot_supervisor: Option<zots::ZotSupervisor>,
+    _memory_watchdog: Option<memory_watchdog::MemoryWatchdog>,
     pub account: account::Account,
     pub managed_access: managed_access::AccountClient,
     pub managed_host: managed_access::host::Owner,
@@ -545,6 +548,8 @@ impl EngineCore {
         }
         sessions.set_analytics(analytics.clone());
         analytics.capture("app opened", serde_json::json!({}));
+        let memory_watchdog =
+            memory_watchdog::MemoryWatchdog::start(sessions.clone(), doc_host.clone());
         let zot_supervisor = zots::ZotSupervisor::start(
             zots.clone(),
             sessions.clone(),
@@ -560,6 +565,7 @@ impl EngineCore {
             browser_access,
             pairings,
             _zot_supervisor: zot_supervisor,
+            _memory_watchdog: memory_watchdog,
             zots,
             harness_models,
             model_connections,

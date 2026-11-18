@@ -194,7 +194,7 @@ impl ConnectionControl {
     pub(super) async fn cleanup_rotations(&self, now: i64) -> Result<(), ApiError> {
         let owners = self.accounts.filter();
         sqlx::query("UPDATE zuse_rust_credential_rotations SET phase='superseded',result_ciphertext=NULL,updated_at=$1 WHERE rotation_id IN (SELECT r.rotation_id FROM zuse_rust_credential_rotations r WHERE r.phase='result' AND ($2::text[] IS NULL OR r.owner_id=ANY($2)) AND NOT EXISTS(SELECT 1 FROM cloud_agent_connections c WHERE c.owner_id=r.owner_id AND c.connection_id=r.connection_id AND c.version=r.source_version AND c.authority_epoch=r.authority_epoch AND c.state='connected') ORDER BY r.updated_at LIMIT 32)").bind(now).bind(&owners).execute(&self.pool).await?;
-        sqlx::query("DELETE FROM zuse_rust_credential_rotations WHERE rotation_id IN (SELECT rotation_id FROM zuse_rust_credential_rotations WHERE phase IN ('applied','superseded','uncertain') AND ($2::text[] IS NULL OR owner_id=ANY($2)) AND updated_at<$1 ORDER BY updated_at LIMIT 32)").bind(now-7*86_400_000).bind(&owners).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM zuse_rust_credential_rotations WHERE rotation_id IN (SELECT rotation_id FROM zuse_rust_credential_rotations WHERE phase IN ('applied','superseded','uncertain') AND ($2::text[] IS NULL OR owner_id=ANY($2)) AND updated_at<$1 ORDER BY updated_at LIMIT 32)").bind(now-super::due::ROTATION_RETENTION_MS).bind(&owners).execute(&self.pool).await?;
         Ok(())
     }
 }

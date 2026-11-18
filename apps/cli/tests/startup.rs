@@ -587,6 +587,202 @@ async fn pair_command_creates_links_on_the_running_server_and_says_when_none_run
 }
 
 #[tokio::test]
+async fn serve_reuses_the_profile_owner_and_starts_browser_access_without_another_engine() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = root.path().join("profile");
+    let assets = root.path().join("web");
+    std::fs::create_dir_all(&assets).unwrap();
+    std::fs::write(assets.join("index.html"), "<title>Existing engine</title>").unwrap();
+    let core = zuse_engine::EngineCore::assemble_with_profile(
+        zuse_engine::EngineProfile::local(&profile).unwrap(),
+        std::sync::Arc::new(zuse_engine::HarnessRegistry::new()),
+        zuse_engine::HarnessId::Mock,
+        None,
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let task = tokio::spawn(zuse_rpc::serve_ws_listener(listener, core.rpc_service()));
+    let client = connect_ws(&format!("ws://127.0.0.1:{port}")).await.unwrap();
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        Command::new(ZUSE)
+            .args([
+                "serve",
+                "--language",
+                "en",
+                "--listen",
+                "127.0.0.1:0",
+                "--ipc-port",
+            ])
+            .arg(port.to_string())
+            .arg("--data-dir")
+            .arg(&profile)
+            .arg("--assets")
+            .arg(&assets)
+            .env_remove("ZUSE_BROWSER_TOKEN")
+            .env_remove("ZUSE_PUBLIC_ORIGIN")
+            .env_remove("ZUSE_TLS_CERT")
+            .env_remove("ZUSE_TLS_KEY")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("/#pair="),
+        "{output:?}"
+    );
+    let status = client
+        .call(methods::BROWSER_ACCESS_STATUS, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(status["running"], true);
+    assert_eq!(
+        reqwest::get(format!("{}/", status["origin"].as_str().unwrap()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "<title>Existing engine</title>"
+    );
+    // Plain `zuse serve` also reuses the owner; isolate the test through its environment.
+    let again = Command::new(ZUSE)
+        .arg("serve")
+        .env("ZUSE_IPC_PORT", port.to_string())
+        .env("ZUSE_DATA_DIR", &profile)
+        .env_remove("ZUSE_BROWSER_TOKEN")
+        .env_remove("ZUSE_PUBLIC_ORIGIN")
+        .env_remove("ZUSE_TLS_CERT")
+        .env_remove("ZUSE_TLS_KEY")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(again.status.success(), "{again:?}");
+    assert!(
+        String::from_utf8_lossy(&again.stdout).contains("/#pair="),
+        "{again:?}"
+    );
+    assert_eq!(
+        client
+            .call(methods::BROWSER_ACCESS_STATUS, json!({}))
+            .await
+            .unwrap()["origin"],
+        status["origin"]
+    );
+    // A port belonging to another profile must never receive browser mutations.
+    let other = root.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("device-id"), "another-profile").unwrap();
+    let _lock = zuse_engine::InstanceLock::acquire(&other).unwrap();
+    let refused = Command::new(ZUSE)
+        .args(["serve", "--ipc-port"])
+        .arg(port.to_string())
+        .arg("--data-dir")
+        .arg(&other)
+        .env_remove("ZUSE_BROWSER_TOKEN")
+        .env_remove("ZUSE_PUBLIC_ORIGIN")
+        .env_remove("ZUSE_TLS_CERT")
+        .env_remove("ZUSE_TLS_KEY")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("another profile"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        client
+            .call(methods::LIST_PAIRINGS, json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    core.shutdown().await;
+    task.abort();
+}
+
+#[tokio::test]
+async fn plain_serve_discovers_its_profiles_ephemeral_rpc_port_and_keeps_explicit_ports_strict() {
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let profile = root.path().join("profile");
+    let mut server = Server::start(&profile, &bin, &root.path().join("mcp.json")).await;
+    let mut other = Server::start(
+        &root.path().join("other"),
+        &bin,
+        &root.path().join("other-mcp.json"),
+    )
+    .await;
+    let command = || {
+        let mut command = Command::new(ZUSE);
+        command
+            .arg("serve")
+            .env("ZUSE_DATA_DIR", &profile)
+            .env_remove("ZUSE_IPC_PORT")
+            .env_remove("ZUSE_BROWSER_TOKEN")
+            .env_remove("ZUSE_PUBLIC_ORIGIN")
+            .env_remove("ZUSE_TLS_CERT")
+            .env_remove("ZUSE_TLS_KEY")
+            .kill_on_drop(true);
+        command
+    };
+    let opened = command().output().await.unwrap();
+    assert!(opened.status.success(), "{opened:?}");
+    assert!(
+        String::from_utf8_lossy(&opened.stdout).contains("/#pair="),
+        "{opened:?}"
+    );
+    let refused = command()
+        .arg("--ipc-port")
+        .arg(other.port.to_string())
+        .output()
+        .await
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("another profile"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        server
+            .client()
+            .await
+            .call(methods::LIST_PAIRINGS, json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        other
+            .client()
+            .await
+            .call(methods::LIST_PAIRINGS, json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    server.stop().await;
+    assert!(!profile.join("serve-ipc.json").exists());
+    other.stop().await;
+}
+
+#[tokio::test]
 async fn without_a_command_the_standalone_binary_explains_and_shows_help() {
     let output = Command::new(ZUSE)
         .args(["--language", "en"])
