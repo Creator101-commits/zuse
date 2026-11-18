@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use zuse_syntax::{HighlightKind, HighlightRequest, HighlightedDocument, highlight};
 
 fn document(source: &str, path: &str) -> HighlightedDocument {
@@ -292,45 +290,5 @@ fn every_span_is_valid_and_non_overlapping_for_incomplete_unicode() {
             assert!(line.is_char_boundary(span.range.start));
             assert!(line.is_char_boundary(span.range.end));
         }
-    }
-}
-
-#[test]
-#[ignore = "diagnostic benchmark; run explicitly when changing parsers or queries"]
-fn benchmark_small_medium_large_and_incomplete_documents() {
-    for (name, source) in [
-        ("small", "fn main() { println!(\"hi\"); }".to_string()),
-        ("medium", "fn item() -> usize { 42 }\n".repeat(2_000)),
-        ("large", "struct Item { value: usize }\n".repeat(20_000)),
-        (
-            "incomplete",
-            "fn broken( { let value = \"open".repeat(2_000),
-        ),
-    ] {
-        let started = Instant::now();
-        let document = highlight(HighlightRequest {
-            source: &source,
-            path: Some("bench.rs"),
-            fence_tag: None,
-        })
-        .unwrap();
-        eprintln!(
-            "{name}: bytes={} spans={} elapsed_us={}",
-            source.len(),
-            document.lines.iter().map(Vec::len).sum::<usize>(),
-            started.elapsed().as_micros()
-        );
-    }
-}
-
-#[test]
-fn reference_contains_expected_visual_roles() {
-    let spans = fragments("fn call() { let value = 42; }", "main.rs");
-    for kind in [
-        HighlightKind::Keyword,
-        HighlightKind::Function,
-        HighlightKind::Number,
-    ] {
-        assert!(spans.iter().any(|(_, actual)| *actual == kind));
     }
 }

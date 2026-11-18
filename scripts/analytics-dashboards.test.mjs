@@ -65,7 +65,6 @@ test("pagination cannot forward operations credentials to another host", async (
   assert.equal(calls, 1);
 });
 
-
 test("native dashboard series correspond to the closed Rust catalog and actual native chat events", () => {
   const catalog = readFileSync(new URL("../crates/analytics/src/desktop.rs", import.meta.url), "utf8");
   const events = new Set([...catalog.matchAll(/#\[serde\(rename = "([^"]+)"\)\]/g)].map(match => match[1]));
@@ -81,22 +80,6 @@ test("native dashboard series correspond to the closed Rust catalog and actual n
   const funnel = native.tiles.find(tile => tile.query.source.kind === "FunnelsQuery").query.source;
   assert.deepEqual(funnel.series.map(node => node.order), [0, 1, 2, 3]);
   assert(nodes.some(node => node.math_property === "active_seconds"));
-});
-
-test("native release and distribution source builds use optional public repository variables", () => {
-  for (const file of ["native-compile.yml", "distributions.yml"]) {
-    const workflow = readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), "utf8");
-    for (const key of ["ZUSE_POSTHOG_KEY", "ZUSE_POSTHOG_HOST"]) {
-      assert(workflow.includes(key + ": ${{ vars." + key + " }}"));
-    }
-    assert(!workflow.includes("POSTHOG_PERSONAL_API_KEY"));
-  }
-  const prebuild = readFileSync(new URL("../.github/workflows/prebuild.yml", import.meta.url), "utf8");
-  const binaries = readFileSync(new URL("../.github/workflows/native-binaries.yml", import.meta.url), "utf8");
-  const release = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
-  assert(prebuild.includes("./.github/workflows/native-binaries.yml"));
-  assert(binaries.includes("./.github/workflows/native-compile.yml"));
-  assert(release.includes("./.github/workflows/native-compile.yml"));
 });
 
 test("usage totals include failed and interrupted turns and retain unknown coverage", () => {

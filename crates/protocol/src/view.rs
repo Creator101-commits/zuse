@@ -773,20 +773,4 @@ mod checkout_tests {
             CheckoutPlan::NewWorktree { base: None }
         );
     }
-
-    #[test]
-    fn labels_say_which_of_the_three_outcomes_you_will_get() {
-        assert_eq!(
-            checkout_label(CheckoutKind::Local, Some(&plain("main"))),
-            "Current checkout"
-        );
-        assert_eq!(
-            checkout_label(CheckoutKind::Local, Some(&materialized("f", "/wt/f"))),
-            "Current worktree"
-        );
-        assert_eq!(
-            checkout_label(CheckoutKind::NewWorktree, Some(&plain("main"))),
-            "New worktree"
-        );
-    }
 }

@@ -47,7 +47,7 @@ impl Harness for RecordingTitles {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(futures::stream::iter(vec![
             Ok(AgentEvent::TextDelta {
-                text: "Generated Control Title".into(),
+                text: r#"{"title":"Generated Control Title","branch":""}"#.into(),
             }),
             Ok(AgentEvent::Done {
                 status: DoneStatus::Completed,
@@ -169,6 +169,11 @@ async fn seeded_parent_and_initial_session_skip_real_title_generator_with_positi
         recorder.0.load(Ordering::SeqCst),
         1,
         "only the intentionally untitled control may invoke the title harness"
+    );
+    assert_eq!(
+        title(&core, "control").as_deref(),
+        Some("Generated Control Title"),
+        "the control is named by the title harness, not the prompt fallback"
     );
     assert_eq!(
         title(&core, "parent").as_deref(),

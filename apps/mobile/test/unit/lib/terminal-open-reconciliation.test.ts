@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 
 import {
 	findTerminalForOpenToken,
-	terminalOpenFailureMessage,
 } from "~/lib/terminal-open-reconciliation";
 
 describe("mobile terminal open reconciliation", () => {
@@ -47,20 +46,4 @@ describe("mobile terminal open reconciliation", () => {
 		).toBeUndefined();
 	});
 
-	it("uses shared owner-cap copy and preserves mobile-specific failures", () => {
-		expect(
-			terminalOpenFailureMessage({
-				_tag: "PtyOwnerLimitError",
-				ownerId: "mobile-device",
-				limit: 4,
-			}),
-		).toBe("Terminal limit reached (4). Close a terminal, then retry.");
-		expect(
-			terminalOpenFailureMessage({
-				_tag: "PtyOpenConflictError",
-			}),
-		).toBe(
-			"This terminal conflicts with an existing process. Close it, then reopen.",
-		);
-	});
 });

@@ -25,5 +25,4 @@ fluent-syntax = "0.12"
 serde_json.workspace = true
 
 [dev-dependencies]
-sha2.workspace = true
 fluent-syntax = "0.12"

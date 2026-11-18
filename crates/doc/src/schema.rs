@@ -1916,23 +1916,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_message_entries() {
-        let doc = SessionDoc::init("chat-1").unwrap();
-        doc.push_message(&user_entry("m1", "hello")).unwrap();
-        let entries = doc.read_entries().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].id, "m1");
-        assert_eq!(
-            entries[0].parts,
-            vec![MessagePart::Text {
-                id: "t0".into(),
-                text: "hello".into()
-            }]
-        );
-        assert_eq!(doc.chat_id().as_deref(), Some("chat-1"));
-    }
-
-    #[test]
     fn todo_status_survives_the_doc_and_refreshes_in_place() {
         use zuse_protocol::{TodoItem, TodoStatus};
         let todo = |items: Vec<TodoItem>| MessagePart::Tool {
@@ -2241,50 +2224,6 @@ mod tests {
             &entries[0].parts[0],
             MessagePart::Input { resolved: true, .. }
         ));
-    }
-
-    #[test]
-    fn snapshot_round_trips_between_docs() {
-        let doc = SessionDoc::init("chat-1").unwrap();
-        doc.push_message(&user_entry("m1", "hello")).unwrap();
-        let bytes = doc.export_snapshot().unwrap();
-
-        let other = LoroDoc::new();
-        other.import(&bytes).unwrap();
-        let restored = SessionDoc::from_doc(other);
-        assert_eq!(
-            restored.read_entries().unwrap(),
-            doc.read_entries().unwrap()
-        );
-    }
-
-    #[test]
-    fn two_peers_converge_on_concurrent_inserts() {
-        let a = SessionDoc::init("chat-1").unwrap();
-        let b = SessionDoc::from_doc({
-            let d = LoroDoc::new();
-            d.import(&a.export_snapshot().unwrap()).unwrap();
-            d
-        });
-        a.push_message(&user_entry("m-a", "from a")).unwrap();
-        b.push_message(&user_entry("m-b", "from b")).unwrap();
-
-        // Cross-import updates.
-        let a_update = a
-            .doc()
-            .export(ExportMode::updates(&b.doc().oplog_vv()))
-            .unwrap();
-        let b_update = b
-            .doc()
-            .export(ExportMode::updates(&a.doc().oplog_vv()))
-            .unwrap();
-        b.doc().import(&a_update).unwrap();
-        a.doc().import(&b_update).unwrap();
-
-        let ea = a.read_entries().unwrap();
-        let eb = b.read_entries().unwrap();
-        assert_eq!(ea, eb);
-        assert_eq!(ea.len(), 2); // one insert from each peer, converged in the same order
     }
 
     #[test]

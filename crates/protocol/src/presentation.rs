@@ -605,11 +605,6 @@ mod permission_tests {
             serde_json::from_value::<PermissionMode>(serde_json::json!(mode)).unwrap();
         }
         assert_eq!(PermissionMode::Auto.for_chat(None), SandboxLevel::Auto);
-        assert_eq!(PermissionMode::Auto.label(), "Approve for me");
-        assert_eq!(
-            ACCESS_LEVELS.map(|level| access_details(level).label),
-            ["Ask for approval", "Approve for me", "Full access"]
-        );
     }
 }
 

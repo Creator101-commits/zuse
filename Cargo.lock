@@ -15062,7 +15062,6 @@ dependencies = [
  "icu_provider",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "sys-locale",
  "unic-langid",
  "writeable",

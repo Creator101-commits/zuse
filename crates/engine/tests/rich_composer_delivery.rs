@@ -377,8 +377,19 @@ async fn rich_selections_are_converted_once_on_startup_retry_for_every_harness()
 async fn queue_edits_preserve_reselected_skills_until_delivery_for_every_harness() {
     for id in HARNESSES {
         let (_tmp, core, _harness, mut rx) = setup(id).await;
+        // Open the turn where the chat lives, as the composer would: a queued
+        // send runs in the chat row's cwd, and the provider session is only
+        // resumed from the same directory.
+        let mut opening = request("opening");
+        opening.cwd = core
+            .workspace
+            .chat(CHAT)
+            .unwrap()
+            .unwrap()
+            .cwd
+            .expect("projectless chat has a scratch cwd");
         core.sessions
-            .dispatch(CHAT, id, request("opening"), None)
+            .dispatch(CHAT, id, opening, None)
             .await
             .unwrap();
         let Delivery::Run(_) = receive(&mut rx).await else {
@@ -425,6 +436,11 @@ async fn queue_edits_preserve_reselected_skills_until_delivery_for_every_harness
         let Delivery::Run(run) = receive(&mut rx).await else {
             panic!("send now replaces run")
         };
+        assert_eq!(
+            run.resume.as_deref(),
+            Some("rich-session"),
+            "{id:?}: send now continues the provider session"
+        );
         assert_delivered(&run.prompt, &edited, &readable, id);
         assert_persisted(&core, &edited, 2);
         core.shutdown().await;

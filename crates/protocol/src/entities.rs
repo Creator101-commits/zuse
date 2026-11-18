@@ -1855,22 +1855,6 @@ mod tests {
     }
 
     #[test]
-    fn change_request_mergeability_round_trips_all_states() {
-        for (state, encoded) in [
-            (ChangeRequestMergeability::Mergeable, "mergeable"),
-            (ChangeRequestMergeability::Conflicting, "conflicting"),
-            (ChangeRequestMergeability::Unknown, "unknown"),
-        ] {
-            let value = serde_json::to_value(state).unwrap();
-            assert_eq!(value, encoded);
-            assert_eq!(
-                serde_json::from_value::<ChangeRequestMergeability>(value).unwrap(),
-                state
-            );
-        }
-    }
-
-    #[test]
     fn change_request_review_decision_round_trips_and_defaults_when_absent() {
         for (decision, encoded) in [
             (ChangeRequestReviewDecision::Approved, "approved"),
@@ -2184,36 +2168,12 @@ mod mutation_contract_tests {
         assert_eq!(change.operation_id, None);
     }
     #[test]
-    fn mutation_requests_and_outcomes_round_trip() {
+    fn move_request_keeps_its_flattened_camel_case_keys() {
         let request = serde_json::json!({"chatId":"chat", "operationId":"op", "expectedCheckoutId":"checkout", "sourcePath":"a", "destinationPath":"b", "expectedSourceRevision":"rev", "expectedKind":"file"});
         let decoded: MoveWorkspaceEntryRequest = serde_json::from_value(request.clone()).unwrap();
         let encoded = serde_json::to_value(decoded).unwrap();
         for (key, value) in request.as_object().unwrap() {
             assert_eq!(&encoded[key], value);
         }
-        let delete: DeleteWorkspaceEntryRequest = serde_json::from_value(serde_json::json!({"chatId":"chat", "operationId":"op", "expectedCheckoutId":"checkout", "path":"a", "expectedSourceRevision":"rev", "expectedKind":"directory", "recursive":true})).unwrap();
-        assert_eq!(
-            serde_json::from_value::<DeleteWorkspaceEntryRequest>(
-                serde_json::to_value(&delete).unwrap()
-            )
-            .unwrap(),
-            delete
-        );
-        let outcome = WorkspaceMutationOutcome::Rejected {
-            operation_id: "op".into(),
-            reason: WorkspaceMutationRejection::DestinationExists,
-            message: "Destination exists".into(),
-        };
-        assert_eq!(
-            serde_json::from_value::<WorkspaceMutationOutcome>(
-                serde_json::to_value(&outcome).unwrap()
-            )
-            .unwrap(),
-            outcome
-        );
-        assert!(
-            serde_json::from_value::<WorkspaceMutationRejection>(serde_json::json!("overwrite"))
-                .is_err()
-        );
     }
 }

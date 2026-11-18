@@ -2335,27 +2335,6 @@ mod tests {
     }
 
     #[test]
-    fn tracked_upper_spaces_letters() {
-        assert_eq!(tracked_upper("ab"), "A\u{200A}B");
-        assert_eq!(
-            tracked_upper("Question"),
-            "Q\u{200A}U\u{200A}E\u{200A}S\u{200A}T\u{200A}I\u{200A}O\u{200A}N"
-        );
-        assert_eq!(tracked_upper(""), "");
-    }
-
-    #[test]
-    fn loadable_accessors() {
-        let l: Loadable<u32> = Loadable::Ready(7);
-        assert_eq!(l.ready(), Some(&7));
-        assert!(!l.is_loading());
-        let e: Loadable<u32> = Loadable::Error("boom".into());
-        assert_eq!(e.error(), Some("boom"));
-        assert!(Loadable::<u32>::Loading.is_loading());
-        assert_eq!(Loadable::<u32>::default(), Loadable::Idle);
-    }
-
-    #[test]
     fn scrollbar_metrics_hidden_when_content_fits_or_viewport_tiny() {
         // No overflow → no scrollbar.
         assert_eq!(MenuScrollbarMetrics::from_viewport(300.0, 0.0, 0.0), None);

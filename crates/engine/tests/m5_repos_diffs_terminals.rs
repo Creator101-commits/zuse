@@ -392,7 +392,7 @@ async fn repository_identity_spans_worktrees_and_clones() {
     .await;
     assert_eq!(
         repos.repository_identity(&shallow).await.unwrap(),
-        "github.com/opcodehq/zuse"
+        "github.com/zusesh/zuse"
     );
 
     // No commits yet: the remote (origin, else the first), then a
@@ -1195,13 +1195,20 @@ async fn git_status_stream_is_scoped_deduplicated_and_resets_after_commit() {
 
     // Content changed, but neither Git status column changed: no metadata frame.
     let mut diffs = core.diff_sync.watch_diffs();
-    let old = diffs
-        .borrow_and_update()
-        .iter()
-        .find(|d| d.checkout_id == first.checkout_id)
-        .unwrap()
-        .checksum
-        .clone();
+    // File badges publish before the patch is generated, so the first status
+    // frame can arrive before the checkout's diff does.
+    let old = tokio::time::timeout(
+        Duration::from_secs(15),
+        diffs.wait_for(|diffs| diffs.iter().any(|d| d.checkout_id == first.checkout_id)),
+    )
+    .await
+    .expect("diff before timeout")
+    .unwrap()
+    .iter()
+    .find(|d| d.checkout_id == first.checkout_id)
+    .unwrap()
+    .checksum
+    .clone();
     std::fs::write(root.join("a.txt"), "another edit\n").unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {

@@ -215,7 +215,7 @@ fn assemble(profile: &EngineProfile, live: bool) -> EngineCore {
     } else {
         CodexHarness::new().with_executable(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../harness/tests/fixtures/fake-codex.sh"),
+                .join("../providers/tests/fixtures/fake-codex.sh"),
         )
     };
     let registry = Arc::new(HarnessRegistry::new());

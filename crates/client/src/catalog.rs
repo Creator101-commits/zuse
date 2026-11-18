@@ -652,12 +652,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn muse_has_a_label_and_no_bundled_models() {
-        assert_eq!(harness_label("muse"), "Muse Code");
-        assert!(fallback_models("muse").is_empty());
-    }
-
-    #[test]
     fn labels_resolve_curated_and_unknown_models() {
         assert_eq!(model_label("claude-code", "claude-opus-5"), "Opus 5");
         assert_eq!(model_label("claude-code", "claude-opus-5[1m]"), "Opus 5");

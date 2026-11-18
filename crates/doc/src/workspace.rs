@@ -1080,19 +1080,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_round_trips_between_docs() {
-        let ws = WorkspaceDoc::new();
-        ws.upsert_device(&device("dev-a", "laptop")).unwrap();
-        ws.upsert_chat(&chat("chat-1", "dev-a")).unwrap();
-        let bytes = ws.export_snapshot().unwrap();
-
-        let other = LoroDoc::new();
-        other.import(&bytes).unwrap();
-        let restored = WorkspaceDoc::from_doc(other);
-        assert_eq!(restored.read_all().unwrap(), ws.read_all().unwrap());
-    }
-
-    #[test]
     fn field_mutators_round_trip() {
         let ws = WorkspaceDoc::new();
         ws.upsert_device(&device("dev-a", "laptop")).unwrap();

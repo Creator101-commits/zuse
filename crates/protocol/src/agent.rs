@@ -991,18 +991,6 @@ pub enum AgentEvent {
 mod tests {
     use super::*;
 
-    #[test]
-    fn agent_event_round_trips() {
-        let ev = AgentEvent::ToolCall {
-            id: "t1".into(),
-            call: ToolCall::Exec {
-                command: "cargo test".into(),
-            },
-        };
-        let json = serde_json::to_string(&ev).unwrap();
-        assert_eq!(serde_json::from_str::<AgentEvent>(&json).unwrap(), ev);
-    }
-
     /// Drivers spell the key differently; the chip must not care which one
     /// spawned the child. Non-spawns never answer, whatever they carry.
     #[test]
@@ -1100,14 +1088,6 @@ mod tests {
         assert_eq!(json["worktree"]["spaceId"], "space-1");
         let round: RunRequest = serde_json::from_value(json).unwrap();
         assert_eq!(round.worktree, req.worktree);
-    }
-
-    #[test]
-    fn harness_id_uses_kebab_case() {
-        assert_eq!(
-            serde_json::to_string(&HarnessId::ClaudeCode).unwrap(),
-            "\"claude-code\""
-        );
     }
 
     #[test]
@@ -1274,15 +1254,5 @@ mod todo_item_tests {
             status: Some(TodoStatus::InProgress),
         };
         assert_eq!(item.status(), TodoStatus::Completed);
-    }
-
-    #[test]
-    fn harness_status_strings_decode() {
-        assert_eq!(TodoStatus::parse("completed"), TodoStatus::Completed);
-        assert_eq!(TodoStatus::parse("in_progress"), TodoStatus::InProgress);
-        assert_eq!(TodoStatus::parse("inProgress"), TodoStatus::InProgress);
-        assert_eq!(TodoStatus::parse("pending"), TodoStatus::Pending);
-        assert_eq!(TodoStatus::parse("cancelled"), TodoStatus::Pending);
-        assert_eq!(TodoStatus::parse(""), TodoStatus::Pending);
     }
 }

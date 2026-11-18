@@ -87,16 +87,6 @@ fn pinned_session_pointer_y(pointer_y: f32, viewport_top: f32, scroll_top: f32) 
         - SIDEBAR_DISCLOSURE_BODY_INSET
 }
 
-#[cfg(test)]
-pub(super) fn pinned_session_drop_index(rel_y: f32, count: usize) -> Option<usize> {
-    if count == 0 {
-        return None;
-    }
-    let height = count as f32 * super::SIDEBAR_SESSION_SLOT - super::SIDEBAR_LIST_GAP;
-    (rel_y >= 0.0 && rel_y <= height)
-        .then(|| ((rel_y / super::SIDEBAR_SESSION_SLOT).floor() as usize).min(count - 1))
-}
-
 /// Hit testing shares the exact row metrics used by layout, including mixed PR rows.
 pub(super) fn row_drop_index(y: f32, heights: &[f32], clamp: bool) -> Option<usize> {
     if heights.is_empty() {
@@ -115,18 +105,6 @@ pub(super) fn row_drop_index(y: f32, heights: &[f32], clamp: bool) -> Option<usi
         }
     }
     Some(heights.len() - 1)
-}
-
-/// Keep a sidebar-wide drag physically bounded to the pinned section. The
-/// strict drop helper above still identifies whether the pointer is actually
-/// inside the section; this helper supplies the nearest valid pinned slot
-/// while the pointer is over regular sessions.
-#[cfg(test)]
-pub(super) fn pinned_session_clamped_index(rel_y: f32, count: usize) -> Option<usize> {
-    if count == 0 {
-        return None;
-    }
-    Some(((rel_y.max(0.0) / super::SIDEBAR_SESSION_SLOT).floor() as usize).min(count - 1))
 }
 
 /// A drop can change pin membership or pinned order, never activity ordering.
@@ -209,8 +187,7 @@ mod pinned_session_tests {
     }
     use super::{
         pinned_drag_scroll_delta, pinned_drag_scroll_step, pinned_drag_snapshot_is_valid,
-        pinned_session_clamped_index, pinned_session_drop_index, project_pinned_first,
-        reorder_visible_pins, retain_known_pins,
+        project_pinned_first, reorder_visible_pins, retain_known_pins,
     };
     use std::collections::HashSet;
 
@@ -1216,7 +1193,6 @@ mod pinned_session_tests {
                 f32::from(bounds.size.height),
                 if open { 156.0 } else { 28.0 }
             );
-            assert!(cx.debug_bounds("sidebar-pinned-divider").is_none());
         }
     }
 
@@ -1920,18 +1896,6 @@ mod pinned_session_tests {
     }
 
     #[test]
-    fn pinned_drop_index_quantizes_clamps_and_rejects_outside() {
-        assert_eq!(pinned_session_drop_index(-1.0, 3), None);
-        assert_eq!(pinned_session_drop_index(0.0, 3), Some(0));
-        assert_eq!(
-            pinned_session_drop_index(super::super::SIDEBAR_SESSION_SLOT, 3),
-            Some(1)
-        );
-        assert_eq!(pinned_session_drop_index(500.0, 3), None);
-        assert_eq!(pinned_session_drop_index(0.0, 0), None);
-    }
-
-    #[test]
     fn pinned_drag_accounts_for_disclosure_header_and_scroll() {
         // The first row starts 36px below the scroll viewport: 4px list
         // padding, 28px header, and 4px body inset.
@@ -1941,28 +1905,23 @@ mod pinned_session_tests {
             super::pinned_session_pointer_y(row_top, viewport_top, 0.0),
             0.0
         );
+        let rows = [61.0; 3];
         assert_eq!(
-            pinned_session_drop_index(super::pinned_session_pointer_y(125.0, viewport_top, 0.0), 3),
+            super::row_drop_index(
+                super::pinned_session_pointer_y(125.0, viewport_top, 0.0),
+                &rows,
+                false
+            ),
             None,
         );
         assert_eq!(
-            pinned_session_drop_index(
+            super::row_drop_index(
                 super::pinned_session_pointer_y(row_top, viewport_top, 63.0),
-                3
+                &rows,
+                false
             ),
             Some(1),
         );
-    }
-
-    #[test]
-    fn sidebar_wide_pin_drag_clamps_to_the_nearest_pinned_slot() {
-        assert_eq!(pinned_session_clamped_index(-50.0, 3), Some(0));
-        assert_eq!(
-            pinned_session_clamped_index(super::super::SIDEBAR_SESSION_SLOT, 3),
-            Some(1)
-        );
-        assert_eq!(pinned_session_clamped_index(500.0, 3), Some(2));
-        assert_eq!(pinned_session_clamped_index(0.0, 0), None);
     }
 
     #[test]

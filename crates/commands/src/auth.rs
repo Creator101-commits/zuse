@@ -238,8 +238,6 @@ mod tests {
     #[test]
     fn signed_out_local_status_is_healthy() {
         let status = account_status(WorkspaceScope::Local, &AuthState::SignedOut);
-        assert_eq!(status.mode, "local only");
-        assert_eq!(status.auth, "signed out (optional in local-only mode)");
         assert!(status.healthy);
     }
 

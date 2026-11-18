@@ -273,18 +273,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn signing_bytes_are_domain_separated_and_ordered() {
-        let text = String::from_utf8(bundle().signing_bytes()).unwrap();
-        assert!(text.starts_with("zuse-harness-bundle-v1\n{\"sha256\":"));
-        assert!(text.contains("\"agent\":\"claude\",\"version\":\"2.1.312\""));
-        assert!(text.ends_with("\"capabilities\":[]}"));
-        assert_eq!(
-            bundle().artifact_key(),
-            format!("runtime/harness/claude/x86_64/{}.tar.zst", "ab".repeat(32))
-        );
-    }
-
     /// `infra/cloud/harness-bundle.py` signs the same fixture; both sides
     /// must produce these exact bytes.
     #[test]

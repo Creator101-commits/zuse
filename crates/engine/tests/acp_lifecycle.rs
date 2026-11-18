@@ -29,7 +29,7 @@ async fn quiet_acp_prompt_stays_working_until_response() {
     let dir = tempfile::tempdir().unwrap();
     let registry = HarnessRegistry::new();
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../harness/tests/fixtures/acp-lifecycle.py");
+        .join("../providers/tests/fixtures/acp-lifecycle.py");
     registry.register(Arc::new(AcpHarness::devin().with_executable(fixture)));
     let core =
         EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Devin, None).unwrap();

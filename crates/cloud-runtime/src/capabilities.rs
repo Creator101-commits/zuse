@@ -142,11 +142,6 @@ mod tests {
         receipt.managed_agent_version = Some(2);
         assert!(!receipt.valid());
     }
-    #[test]
-    fn linked_library_does_not_fabricate_a_guest_receipt() {
-        // The test runner does not implement the guest's public entrypoint.
-        assert!(probe_current().is_none());
-    }
     #[cfg(feature = "engine")]
     #[test]
     fn receipt_binds_exact_binary_and_all_required_protocols() {

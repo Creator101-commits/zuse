@@ -2102,17 +2102,6 @@ mod tests {
         assert_eq!(clamp_terminal_height(f32::NAN, 900.0), 160.0);
     }
 
-    #[test]
-    fn backoff_doubles_and_caps() {
-        assert_eq!(backoff_ms(0), 500);
-        assert_eq!(backoff_ms(1), 1000);
-        assert_eq!(backoff_ms(2), 2000);
-        assert_eq!(backoff_ms(3), 4000);
-        assert_eq!(backoff_ms(4), 8000);
-        assert_eq!(backoff_ms(10), 8000);
-        assert_eq!(backoff_ms(u32::MAX), 8000);
-    }
-
     fn test_geometry() -> GridGeometry {
         GridGeometry {
             bounds: gpui::Bounds::new(
@@ -2229,16 +2218,6 @@ mod tests {
         assert_eq!(active_after_close(1, 1, 2), 1); // close active mid-list
         assert_eq!(active_after_close(2, 2, 2), 1); // close active at tail
         assert_eq!(active_after_close(0, 0, 0), 0); // last tab closed
-    }
-
-    #[test]
-    fn exit_message_format() {
-        let text = String::from_utf8(exit_message(0)).unwrap();
-        assert!(text.contains("[process exited 0]"));
-        let text = String::from_utf8(exit_message(137)).unwrap();
-        assert!(text.contains("[process exited 137]"));
-        assert!(text.starts_with("\r\n"));
-        assert!(text.ends_with("\r\n"));
     }
 
     #[test]

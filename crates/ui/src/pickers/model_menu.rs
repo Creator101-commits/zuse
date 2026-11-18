@@ -340,7 +340,7 @@ impl Pickers {
             }
         }
     }
-    fn scope_model_menu(&mut self, scope: Option<HarnessId>, cx: &mut Context<Self>) {
+    pub(super) fn scope_model_menu(&mut self, scope: Option<HarnessId>, cx: &mut Context<Self>) {
         self.model_scope = scope;
         self.model_rail = if scope.is_none() {
             ModelRail::Favorites

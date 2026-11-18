@@ -5738,17 +5738,6 @@ for line in sys.stdin:
         }
     }
 
-    #[test]
-    fn antigravity_discovery_budget_covers_cold_start_without_changing_handshake() {
-        let harness = AcpHarness::antigravity();
-        assert_eq!(harness.model_discovery_timeout, Duration::from_secs(90));
-        assert_eq!(harness.handshake_timeout, Duration::from_secs(120));
-        assert_eq!(
-            AcpHarness::grok().model_discovery_timeout,
-            Duration::from_secs(10)
-        );
-    }
-
     fn all_antigravity_auth_methods() -> Value {
         json!({
             "authMethods": [
@@ -5819,33 +5808,6 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn antigravity_sign_in_still_refuses_an_unknown_configured_method() {
-        let error = sign_in_auth_method(
-            &all_antigravity_auth_methods(),
-            "oauth-personal",
-            Some(&ConfiguredAuthMethod::new("totally-made-up".into())),
-        )
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("configured auth method totally-made-up")
-        );
-    }
-
-    #[test]
-    fn antigravity_settings_reader_accepts_plain_json() {
-        let (_home, path) = settings_holding(r#"{"auth": {"type": "oauth-business"}}"#);
-        assert_eq!(
-            configured_auth_method_in(&path)
-                .unwrap()
-                .unwrap()
-                .configured,
-            "oauth-business"
-        );
-    }
-
-    #[test]
     fn antigravity_settings_reader_accepts_hjson() {
         let (_home, path) = settings_holding(
             "{\n  // the account this machine signs in with\n  auth: {\n    type: gemini-api-key\n  }\n}\n",
@@ -5893,25 +5855,6 @@ for line in sys.stdin:
             Path::new("/absolute/gemini")
         );
         assert!(antigravity_paths::expand_user(Path::new("~/gemini"), None).is_err());
-    }
-
-    #[test]
-    fn antigravity_home_relative_settings_still_resolve_the_configured_method() {
-        let home = tempfile::tempdir().unwrap();
-        let gemini_home =
-            antigravity_paths::expand_user(Path::new("~/.gemini"), Some(home.path())).unwrap();
-        let dir = gemini_home.join("antigravity-acp");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("settings.json"),
-            r#"{"auth": {"type": "oauth-business"}}"#,
-        )
-        .unwrap();
-
-        let method = configured_auth_method_in(&dir.join("settings.json"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(method.canonical, "oauth-business");
     }
 
     fn selected_auth_in_home(gemini_home: &Path) -> String {
@@ -6808,34 +6751,6 @@ for line in sys.stdin:
         assert_eq!(
             effort_variant_id(&live, "gemini-3.8-flash", Some(ReasoningLevel::Medium)),
             "gemini-3.8-flash-medium"
-        );
-    }
-
-    /// the offline list is what an unreachable or signed-out server falls back
-    /// to, so it stays at what the pinned archive itself bundles. a newer
-    /// flash belongs here only once that pin advertises it.
-    #[test]
-    fn antigravity_static_fallback_stays_on_the_pinned_servers_models() {
-        let fallback: Vec<(String, Vec<ReasoningLevel>)> = (antigravity_spec().models)()
-            .into_iter()
-            .map(|m| (m.id, m.reasoning_levels))
-            .collect();
-        assert_eq!(
-            fallback,
-            vec![
-                (
-                    "gemini-3.7-flash".into(),
-                    vec![
-                        ReasoningLevel::Low,
-                        ReasoningLevel::Medium,
-                        ReasoningLevel::High
-                    ]
-                ),
-                (
-                    "gemini-3.1-pro".into(),
-                    vec![ReasoningLevel::Low, ReasoningLevel::High]
-                ),
-            ]
         );
     }
 

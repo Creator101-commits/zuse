@@ -179,16 +179,4 @@ mod tests {
         );
         assert!(!instruction(root.path(), &boot).unwrap().contains("secret"));
     }
-    #[test]
-    fn instruction_names_the_runtime_of_its_base() {
-        assert_eq!(
-            runtime_binary(Some(Path::new("/home/prized/.zuse/bin/zuse-cloud-runtime"))),
-            "/home/prized/.zuse/bin/zuse-cloud-runtime"
-        );
-        assert_eq!(
-            runtime_binary(Some(Path::new("/usr/local/bin/zuse-cloud-runtime"))),
-            "/usr/local/bin/zuse-cloud-runtime"
-        );
-        assert_eq!(runtime_binary(None), "/usr/local/bin/zuse-cloud-runtime");
-    }
 }

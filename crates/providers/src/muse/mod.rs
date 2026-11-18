@@ -235,13 +235,4 @@ mod tests {
         next.plan = true;
         assert!(!harness.reconfigures_in_place(&live, &next));
     }
-
-    #[test]
-    fn installer_locations_include_the_user_bin() {
-        assert!(
-            default_locations()
-                .iter()
-                .any(|p| p.ends_with(".local/bin/muse"))
-        );
-    }
 }

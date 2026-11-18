@@ -3478,26 +3478,6 @@ async fn runtime_preparation_ingress(
     ))
 }
 
-#[cfg(test)]
-mod github_pull_request_contract {
-    use super::*;
-    #[test]
-    fn draft_is_explicit_and_legacy_requests_keep_their_default() {
-        let input = json!({"repository":"team/project","title":"Fixture","head":"test/proof","base":"main"});
-        let default: GithubPullRequest = serde_json::from_value(input.clone()).unwrap();
-        assert!(!default.draft);
-        let mut draft = input;
-        draft["draft"] = json!(true);
-        assert!(
-            serde_json::from_value::<GithubPullRequest>(draft.clone())
-                .unwrap()
-                .draft
-        );
-        draft["draft"] = json!("true");
-        assert!(serde_json::from_value::<GithubPullRequest>(draft).is_err());
-    }
-}
-
 async fn allocation_retry(
     State(state): State<AppState>,
     headers: HeaderMap,

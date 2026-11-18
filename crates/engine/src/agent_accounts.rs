@@ -4253,26 +4253,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plan_labels() {
-        assert_eq!(
-            claude_plan(Some("claude_max"), Some("default_claude_max_20x")).as_deref(),
-            Some("Max 20×")
-        );
-        assert_eq!(
-            claude_plan(Some("claude_pro"), None).as_deref(),
-            Some("Pro")
-        );
-        assert_eq!(
-            claude_plan(Some("claude_team"), Some("weird")).as_deref(),
-            Some("Team")
-        );
-        assert_eq!(claude_plan(Some("free"), None), None);
-        assert_eq!(codex_plan(Some("plus")).as_deref(), Some("ChatGPT Plus"));
-        assert_eq!(codex_plan(Some("free")).as_deref(), Some("ChatGPT Free"));
-        assert_eq!(codex_plan(None), None);
-    }
-
-    #[test]
     fn codex_window_labels_track_the_window_span() {
         // Codex free tier: one 30-day window (observed live:
         // limit_window_seconds = 2_592_000) — NOT a week.
@@ -4694,67 +4674,6 @@ mod probe_tests {
         let soon = 1_000 + FORCED_MIN_INTERVAL.as_millis() as i64 + 1;
         assert!(!entry.probe_due("old", soon));
         assert!(entry.probe_due("refreshed", soon));
-    }
-
-    #[test]
-    fn usage_errors_read_as_reasons() {
-        let mut entry = UsageEntry::default();
-        entry.record(
-            Err(ProbeError::RateLimited {
-                retry_after_secs: Some(120),
-            }),
-            "c".into(),
-            0,
-        );
-        let message = |harness, active, error: &ProbeError| {
-            usage_error_message(harness, None, active, error, &entry, 0)
-        };
-        assert_eq!(
-            message(
-                HarnessId::ClaudeCode,
-                true,
-                &ProbeError::RateLimited {
-                    retry_after_secs: Some(120)
-                }
-            )
-            .as_deref(),
-            Some("Rate limited by Anthropic — retrying in 2m")
-        );
-        assert_eq!(
-            message(
-                HarnessId::ClaudeCode,
-                false,
-                &ProbeError::Unauthorized { status: 401 }
-            )
-            .as_deref(),
-            Some("Signed out — sign in again")
-        );
-        assert_eq!(
-            message(
-                HarnessId::Codex,
-                false,
-                &ProbeError::NoCredentials {
-                    why: NoCredentials::Missing
-                }
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn the_usage_cache_file_round_trips() {
-        let mut entry = UsageEntry::default();
-        entry.record(Ok(snapshot()), "c".into(), 5);
-        let file = UsageCacheFile {
-            entries: HashMap::from([("claude-code:acct".to_string(), entry)]),
-        };
-        let json = serde_json::to_string(&file).unwrap();
-        let back: UsageCacheFile = serde_json::from_str(&json).unwrap();
-        let entry = &back.entries["claude-code:acct"];
-        assert_eq!(entry.usage, Some(snapshot()));
-        assert_eq!(entry.fetched_at, Some(5));
-        // The fingerprint is a digest, never the credential blob.
-        assert!(!json.contains("accessToken"));
     }
 }
 

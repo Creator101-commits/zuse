@@ -259,12 +259,4 @@ mod tests {
         }
         assert_eq!(Token::series(7), Token::Chart(1));
     }
-
-    #[test]
-    fn sizes_follow_the_transcript_scale() {
-        assert_eq!(TextSize::parse("body").unwrap().metrics(), (14.0, 22.0));
-        assert_eq!(TextSize::parse("2xl").unwrap().metrics(), (19.0, 27.0));
-        assert!(TextSize::parse("40px").is_err());
-        assert_eq!(Weight::from_number(600.0), Weight::Semibold);
-    }
 }

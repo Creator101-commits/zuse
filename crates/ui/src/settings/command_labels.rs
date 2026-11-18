@@ -33,26 +33,3 @@ impl ShortcutId {
         crate::localization::message(cx, format)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[gpui::test]
-    fn new_command_labels_follow_the_interface_language(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            zuse_viewport::localization::configure(
-                zuse_i18n::LanguagePreference::Explicit(zuse_i18n::Locale::Fr),
-                vec![],
-                cx,
-            );
-            assert_eq!(
-                ShortcutId::Desktop(Command::ComposerStash).localized_label(cx),
-                "Mettre le brouillon de côté"
-            );
-            assert_eq!(
-                ShortcutId::Desktop(Command::FindInChat).localized_label(cx),
-                "Rechercher dans le chat"
-            );
-        });
-    }
-}

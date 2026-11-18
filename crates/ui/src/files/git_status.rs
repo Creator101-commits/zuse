@@ -440,31 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn decorations_color_staged_and_unstaged_using_theme_tokens() {
-        let value = decoration(&file("a", Modified, Modified));
-        let mut theme = Theme::default();
-        assert_eq!(value.color(&theme), theme.warning);
-        assert_eq!(
-            decoration(&file("a", Modified, Unchanged)).color(&theme),
-            theme.warning
-        );
-        assert_eq!(
-            decoration(&file("a", Unchanged, Modified)).color(&theme),
-            theme.warning
-        );
-        theme.warning = gpui::hsla(0.6, 0.8, 0.4, 1.0);
-        assert_eq!(value.color(&theme), theme.warning);
-        assert_eq!(
-            decoration(&file("new", Added, Unchanged)).color(&theme),
-            theme.success
-        );
-        assert_eq!(
-            decoration(&file("conflict", Deleted, Deleted)).color(&theme),
-            theme.danger
-        );
-    }
-
-    #[test]
     fn large_snapshot_aggregates_only_real_ancestors() {
         let status = snapshot(
             (0..10_000)

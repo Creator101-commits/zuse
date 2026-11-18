@@ -13,7 +13,7 @@ use zuse_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
 };
-use zuse_engine::{EngineCore, EngineRpc, HarnessRegistry, RunJournal};
+use zuse_engine::{EngineCore, HarnessRegistry, RunJournal};
 use zuse_protocol::{
     AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     SessionStatus, SteeringMode, ToolCall,
@@ -581,12 +581,24 @@ async fn queued_run_command_executes_end_to_end() {
     // User entry carries the command's client-minted message id.
     assert_eq!(all[0].id, "msg-user-1");
     assert_eq!(all[0].role, MessageRole::User);
+    // ... and is stamped with the agent that actually ran it (the mock
+    // harness, no model pinned), with no previous agent on a first turn.
     assert_eq!(
         all[0].parts,
-        vec![MessagePart::Text {
-            id: "t0".into(),
-            text: "do the thing".into()
-        }]
+        vec![
+            MessagePart::Text {
+                id: "t0".into(),
+                text: "do the thing".into()
+            },
+            MessagePart::AgentContext {
+                id: "agent-context".into(),
+                agent: zuse_model::AgentIdentity {
+                    harness: HarnessId::Mock,
+                    model: None,
+                },
+                previous_agent: None,
+            },
+        ]
     );
     // Assistant entry: folded parts — merged text, then the resolved tool call with the
     // render-parts privacy policy applied (WriteFile content stripped).
@@ -1909,7 +1921,15 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
             controls: RunControls,
         ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
-            if request.prompt == "second run" {
+            // The interrupted run never reported a provider session, so the
+            // next turn starts a fresh one and the engine puts the prior
+            // transcript in front of the user's text.
+            if request.prompt.ends_with("second run") {
+                assert!(
+                    request.prompt.contains("ask and block"),
+                    "fresh session after the abort must carry the earlier turn: {}",
+                    request.prompt
+                );
                 // The post-interrupt turn: completes immediately.
                 tokio::spawn(async move {
                     let _ = tx

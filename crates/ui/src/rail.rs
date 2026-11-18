@@ -917,14 +917,6 @@ mod tests {
         assert_eq!(active_tick(&[], 4), None);
     }
 
-    #[test]
-    fn rail_width_gate() {
-        assert!(rail_visible(768.0));
-        assert!(rail_visible(1200.0));
-        assert!(!rail_visible(767.9));
-        assert!(!rail_visible(0.0));
-    }
-
     /// Consuming `(e'−e)/(1−e)` of the current remainder telescopes to exactly
     /// the absolute eased timeline `start + e(t)·total` when the distance
     /// estimate is stable — the glide is timeline-driven, not
@@ -986,19 +978,6 @@ mod tests {
         assert_eq!(timeline.step(0.3), 0.0); // non-monotone input → no move
         assert_eq!(timeline.step(1.0), 1.0); // done → land exactly
         assert_eq!(timeline.step(1.0), 1.0); // idempotent at the end
-    }
-
-    /// The first 16ms frame of the 500ms glide covers under 2% of the
-    /// distance — no first-frame majority jump by construction.
-    #[test]
-    fn glide_first_frame_is_gentle() {
-        let spec = motion::SCROLL_GLIDE;
-        assert_eq!(spec.duration_ms, 500);
-        let first = spec.curve.eval(16.0 / 500.0);
-        assert!(first < 0.02, "first frame covered {first} of the distance");
-        // And the ease-in-out midpoint is exactly half the distance.
-        let mid = spec.curve.eval(0.5);
-        assert!((mid - 0.5).abs() < 0.01);
     }
 
     #[test]

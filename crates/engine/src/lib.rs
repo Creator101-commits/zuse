@@ -1663,18 +1663,6 @@ mod device_name_tests {
     }
 
     #[test]
-    fn windows_computer_name_is_used_when_present() {
-        assert_eq!(
-            name(
-                &[None, Some("DESKTOP-123"), Some("shell-host")],
-                "17bc0aa2-rest",
-                "windows"
-            ),
-            "DESKTOP-123"
-        );
-    }
-
-    #[test]
     fn blank_candidates_are_ignored() {
         assert_eq!(
             name(

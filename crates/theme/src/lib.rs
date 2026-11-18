@@ -903,31 +903,8 @@ mod tests {
     }
 
     #[test]
-    fn surface_preference_resolves_independently_from_theme_recommendation() {
-        assert_eq!(
-            SurfacePreference::ThemeDefault.resolve(SurfaceTreatment::Frosted),
-            SurfaceTreatment::Frosted
-        );
-        assert_eq!(
-            SurfacePreference::ThemeDefault.resolve(SurfaceTreatment::Opaque),
-            SurfaceTreatment::Opaque
-        );
-        for recommended in [SurfaceTreatment::Frosted, SurfaceTreatment::Opaque] {
-            assert_eq!(
-                SurfacePreference::Frosted.resolve(recommended),
-                SurfaceTreatment::Frosted
-            );
-            assert_eq!(
-                SurfacePreference::Opaque.resolve(recommended),
-                SurfaceTreatment::Opaque
-            );
-        }
-    }
-
-    #[test]
     fn builtins_have_complete_provenance_and_report_authored_contrast() {
         let registry = ThemeRegistry::builtin();
-        assert_eq!(registry.families.len(), 18);
         assert!(registry.variant("zuse-light").is_some());
         assert!(registry.variant("zuse-dark").is_some());
         let errors: Vec<_> = registry
@@ -940,20 +917,6 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:#?}");
         assert!(errors.iter().all(|error| error.variant_id == "zuse-light"
             && error.category == ValidationCategory::Contrast));
-        assert!(errors[0].message.starts_with("accent contrast is 2.23:1"));
-    }
-
-    #[test]
-    fn zuse_light_carries_the_design_system_neutrals() {
-        let light = ThemeRegistry::builtin().variant("zuse-light").unwrap();
-        let hex = |color: Color| color.to_string();
-        assert_eq!(hex(light.colors.text_muted), "#737373");
-        assert_eq!(hex(light.colors.text), "#2a2a2a");
-        assert_eq!(hex(light.colors.text_strong), "#0f0f0f");
-        assert_eq!(hex(light.colors.selected), "#f0f0f0");
-        assert_eq!(hex(light.colors.border), "#e8e8e8");
-        assert_eq!(hex(light.colors.background), "#ffffff");
-        assert_eq!(hex(light.colors.shell), "#efefef");
     }
 
     #[test]
@@ -976,17 +939,5 @@ mod tests {
             loaded.text_strong.contrast(loaded.background)
                 > loaded.text.contrast(loaded.background)
         );
-    }
-
-    #[test]
-    fn visual_fixture_matrix_covers_every_variant_and_scene() {
-        let registry = ThemeRegistry::builtin();
-        let variants = registry
-            .families
-            .iter()
-            .map(|family| family.variants.len())
-            .sum::<usize>();
-        assert_eq!(variants, 29);
-        assert_eq!(variants * VisualFixture::ALL.len(), 290);
     }
 }

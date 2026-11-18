@@ -384,7 +384,15 @@ fn assert_public_change_request_payload(item: &serde_json::Value) {
     assert_eq!(
         summary_keys,
         [
-            "baseRef", "headRef", "number", "provider", "state", "title", "url"
+            "baseRef",
+            "headRef",
+            "isDraft",
+            "number",
+            "provider",
+            "reviewDecision",
+            "state",
+            "title",
+            "url",
         ]
     );
     let payload = item.to_string();
@@ -1665,6 +1673,13 @@ async fn workspace_file_surface_proxies_over_the_relay() {
         .expect("baseline timeout")
         .expect("watch alive");
     assert_eq!(baseline["resyncRequired"], true);
+    // B's shared watcher installs its OS watch on a background pass, then
+    // asks subscribers to resync; edits before that frame are not reported.
+    let live = tokio::time::timeout(Duration::from_secs(5), stream.recv())
+        .await
+        .expect("remote watch went live before timeout")
+        .expect("watch alive");
+    assert_eq!(live["resyncRequired"], true, "{live}");
     std::fs::write(repo_b.join("remote-created.txt"), "created\n").expect("external write on B");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {

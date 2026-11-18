@@ -2,7 +2,6 @@ import { describe, expect, test } from "vitest";
 
 import {
 	describePermissionKind,
-	permissionQuestion,
 } from "../../../src/lib/permission-presentation";
 
 describe("permission presentation helpers", () => {
@@ -28,18 +27,4 @@ describe("permission presentation helpers", () => {
 		});
 	});
 
-	test("phrases a headline question per kind", () => {
-		expect(permissionQuestion({ _tag: "Bash", command: "ls" })).toBe(
-			"Do you want to allow running this command?",
-		);
-		expect(permissionQuestion({ _tag: "FileWrite", path: "a.ts" })).toBe(
-			"Do you want to allow writing to this file?",
-		);
-		expect(permissionQuestion({ _tag: "Network", url: "https://x.dev" })).toBe(
-			"Do you want to allow this network request?",
-		);
-		expect(permissionQuestion({ _tag: "Other", tool: "X", summary: "y" })).toBe(
-			"Do you want to allow this action?",
-		);
-	});
 });

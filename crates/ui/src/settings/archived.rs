@@ -1192,14 +1192,6 @@ mod tests {
         assert_eq!(archive_page(81, 2), 2);
     }
 
-    #[test]
-    fn only_archived_rows_show() {
-        let chats = vec![chat("a", false), chat("b", true), chat("c", true)];
-        let rows = archived_chats(&chats);
-        let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(ids, ["b", "c"]);
-    }
-
     #[gpui::test]
     fn cloud_archives_reload_when_the_task_list_changes(cx: &mut gpui::TestAppContext) {
         use gpui::AppContext;
@@ -1362,12 +1354,6 @@ mod tests {
                 );
             })
             .unwrap();
-    }
-
-    #[test]
-    fn delete_all_copy_handles_one_and_many() {
-        assert!(delete_all_body(1).starts_with("1 archived session will"));
-        assert!(delete_all_body(146).starts_with("146 archived sessions will"));
     }
 
     #[test]

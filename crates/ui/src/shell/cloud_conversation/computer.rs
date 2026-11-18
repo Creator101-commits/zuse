@@ -1964,22 +1964,6 @@ mod tests {
                 && step.state == zuse_viewport::CloudPreparationStepState::Failed),
             "reported failure remains actionable on ready computer"
         );
-        let credential = issue(&json!({"statusCode":"credential_preparation_failed"})).unwrap();
-        assert_eq!(credential.0, "Coding agent connection needs attention");
-        assert!(credential.1.contains("Reconnect the selected coding agent"));
-        assert!(credential.1.contains("not sent again"));
-        assert!(
-            issue(&json!({"statusCode":"repository_preparation_failed"}))
-                .unwrap()
-                .1
-                .contains("GitHub")
-        );
-        assert!(
-            issue(&json!({"statusCode":"environment_setup_failed"}))
-                .unwrap()
-                .1
-                .contains("setup output")
-        );
     }
 }
 

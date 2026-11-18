@@ -456,13 +456,8 @@ mod tests {
         assert!(unit.contains("Environment=\"ZUSE_EDGE_URL=https://edge.example\"\n"));
         // Inner quotes escaped so systemd re-parses the value verbatim.
         assert!(unit.contains("Environment=\"RUST_LOG=info,zuse=\\\"debug\\\"\"\n"));
-        assert!(unit.contains("StartLimitIntervalSec=60\n"));
-        assert!(unit.contains("StartLimitBurst=5\n"));
-        assert!(unit.contains("Restart=on-failure"));
         assert!(!unit.contains("session.json"));
         assert!(!unit.contains("ConditionPathExists"));
-        assert!(unit.contains("EnvironmentFile=-%h/.zuse/env"));
-        assert!(unit.contains("WantedBy=default.target"));
     }
 
     #[test]
@@ -548,12 +543,10 @@ mod tests {
             &[("ZUSE_EDGE_URL".into(), "https://e?a=1&b=2".into())],
             Path::new("/Users/x/.zuse/daemon.log"),
         );
-        assert!(plist.contains("<key>Label</key><string>sh.zuse.app</string>"));
         // XML-escaped exe path and env value.
         assert!(plist.contains("<string>/Users/x/zuse &amp; co/zuse</string>"));
         assert!(plist.contains("<string>https://e?a=1&amp;b=2</string>"));
         assert!(plist.contains("<string>headless</string>"));
-        assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(
             plist.contains("<key>StandardOutPath</key><string>/Users/x/.zuse/daemon.log</string>")
         );

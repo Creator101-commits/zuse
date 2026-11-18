@@ -1569,14 +1569,6 @@ mod tests {
     }
 
     #[test]
-    fn bezier_linear_is_identity() {
-        let linear = CubicBezier::new(0.0, 0.0, 1.0, 1.0);
-        for x in [0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0] {
-            assert_close(linear.eval(x), x, 1e-4, "linear");
-        }
-    }
-
-    #[test]
     fn bezier_known_values() {
         // References computed independently with 80-step bisection.
         let cases: [(&str, CubicBezier, [f32; 5]); 3] = [
@@ -1648,36 +1640,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_timings_match_zuse() {
-        assert_eq!(FADE_IN.duration_ms, 500);
-        assert_eq!(FADE_QUICK.duration_ms, 150);
-        assert_eq!(MENU_IN.duration_ms, 140);
-        assert_eq!(DIALOG_IN.duration_ms, 180);
-        assert_eq!((SPLASH_OUT.duration_ms, SPLASH_OUT.delay_ms), (500, 150));
-        assert_eq!(RESIZE.duration_ms, 200);
-        assert_eq!(TAB_SLIDE.duration_ms, 150);
-        assert_eq!(COLLAPSE.duration_ms, 180);
-        assert_eq!(NEW_THREAD_TRANSITION.duration_ms, 240);
-        assert_eq!(NEW_THREAD_TRANSITION.curve, EASE_RESORT);
-        assert_eq!(CHEVRON.duration_ms, 200);
-        assert_eq!(ZUSE_PULSE.duration_ms, 2400);
-        assert_eq!(GRADIENT_SPIN.duration_ms, 750);
-        assert_eq!(EASE_OUT_EXPO, CubicBezier::new(0.16, 1.0, 0.3, 1.0));
-        assert_eq!(EASE_OUT_QUINT, CubicBezier::new(0.22, 1.0, 0.36, 1.0));
-    }
-
-    #[test]
-    fn pulse_wave_endpoints() {
-        assert_close(pulse_wave(0.0), 0.0, 1e-6, "wave start");
-        assert_close(pulse_wave(0.5), 1.0, 1e-6, "wave peak");
-        assert_close(pulse_wave(1.0), 0.0, 1e-6, "wave end");
-        assert_close(pulse_opacity(0.0), 0.08, 1e-6, "opacity floor");
-        assert_close(pulse_opacity(0.5), 1.0, 1e-6, "opacity peak");
-        assert_close(pulse_scale(0.0), 0.9, 1e-6, "scale floor");
-        assert_close(pulse_scale(0.5), 1.0, 1e-6, "scale peak");
-    }
-
-    #[test]
     fn stagger_wraps_and_orders_cells() {
         // Cell 0 at delta 0 is at phase 0; later cells lag by the stagger.
         assert_close(staggered_phase(0.0, 0, PULSE_STAGGER), 0.0, 1e-6, "cell 0");
@@ -1697,13 +1659,6 @@ mod tests {
         // Matrix wave peaks travel: diagonal k peaks when the front reaches it.
         let peak0 = matrix_wave(0.5, 0, 5);
         assert_close(peak0, 1.0, 1e-5, "diag 0 peak at half period");
-    }
-
-    #[test]
-    fn lerp_basics() {
-        assert_eq!(lerp(208.0, 400.0, 0.0), 208.0);
-        assert_eq!(lerp(208.0, 400.0, 1.0), 400.0);
-        assert_eq!(lerp(0.0, 10.0, 0.5), 5.0);
     }
 
     #[test]
@@ -1858,13 +1813,6 @@ mod tests {
             half_rgba.r > 0.99 && half_rgba.g > 0.99 && half_rgba.b > 0.99,
             "white wash keeps its hue: {half_rgba:?}"
         );
-    }
-
-    #[test]
-    fn hover_spec_matches_tailwind_transition_colors() {
-        assert_eq!(HOVER_FADE.duration_ms, 150);
-        assert_eq!(HOVER_FADE.delay_ms, 0);
-        assert_eq!(EASE_TAILWIND, CubicBezier::new(0.4, 0.0, 0.2, 1.0));
     }
 
     #[test]

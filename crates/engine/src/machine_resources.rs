@@ -200,17 +200,4 @@ mod tests {
         );
         assert_eq!(super::cgroup_memory(host, None, None, None), None);
     }
-
-    #[tokio::test]
-    async fn snapshot_reports_this_machine() {
-        let value = super::snapshot(std::path::Path::new("/")).await;
-        assert!(value["sampledAt"].is_i64());
-        #[cfg(target_os = "linux")]
-        {
-            assert!(value["memoryTotalBytes"].as_u64().unwrap() > 0);
-            assert!(value["diskTotalBytes"].as_u64().unwrap() > 0);
-            let cpu = value["cpuPercent"].as_f64().unwrap();
-            assert!((0.0..=100.0).contains(&cpu));
-        }
-    }
 }

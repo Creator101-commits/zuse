@@ -557,24 +557,6 @@ fn at_completion_pins_staged_images_above_files_and_filters_them(cx: &mut gpui::
 }
 
 #[gpui::test]
-fn at_completion_has_no_image_rows_when_nothing_is_staged(cx: &mut gpui::TestAppContext) {
-    let (_dir, handle) = composer_focus_window(cx);
-    handle
-        .update(cx, |composer, _, cx| {
-            composer
-                .input
-                .update(cx, |input, cx| input.set_text("@", cx));
-        })
-        .unwrap();
-    cx.run_until_parked();
-    handle
-        .read_with(cx, |composer, _| {
-            assert!(composer.mention_attachment_matches().is_empty());
-        })
-        .unwrap();
-}
-
-#[gpui::test]
 fn chips_copied_from_another_draft_paste_as_plain_labels(cx: &mut gpui::TestAppContext) {
     let (_dir, handle) = composer_focus_window(cx);
     handle

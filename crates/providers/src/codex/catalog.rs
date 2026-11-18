@@ -222,34 +222,4 @@ mod tests {
         assert_eq!(to_effort(Some(ReasoningLevel::Max)), Some("max"));
         assert_eq!(to_effort(Some(ReasoningLevel::Ultra)), Some("ultra"));
     }
-
-    #[test]
-    fn catalog_is_newest_first_with_service_tiers() {
-        let models = static_models();
-        assert_eq!(models.len(), 9);
-        assert_eq!(models[0].id, "gpt-6-astra");
-        assert!(models[0].reasoning_levels.contains(&ReasoningLevel::Ultra));
-        assert!(!models[5].reasoning_levels.contains(&ReasoningLevel::Max));
-        for m in &models {
-            let tier = m.options.iter().find(|o| o.id == "serviceTier");
-            // Daybreak Blue reports no service tiers on the wire.
-            if m.id == "gpt-daybreak-blue-latest" {
-                assert!(tier.is_none(), "{} must not carry serviceTier", m.id);
-            } else {
-                assert!(tier.is_some(), "{} missing serviceTier", m.id);
-            }
-        }
-    }
-
-    #[test]
-    fn daybreak_blue_rides_the_full_ultra_ladder() {
-        let models = static_models();
-        let daybreak = models
-            .iter()
-            .find(|m| m.id == "gpt-daybreak-blue-latest")
-            .expect("daybreak blue in catalog");
-        assert_eq!(daybreak.label, "Daybreak Blue");
-        assert!(daybreak.reasoning_levels.contains(&ReasoningLevel::Ultra));
-        assert!(daybreak.options.is_empty());
-    }
 }

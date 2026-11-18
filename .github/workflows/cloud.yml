@@ -177,7 +177,7 @@ jobs:
       - run: cargo test --locked -p zuse-cloud-guest --test project_cache_cli
       - run: cargo test --locked -p zuse-cloud-projection
       - run: cargo test --locked -p zuse-cloud-runtime -- --include-ignored
-      - run: cargo test --locked -p zuse-cloud-runtime --features engine --lib grok_auth::tests
+      - run: cargo test --locked -p zuse-cloud-runtime --features engine --lib
       # The staging pilot test drives a child process against its own schema and
       # times out on locks when it shares the database with the parallel suite.
       - run: cargo test --locked -p zuse-cloud -- --include-ignored --skip staging_pilot_is_separate_bounded_and_reconciles_original_effects
