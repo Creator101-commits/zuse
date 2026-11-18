@@ -473,8 +473,12 @@ fn spawn_watched(
         .spawn()
         .map_err(|error| error.to_string())?;
     // Drain stderr on its own thread so a chatty app never blocks on a full
-    // pipe; a forked app may hold it open long after this returns.
-    let stderr = Arc::new(Mutex::new(Vec::new()));
+    // pipe, keeping only its tail (where the final error is). The reader
+    // signals once the pipe closes; a forked app may hold it open long after
+    // this returns.
+    const TAIL: usize = 16 * 1024;
+    let stderr = Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(TAIL)));
+    let (closed_tx, closed) = std::sync::mpsc::channel::<()>();
     if let Some(mut pipe) = child.stderr.take() {
         let stderr = stderr.clone();
         std::thread::spawn(move || {
@@ -484,10 +488,11 @@ fn spawn_watched(
                     break;
                 }
                 let mut buffer = stderr.lock().unwrap_or_else(|e| e.into_inner());
-                if buffer.len() < 16 * 1024 {
-                    buffer.extend_from_slice(&chunk[..read]);
-                }
+                buffer.extend(&chunk[..read]);
+                let excess = buffer.len().saturating_sub(TAIL);
+                buffer.drain(..excess);
             }
+            let _ = closed_tx.send(());
         });
     }
     let started = std::time::Instant::now();
@@ -495,10 +500,12 @@ fn spawn_watched(
         match child.try_wait().map_err(|error| error.to_string())? {
             Some(status) if status.success() => return Ok(()),
             Some(status) => {
-                // Let the reader catch the last of what it printed.
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                // Wait for the reader to see the pipe close, but not on a
+                // descendant that keeps it open.
+                let _ = closed.recv_timeout(std::time::Duration::from_secs(1));
                 let buffer = stderr.lock().unwrap_or_else(|e| e.into_inner());
-                let detail = String::from_utf8_lossy(&buffer).trim().to_owned();
+                let bytes: Vec<u8> = buffer.iter().copied().collect();
+                let detail = String::from_utf8_lossy(&bytes).trim().to_owned();
                 let detail = detail.lines().last().unwrap_or_default().to_owned();
                 return Err(if detail.is_empty() {
                     format!("exited with {status}")
@@ -801,6 +808,16 @@ mod tests {
             Err("exited with exit status: 4".to_owned())
         );
         assert_eq!(spawn_watched(shell("exit 0"), window), Ok(()));
+        // A verbose app's final error survives the bounded buffer.
+        assert_eq!(
+            spawn_watched(
+                shell(
+                    "head -c 100000 /dev/zero | tr '\\0' x >&2; echo >&2; echo last words >&2; exit 1"
+                ),
+                window
+            ),
+            Err("last words".to_owned())
+        );
         // Still running after the window: it opened.
         assert_eq!(spawn_watched(shell("echo hi >&2; sleep 5"), window), Ok(()));
         assert!(spawn_watched(std::process::Command::new("/nonexistent/app"), window).is_err());

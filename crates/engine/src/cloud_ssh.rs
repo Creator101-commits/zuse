@@ -181,8 +181,18 @@ pub fn write_launcher(prepared: &Prepared) -> Result<PathBuf, String> {
 fn write_launcher_in(dir: &Path, prepared: &Prepared) -> Result<PathBuf, String> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
+    use std::hash::{Hash, Hasher};
     private_dir(dir).map_err(|e| e.to_string())?;
-    let script = dir.join(format!("{}.command", prepared.host));
+    let contents = format!("#!/bin/sh\nexec {}\n", terminal_command(prepared));
+    // Named by its contents: a later open with a different command never
+    // replaces a script an earlier terminal may still be about to read.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    contents.hash(&mut hasher);
+    let script = dir.join(format!(
+        "{}-{:016x}.command",
+        prepared.host,
+        hasher.finish()
+    ));
     let staging = dir.join(format!(
         ".{}.{}-{}.tmp",
         prepared.host,
@@ -190,10 +200,7 @@ fn write_launcher_in(dir: &Path, prepared: &Prepared) -> Result<PathBuf, String>
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let written = (|| {
-        std::fs::write(
-            &staging,
-            format!("#!/bin/sh\nexec {}\n", terminal_command(prepared)),
-        )?;
+        std::fs::write(&staging, &contents)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -267,7 +274,11 @@ mod tests {
         let first = write_launcher_in(dir.path(), &prepared).unwrap();
         let again = write_launcher_in(dir.path(), &prepared).unwrap();
         assert_eq!(first, again);
-        assert_eq!(first, dir.path().join("zuse-w.command"));
+        let name = first.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("zuse-w-") && name.ends_with(".command"),
+            "{name}"
+        );
         assert_eq!(
             std::fs::read_to_string(&first).unwrap(),
             format!("#!/bin/sh\nexec {}\n", terminal_command(&prepared))
@@ -282,7 +293,16 @@ mod tests {
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(names, ["zuse-w.command"]);
+        assert_eq!(names, [first.file_name().unwrap()]);
+        // Another command for the same host gets its own script; the first
+        // stays for a terminal that hasn't read it yet.
+        let moved = Prepared {
+            path: "/home/zuse".into(),
+            ..prepared
+        };
+        let other = write_launcher_in(dir.path(), &moved).unwrap();
+        assert_ne!(other, first);
+        assert!(first.is_file() && other.is_file());
     }
 
     #[test]
