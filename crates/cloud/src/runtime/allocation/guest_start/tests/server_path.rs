@@ -143,7 +143,7 @@ async fn one_dispatch_then_enrollment_wakes_the_job_and_failures_fall_back_once(
         }
         let workspace = format!("ws-{}", uuid::Uuid::new_v4().simple());
         let config = json!({"runtimeGeneration":1,"gatewayEpoch":1,"rustProviderControllerVersion":1,
-            "managedReleaseId":"explicit-fresh-release","rustFastStartVersion":1,
+            "managedReleaseId":"explicit-fresh-release","rustFastStartVersion":1,"rustGuestStartVersion":1,
             "initialRuntimeBootstrap":{"version":1,"mode":"post-hydration-first-start-v1",
             "runtimeSha256":"a".repeat(64),"supervisorSha256":"b".repeat(64),"serviceSha256":"c".repeat(64),
             "manifestSha256":"d".repeat(64),"helperSha256":"e".repeat(64)}});

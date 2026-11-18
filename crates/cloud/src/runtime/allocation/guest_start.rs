@@ -29,6 +29,8 @@ const RUNNING_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 const RUNNING_POLL: std::time::Duration = std::time::Duration::from_millis(300);
 const STATUS_ROOT: &str = "/run/zuse-fresh-start";
 const MARKER: &str = "rustGuestStart";
+/// Set at creation for new Boat workspaces; older ones keep the server path.
+pub(crate) const VERSION_KEY: &str = "rustGuestStartVersion";
 /// Job payload flag: enrollment may pull this allocation's job forward.
 pub(crate) const DISPATCHED_FLAG: &str = "guestStartDispatched";
 
@@ -146,7 +148,7 @@ impl RuntimeControl {
         operation: &Value,
         machine: &str,
     ) -> Result<bool, ApiError> {
-        if !provider.guest_start() {
+        if !provider.guest_start() || workspace["request_config"][VERSION_KEY] != 1 {
             return Ok(false);
         }
         let Some(request) = initial_boot::request(
