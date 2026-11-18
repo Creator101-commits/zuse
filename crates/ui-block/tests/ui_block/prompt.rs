@@ -27,6 +27,7 @@ const EXPECTED_SIGNATURES: &[&str] = &[
     "RadioGroup(name: string, label: string, options: string[], value?: string)",
     "Checkbox(name: string, label: string, checked?: boolean)",
     "Slider(name: string, label: string, min: number, max: number, value?: number, step?: number)",
+    "Connect(plugin: string, reason?: string)",
 ];
 
 #[test]
@@ -38,6 +39,7 @@ fn renders_positional_signatures_in_catalogue_order() {
         .collect();
     assert_eq!(signatures, EXPECTED_SIGNATURES);
     assert!(!lines.contains("FollowUps"));
+    assert!(!lines.contains("McpServer") && !lines.contains("ConnectedPlugins"));
     assert!(lines.contains(
         "Stat(label: string, value: string, hint?: string) — Single prominent metric — large value with a small label and optional hint."
     ));

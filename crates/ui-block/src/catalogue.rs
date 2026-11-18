@@ -492,6 +492,56 @@ pub(crate) static CATALOGUE: &[ComponentDef] = &[
             ),
         ],
     ),
+    def(
+        "Connect",
+        "Live card that lets the user connect a Zuse plugin (or add an account / manage it once connected). plugin is its id or name, e.g. \"linear\". The user signs in from the card; you never see credentials.",
+        &[
+            req(
+                "plugin",
+                Ty::Str {
+                    min: 1,
+                    max: Some(120),
+                },
+            ),
+            opt(
+                "reason",
+                Ty::Str {
+                    min: 0,
+                    max: Some(300),
+                },
+            ),
+        ],
+    ),
+    ComponentDef {
+        name: "McpServer",
+        description: "One of the agent's MCP servers and its reported state.",
+        advertised: false,
+        field: false,
+        params: &[
+            req(
+                "name",
+                Ty::Str {
+                    min: 1,
+                    max: Some(200),
+                },
+            ),
+            req("status", Ty::Enum(crate::model::ServerStatus::NAMES)),
+            opt(
+                "detail",
+                Ty::Str {
+                    min: 0,
+                    max: Some(300),
+                },
+            ),
+        ],
+    },
+    ComponentDef {
+        name: "ConnectedPlugins",
+        description: "The reader's Zuse plugins, listed live.",
+        advertised: false,
+        field: false,
+        params: &[],
+    },
 ];
 
 pub(crate) fn lookup(name: &str) -> Option<&'static ComponentDef> {

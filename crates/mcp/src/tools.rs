@@ -300,6 +300,28 @@ fn catalog() -> Vec<ToolDef> {
         }),
     });
     tools.push(ToolDef {
+        name: PLUGINS_CONNECT,
+        description: PLUGINS_CONNECT_DESCRIPTION,
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "plugin": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120,
+                    "description": "The plugin's id or name, e.g. \"linear\" or \"Google Calendar\" (ids come from plugins_list or plugins_search)."
+                },
+                "reason": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "description": "One short sentence shown under the card: what connecting lets you do for the user. Optional."
+                }
+            },
+            "required": ["plugin"],
+            "additionalProperties": false
+        }),
+    });
+    tools.push(ToolDef {
         name: SHOW_UI,
         description: show_ui_description(),
         input_schema: json!({
@@ -319,6 +341,19 @@ fn catalog() -> Vec<ToolDef> {
 /// Shows a UI block in the CALLING chat; offered only inside a chat, like
 /// [`SHOW_VISUAL`].
 const SHOW_UI: &str = "show_ui";
+
+/// Shows a plugin's live connection card in the CALLING chat. Named with the
+/// `plugins_` prefix so it is offered only inside a chat, like the gateway.
+const PLUGINS_CONNECT: &str = "plugins_connect";
+
+const PLUGINS_CONNECT_DESCRIPTION: &str = "\
+Show a connection card for a Zuse plugin in this chat, below your reply. Use it when the user asks you \
+to connect, reconnect or sign in to an app or MCP server, when they want to see or manage a connection, \
+or when a plugin you need isn't connected (plugins_list doesn't have it, or a call fails for lack of \
+access). The card is live: Connect when it isn't connected; Add account and Manage when it is. The user \
+signs in from the card in their own browser or a private form, so never ask them for passwords or API \
+keys in chat; you never see credentials. Once they finish, the plugin's tools appear in plugins_list. \
+Reply with one short line about what connecting enables; don't describe the card.";
 
 /// The spec crate words the tool from its own catalogue, so the prompt and
 /// the validator never drift.
@@ -532,6 +567,29 @@ async fn read_visual_assets(
 #[derive(Deserialize)]
 struct ShowUiArgs {
     spec: String,
+}
+
+#[derive(Deserialize)]
+struct PluginsConnectArgs {
+    plugin: String,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// The one-component spec a `plugins_connect` call shows. Strings are
+/// written as JSON literals, which the spec language reads verbatim.
+fn connect_spec(args: &PluginsConnectArgs) -> anyhow::Result<String> {
+    let plugin = args.plugin.trim();
+    if plugin.is_empty() {
+        anyhow::bail!("plugin is required: pass its id or name, e.g. \"linear\".");
+    }
+    let quote = |text: &str| serde_json::to_string(text).expect("strings serialize");
+    Ok(match args.reason.as_deref().map(str::trim) {
+        Some(reason) if !reason.is_empty() => {
+            format!("root = Connect({}, {})", quote(plugin), quote(reason))
+        }
+        _ => format!("root = Connect({})", quote(plugin)),
+    })
 }
 
 #[derive(Deserialize)]
@@ -841,6 +899,7 @@ impl Tools {
                     .control(zuse_protocol::control::ACK_ZOT_EVENTS, args)
                     .await
             }
+            PLUGINS_CONNECT => self.plugins_connect(parse(args)?).await,
             "plugins_list" | "plugins_search" | "plugins_schema" | "plugins_call" => {
                 self.plugin_tool(name, args).await
             }
@@ -1467,6 +1526,29 @@ impl Tools {
         }))
     }
 
+    async fn plugins_connect(&self, args: PluginsConnectArgs) -> anyhow::Result<Value> {
+        let chat_id = self
+            .zuse
+            .origin()
+            .chat_id
+            .clone()
+            .context("plugins_connect only works from an agent Zuse launched in a chat")?;
+        let spec = connect_spec(&args)?;
+        zuse_ui_block::validate(&spec).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let shown = self
+            .zuse
+            .call(
+                zuse_rpc::methods::PUBLISH_UI_BLOCK,
+                json!({ "chatId": chat_id, "spec": spec }),
+            )
+            .await?;
+        Ok(json!({
+            "ok": true,
+            "id": shown["id"],
+            "message": "The connection card is shown below your reply and updates live. Don't describe it; the user finishes signing in there.",
+        }))
+    }
+
     async fn interrupt_chat(&self, args: ChatArgs) -> anyhow::Result<Value> {
         let chat = self.zuse.resolve_chat(&args.chat).await?;
         let command_id = self
@@ -2085,6 +2167,63 @@ mod tests {
         assert_eq!(method, methods::PUBLISH_UI_BLOCK);
         assert_eq!(params["chatId"], "chat-alpha-1");
         assert_eq!(params["spec"], spec);
+    }
+
+    #[tokio::test]
+    async fn plugins_connect_shows_a_live_card_in_the_calling_chat() {
+        let world = Arc::new(World::default());
+        let outside = tools(world.clone(), Origin::default());
+        assert!(!outside.has("plugins_connect"));
+        assert!(
+            outside
+                .call("plugins_connect", json!({"plugin": "linear"}))
+                .await
+                .is_err()
+        );
+
+        let inside = tools(
+            world.clone(),
+            Origin {
+                chat_id: Some("chat-alpha-1".into()),
+                device_id: Some("dev-local".into()),
+            },
+        );
+        assert!(inside.has("plugins_connect"));
+        let blank = inside
+            .call("plugins_connect", json!({"plugin": "  "}))
+            .await
+            .unwrap_err();
+        assert!(blank.contains("plugin is required"), "{blank}");
+        assert!(world.writes.lock().unwrap().is_empty(), "nothing published");
+
+        inside
+            .call(
+                "plugins_connect",
+                json!({"plugin": " Google \"Calendar\" ", "reason": "So I can book the review."}),
+            )
+            .await
+            .unwrap();
+        inside
+            .call(
+                "plugins_connect",
+                json!({"plugin": "linear", "reason": " "}),
+            )
+            .await
+            .unwrap();
+        let writes = world.writes.lock().unwrap();
+        let specs: Vec<&str> = writes
+            .iter()
+            .filter(|(method, _)| method == methods::PUBLISH_UI_BLOCK)
+            .map(|(_, params)| params["spec"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            specs,
+            [
+                r#"root = Connect("Google \"Calendar\"", "So I can book the review.")"#,
+                r#"root = Connect("linear")"#,
+            ]
+        );
+        assert_eq!(writes[0].1["chatId"], "chat-alpha-1");
     }
 
     #[test]

@@ -754,6 +754,24 @@ pub struct SlashCommand {
     pub input_hint: Option<String>,
 }
 
+/// One of the harness's own MCP servers (not Zuse plugins), as the harness
+/// reported it when its session started. Feeds the `/mcp` card.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HarnessMcpServer {
+    pub name: String,
+    /// The harness's wording: `connected`, `needs-auth`, `failed`,
+    /// `pending` or `disabled`.
+    pub status: String,
+    /// Where it is configured, in the harness's terms (`user`, `project`,
+    /// `plugin`, `claudeai`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Tools it contributed to the session.
+    #[serde(default)]
+    pub tools: usize,
+}
+
 /// A file modification carried inline on a tool result (ACP
 /// `ToolCallContent::Diff`). `old_text: None` means a new file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -894,6 +912,12 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     AvailableCommands {
         commands: Vec<SlashCommand>,
+    },
+    /// The harness's own MCP servers and their state at session start.
+    /// The engine keeps the latest list per chat for `/mcp`; never
+    /// persisted to docs.
+    McpServers {
+        servers: Vec<HarnessMcpServer>,
     },
     Error {
         message: String,

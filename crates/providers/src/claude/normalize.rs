@@ -662,14 +662,19 @@ impl Normalizer {
                 }
                 self.saw_init = true;
                 self.session_id = Some(f.session_id.clone());
-                vec![AgentEvent::SessionStarted {
+                let servers = mcp_servers(&f.mcp_servers, &f.tools);
+                let mut events = vec![AgentEvent::SessionStarted {
                     harness: HarnessId::ClaudeCode,
                     model: f.model,
                     tools: f.tools,
                     cwd: f.cwd,
                     session_id: f.session_id,
                     assistant_message_id: self.assistant_message_id.clone(),
-                }]
+                }];
+                if !servers.is_empty() {
+                    events.push(AgentEvent::McpServers { servers });
+                }
+                events
             }
 
             // Frames with `parent_tool_use_id` set belong to a SUBAGENT's
@@ -1069,6 +1074,42 @@ impl Normalizer {
             | Frame::Other => Vec::new(),
         }
     }
+}
+
+/// The init frame's MCP servers with the tools each contributed. The CLI
+/// names a server's tools `mcp__<name>__<tool>`, with every character
+/// outside `[A-Za-z0-9_-]` in the name replaced by `_`.
+fn mcp_servers(
+    servers: &[super::wire::McpServerFrame],
+    tools: &[String],
+) -> Vec<zuse_protocol::HarnessMcpServer> {
+    servers
+        .iter()
+        .filter(|server| !server.name.trim().is_empty())
+        .map(|server| {
+            let key: String = server
+                .name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let prefix = format!("mcp__{key}__");
+            zuse_protocol::HarnessMcpServer {
+                name: server.name.clone(),
+                status: server.status.clone(),
+                source: server.source.clone().filter(|source| !source.is_empty()),
+                tools: tools
+                    .iter()
+                    .filter(|tool| tool.starts_with(&prefix))
+                    .count(),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1777,6 +1818,54 @@ mod tests {
                 })
             ),
             "wake turn settles with its own Done"
+        );
+    }
+
+    #[test]
+    fn init_reports_mcp_servers_with_their_tool_counts() {
+        // CLI 2.1 shape: names keep spaces and colons; tool prefixes don't.
+        let init = r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s1",
+            "tools":["Bash","mcp__zuse__show_ui","mcp__zuse__whoami","mcp__claude_ai_Docs__read","mcp__plugin_figma_figma__get"],
+            "mcp_servers":[
+                {"name":"zuse","status":"connected","source":"dynamic"},
+                {"name":"claude.ai Docs","status":"connected","source":"claudeai"},
+                {"name":"plugin:figma:figma","status":"needs-auth","source":"plugin"},
+                {"name":"vidiq","status":"failed"},
+                {"name":" ","status":"connected"}
+            ]}"#;
+        let mut norm = Normalizer::new();
+        let events = norm.normalize(crate::claude::wire::parse_frame(init).unwrap(), false);
+        assert!(matches!(events[0], AgentEvent::SessionStarted { .. }));
+        let AgentEvent::McpServers { servers } = &events[1] else {
+            panic!("expected McpServers, got {events:?}");
+        };
+        let summary: Vec<_> = servers
+            .iter()
+            .map(|s| {
+                (
+                    s.name.as_str(),
+                    s.status.as_str(),
+                    s.source.as_deref(),
+                    s.tools,
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("zuse", "connected", Some("dynamic"), 2),
+                ("claude.ai Docs", "connected", Some("claudeai"), 1),
+                ("plugin:figma:figma", "needs-auth", Some("plugin"), 1),
+                ("vidiq", "failed", None, 0),
+            ]
+        );
+        // An init without servers adds nothing beyond SessionStarted.
+        let bare = r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s2"}"#;
+        let mut norm = Normalizer::new();
+        assert_eq!(
+            norm.normalize(crate::claude::wire::parse_frame(bare).unwrap(), false)
+                .len(),
+            1
         );
     }
 

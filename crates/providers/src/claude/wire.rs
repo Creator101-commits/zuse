@@ -52,6 +52,16 @@ pub(crate) struct CommandLifecycleFrame {
 }
 
 #[derive(Debug, Default, Deserialize)]
+pub(crate) struct McpServerFrame {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
 pub(crate) struct SystemFrame {
     #[serde(default)]
     pub subtype: String,
@@ -59,6 +69,9 @@ pub(crate) struct SystemFrame {
     pub model: String,
     #[serde(default)]
     pub tools: Vec<String>,
+    /// `init`: the CLI's MCP servers, `{name, status, source}` each.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerFrame>,
     #[serde(default)]
     pub cwd: String,
     #[serde(default)]

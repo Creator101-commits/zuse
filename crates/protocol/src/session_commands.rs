@@ -10,6 +10,7 @@ pub enum SessionCommandKind {
     Interrupt,
     RespondInput,
     StopBackgroundTask,
+    ChatCommand,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +39,15 @@ pub enum SessionCommandPayload {
     StopBackgroundTask {
         task_id: String,
     },
+    /// A slash command Zuse answers itself (`/mcp`): the host writes `text`
+    /// as the user's message and a card as the reply, without involving the
+    /// agent. Hosts that don't know `name` reject it.
+    #[serde(rename_all = "camelCase")]
+    ChatCommand {
+        name: String,
+        message_id: String,
+        text: String,
+    },
 }
 
 impl SessionCommandPayload {
@@ -50,6 +60,7 @@ impl SessionCommandPayload {
             SessionCommandPayload::StopBackgroundTask { .. } => {
                 SessionCommandKind::StopBackgroundTask
             }
+            SessionCommandPayload::ChatCommand { .. } => SessionCommandKind::ChatCommand,
         }
     }
 }

@@ -50,7 +50,11 @@ several changes, checks, findings, or options gets one compact UI block (charts,
 flows, key-value checks) as its main summary, shown below your reply. Simple answers stay text. \
 Numbers and comparisons go in its built-in BarChart, LineChart or DonutChart, not tables of \
 figures. Use `show_visual` (a Luau script) only for custom drawing, 3D scenes, shaders, or live \
-simulations the components can't express. Never announce or restate what a visual shows.";
+simulations the components can't express. Never announce or restate what a visual shows.\n\
+\n\
+When the user asks to connect, reconnect or manage an app or MCP server, or a plugin you need \
+isn't connected, call `plugins_connect` so they can sign in from a card in the chat. Never ask for \
+passwords or API keys in chat.";
 
 const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
