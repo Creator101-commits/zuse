@@ -7,13 +7,22 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The macOS test suite is too slow for per-change runs on a free runner;
+  # it runs nightly (and on demand) instead.
+  schedule:
+    - cron: '30 21 * * *'
 
 concurrency:
   group: validate-${{ github.ref }}
   # Main always finishes, so its caches get saved for every branch.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Budget: every job finishes in about five minutes on a warm cache.
+# Budget: every pull request and main job finishes in under ten minutes on
+# GitHub's free 4-core runners once main has saved its caches.
+#
+# - apt packages come from a cache, not `apt-get update` against a mirror
+#   (that alone took 10-27 minutes on a slow-mirror day).
+# - Tests run with more threads than cores: many wait on timers, not CPU.
 #
 # Where the time used to go: ~30 separate `cargo test` invocations, each with a
 # different package set, so Cargo re-unified features and rebuilt the engine
@@ -29,8 +38,8 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
-  # macOS is the slowest job, so a pull request runs it only when it touches
-  # desktop code or a file with macOS-specific paths; main always runs it.
+  # A pull request runs the macOS check only when it touches desktop code or a
+  # file with macOS-specific paths; main and nightly always run it.
   platforms:
     runs-on: ubuntu-24.04
     permissions:
@@ -97,12 +106,15 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: bash scripts/ci-ubuntu-dependencies.sh cmake libclang-dev libasound2-dev ripgrep
+      - uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: cmake libclang-dev libasound2-dev ripgrep
+          version: 1
       # One build for every package: a single feature set, so nothing is
       # compiled twice.
       - name: Tests
         run: >-
-          cargo nextest run --locked --profile ci
+          cargo nextest run --locked --profile ci --test-threads 12
           -p zuse-analytics -p zuse-cli -p zuse-client -p zuse-commands
           -p zuse-control -p zuse-doc -p zuse-engine -p zuse-harness
           -p zuse-harness-extensions -p zuse-i18n -p zuse-mcp -p zuse-model
@@ -111,7 +123,19 @@ jobs:
           -p zuse-serve -p zuse-sync -p zuse-update -p zuse-voice-session
           --features zuse-providers/native-fixture,zuse-sync/mock-server
       - run: cargo run --locked -p zuse-protocol --example control_types -- --check
-      - run: cargo build --locked -p zuse-cli -p zuse-control
+      # Same package set and features as the test build, so the two binaries
+      # the SDK smoke test drives reuse its artifacts instead of a fresh
+      # feature resolution rebuilding the engine.
+      - name: Engine binaries for the SDK
+        run: >-
+          cargo build --locked --bin zuse-cli --bin zuse-control
+          -p zuse-analytics -p zuse-cli -p zuse-client -p zuse-commands
+          -p zuse-control -p zuse-doc -p zuse-engine -p zuse-harness
+          -p zuse-harness-extensions -p zuse-i18n -p zuse-mcp -p zuse-model
+          -p zuse-model-accounts -p zuse-orb -p zuse-plugins -p zuse-protocol
+          -p zuse-providers -p zuse-relay -p zuse-remote -p zuse-rpc
+          -p zuse-serve -p zuse-sync -p zuse-update -p zuse-voice-session
+          --features zuse-providers/native-fixture,zuse-sync/mock-server
       - name: SDK against the engine
         working-directory: packages/sdk
         run: npm ci && npm run test:engine
@@ -125,7 +149,10 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - run: bash scripts/ci-ubuntu-dependencies.sh ripgrep
+      - uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: ripgrep
+          version: 1
       - run: cargo build --locked --release -p zuse-harness --example harness-evaluate
       - run: python3 scripts/test-harness-evaluation.py --binary target/release/examples/harness-evaluate --output .context/native-transport-fixtures
 
@@ -159,12 +186,16 @@ jobs:
         with:
           tool: cargo-nextest
       - if: runner.os == 'Linux'
-        run: >-
-          bash scripts/ci-ubuntu-dependencies.sh
-          build-essential cmake clang libclang-dev pkg-config libssl-dev
-          libfontconfig-dev libfreetype-dev libxcb1-dev libxcb-shape0-dev
-          libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
-          libvulkan-dev libasound2-dev libwebkit2gtk-4.1-dev libjson-glib-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          # The image already ships build-essential, cmake, clang, pkg-config
+          # and libssl-dev.
+          packages: >-
+            libclang-dev libfontconfig-dev libfreetype-dev libxcb1-dev
+            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
+            libxkbcommon-x11-dev libwayland-dev libvulkan-dev libasound2-dev
+            libwebkit2gtk-4.1-dev libjson-glib-dev
+          version: 1
       - run: cargo check --locked -p zuse -p zuse-cli -p zuse-relay -p zuse-remote
       - if: runner.os == 'macOS'
         uses: actions/setup-python@v5
@@ -179,12 +210,14 @@ jobs:
           python scripts/test_package.py PackagingTests.test_macos_package_identity_allows_bundle_signing
       - if: runner.os == 'Linux'
         name: Tests
-        run: cargo nextest run --locked --profile ci -p zuse-ui -p zuse-viewport -p zuse-text --lib
-      - if: runner.os == 'macOS'
+        run: cargo nextest run --locked --profile ci --test-threads 12 -p zuse-ui -p zuse-viewport -p zuse-text --lib
+      # Per change, macOS only proves the desktop app compiles (above); its
+      # test build alone takes over ten minutes on the free runner.
+      - if: runner.os == 'macOS' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         name: Tests
         run: cargo nextest run --locked --profile ci -p zuse-ui --lib
       - name: macOS AppKit quit drains the engine before termination
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         run: |
           cargo build --locked -p zuse-ui --example desktop-quit-fixture
           python3 - <<'PY'
