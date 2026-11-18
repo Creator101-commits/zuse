@@ -32,12 +32,20 @@ const WINDOW_MARGIN: f32 = 8.0;
 /// Rough single-line chip height, used to decide whether the preferred side
 /// has room before flipping. Generous so a wrapped chip still fits.
 const FLIP_ROOM: f32 = 34.0;
+/// Space between a list row and a card opened beside it.
+pub const SIDE_GAP: f32 = 8.0;
 
 /// Which side of its control a chip prefers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Placement {
     Below,
     Above,
+    /// Beside the control, top edges aligned: a details card for a row in
+    /// a side list. Flips to the left when the window leaves no room for
+    /// `width` on the right.
+    Right {
+        width: f32,
+    },
 }
 
 /// The host can supply its own theme-aware tooltip view. Other hosts use the
@@ -79,6 +87,29 @@ impl Render for AnchoredTooltip {
         let owner = self
             .owner
             .unwrap_or(Bounds::new(self.pointer, Default::default()));
+        if let Placement::Right { width } = self.placement {
+            let gap = px(SIDE_GAP);
+            let room_right = viewport.width - (owner.right() + gap);
+            let room_left = owner.left() - gap;
+            let (position, anchor) = if place_right(width, room_left, room_right) {
+                (
+                    Point::new(owner.right() + gap, owner.top()),
+                    gpui::Anchor::TopLeft,
+                )
+            } else {
+                (
+                    Point::new(owner.left() - gap, owner.top()),
+                    gpui::Anchor::TopRight,
+                )
+            };
+            return div().size_0().child(
+                gpui::anchored()
+                    .position(position)
+                    .anchor(anchor)
+                    .snap_to_window_with_margin(px(WINDOW_MARGIN))
+                    .child(self.content.clone()),
+            );
+        }
         let gap = px(GAP);
         let room_below = viewport.height - (owner.bottom() + gap);
         let room_above = owner.top() - gap;
@@ -111,7 +142,14 @@ fn place_below(placement: Placement, room_above: Pixels, room_below: Pixels) -> 
     match placement {
         Placement::Below => room_below >= px(FLIP_ROOM) || room_below >= room_above,
         Placement::Above => room_above < px(FLIP_ROOM) && room_below > room_above,
+        Placement::Right { .. } => true,
     }
+}
+
+// A side card stays on the right while it fits there, and otherwise takes
+// whichever side has more room.
+fn place_right(width: f32, room_left: Pixels, room_right: Pixels) -> bool {
+    room_right >= px(width + WINDOW_MARGIN) || room_right >= room_left
 }
 
 #[cfg(test)]
@@ -127,6 +165,14 @@ mod tests {
         assert!(place_below(Placement::Below, px(5.0), px(10.0)));
         assert!(!place_below(Placement::Above, px(10.0), px(5.0)));
         assert!(place_below(Placement::Below, px(-5.0), px(-5.0)));
+    }
+
+    #[test]
+    fn side_cards_open_right_unless_only_the_left_fits() {
+        assert!(place_right(280.0, px(100.0), px(400.0)));
+        assert!(place_right(280.0, px(500.0), px(400.0)));
+        assert!(!place_right(280.0, px(500.0), px(100.0)));
+        assert!(place_right(280.0, px(50.0), px(100.0)));
     }
 }
 

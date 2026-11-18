@@ -313,7 +313,7 @@ impl Shell {
         );
         Some((id, height, element))
     }
-    fn cloud_row_project_name(&self, row: &Value, cx: &App) -> String {
+    pub(super) fn cloud_row_project_name(&self, row: &Value, cx: &App) -> String {
         let state = self.state.read(cx);
         let project_id = row["projectId"].as_str().unwrap_or_default();
         state
@@ -692,6 +692,263 @@ mod tests {
                 "archiving does not open the task"
             );
         });
+    }
+
+    /// The whole chat sidebar, as the app draws it (including the per-render
+    /// hover bookkeeping the row lists alone skip).
+    struct FullSidebar(Entity<Shell>);
+    impl Render for FullSidebar {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.update(cx, |shell, cx| {
+                div()
+                    .w(px(300.0))
+                    .h(px(900.0))
+                    .child(shell.render_chat_sidebar(&Theme::default(), cx))
+            })
+        }
+    }
+
+    /// A sidebar holding a pinned local chat, a local chat under a project
+    /// and a cloud task, for a personal account or an organization.
+    fn mixed_sidebar<'a>(
+        cx: &'a mut TestAppContext,
+        runtime: &tokio::runtime::Runtime,
+        directory: &std::path::Path,
+        organization: Option<&'static str>,
+    ) -> (Entity<Shell>, &'a mut gpui::VisualTestContext) {
+        let data_dir = directory.to_path_buf();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(UiSettings::default(), &data_dir, cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            std::sync::Arc::new(Pending),
+        ));
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            FullSidebar(cx.new(|cx| {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.workspace_scope = Some(zuse_protocol::WorkspaceScope::Local);
+                    state.local_device_id = Some("local".into());
+                    state.apply_cloud_account(
+                        json!({"user":{"id":"owner"},"orgId":organization}),
+                    );
+                    let owner = organization
+                        .map(|org| format!("organization:{org}"))
+                        .unwrap_or_else(|| "owner".into());
+                    assert!(state.apply_cloud_sidebar_catalog(
+                        &json!({"accountId":"owner","organizationId":organization,"ownerId":owner,
+                            "projects":[{"projectId":"project","displayName":"Hello-World","repositoryIdentity":"github.com/owner/hello-world","canCreate":true}]}),
+                        &json!({"accountId":"owner","organizationId":organization,"workspaces":[{
+                            "workspaceId":"task-1","projectId":"project","providerId":"boxd",
+                            "chatId":"session-1","initialSessionId":"session-1",
+                            "title":"Cloud chat","branch":"task/cloud","state":"ready","desiredState":"ready",
+                            "createdAt":1,"updatedAt":1
+                        }]})
+                    ));
+                    state.spaces = vec![
+                        serde_json::from_value(json!({
+                            "id":"space-1","deviceId":"local","path":"/projects/zuse",
+                            "createdAt":Utc::now()
+                        }))
+                        .unwrap(),
+                    ];
+                    state.chats = ["local-pin", "local-1"]
+                        .into_iter()
+                        .map(|id| {
+                            serde_json::from_value(json!({
+                                "id":id,"title":id,"deviceId":"local","archived":false,
+                                "spaceId":"space-1","createdAt":Utc::now()
+                            }))
+                            .unwrap()
+                        })
+                        .collect();
+                    state
+                });
+                state.update(cx, |state, _| state.set_test_engine(controller));
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        target: None,
+                        data_dir: data_dir.clone(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zuse_protocol::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.reduced_motion = true;
+                shell
+                    .settings
+                    .sidebar_pins_mut("local".into())
+                    .push("local-pin".into());
+                shell
+            }))
+        });
+        let shell = host.read_with(cx, |host, _| host.0.clone());
+        (shell, cx)
+    }
+
+    /// Hover each row variant in each sidebar layout and read what its
+    /// trailing slot and cloud mark show.
+    fn assert_rows_offer_archive(
+        shell: &Entity<Shell>,
+        cx: &mut gpui::VisualTestContext,
+        organization: bool,
+    ) {
+        for layout in [
+            SidebarOrganization::ByProject,
+            SidebarOrganization::InOneList,
+            SidebarOrganization::ByDevice,
+        ] {
+            shell.update(cx, |shell, cx| {
+                shell.settings.sidebar_organization = layout;
+                shell.sidebar_collapsed_groups.clear();
+                shell.pinned_open = true;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear());
+            // `debug_bounds` takes static selectors.
+            for (id, row_selector, archive, time, mark) in [
+                (
+                    "local-pin",
+                    "chat-local-pin",
+                    "chat-archive-local-pin",
+                    "chat-time-local-pin",
+                    "chat-cloud-mark-local-pin",
+                ),
+                (
+                    "local-1",
+                    "chat-local-1",
+                    "chat-archive-local-1",
+                    "chat-time-local-1",
+                    "chat-cloud-mark-local-1",
+                ),
+                (
+                    "cloud:task-1",
+                    "chat-cloud:task-1",
+                    "chat-archive-cloud:task-1",
+                    "chat-time-cloud:task-1",
+                    "chat-cloud-mark-cloud:task-1",
+                ),
+            ] {
+                let cloud = id.starts_with(CLOUD_ROW_PREFIX);
+                let row = cx
+                    .debug_bounds(row_selector)
+                    .unwrap_or_else(|| panic!("{id} paints in {layout:?}"));
+                cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear());
+                cx.update(|window, cx| window.draw(cx).clear());
+                let offered = !(organization && cloud);
+                assert_eq!(
+                    cx.debug_bounds(archive).is_some(),
+                    offered,
+                    "{id} in {layout:?}: hover Archive shown = {offered}"
+                );
+                if !offered {
+                    assert!(
+                        cx.debug_bounds(time).is_some(),
+                        "a row without an archive action keeps its age"
+                    );
+                }
+                assert_eq!(
+                    cx.debug_bounds(mark).is_some(),
+                    cloud,
+                    "{id} in {layout:?}: cloud mark only on cloud rows"
+                );
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn every_personal_row_offers_archive_on_hover_in_every_layout(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        let (shell, cx) = mixed_sidebar(cx, &runtime, directory.path(), None);
+        assert_rows_offer_archive(&shell, cx, false);
+    }
+
+    #[gpui::test]
+    fn organization_cloud_rows_show_no_archive_in_any_layout(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        let (shell, cx) = mixed_sidebar(cx, &runtime, directory.path(), Some("org-team"));
+        assert_rows_offer_archive(&shell, cx, true);
+    }
+
+    #[gpui::test]
+    fn resting_on_a_row_opens_its_details_card(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        let (shell, cx) = mixed_sidebar(cx, &runtime, directory.path(), None);
+        shell.update(cx, |shell, cx| {
+            shell.settings.sidebar_organization = SidebarOrganization::ByProject;
+            shell.sidebar_collapsed_groups.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let row = cx.debug_bounds("chat-cloud:task-1").expect("cloud row");
+        cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(
+            cx.debug_bounds("chat-peek-card").is_none(),
+            "the card waits for the pointer to rest"
+        );
+        cx.executor()
+            .advance_clock(crate::tooltip::CARD_DELAY + std::time::Duration::from_millis(50));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        let card = cx
+            .debug_bounds("chat-peek-card")
+            .expect("details card opens");
+        assert!(
+            card.left() >= row.right(),
+            "the card opens beside the row, not over it"
+        );
+        let peek = shell.read_with(cx, |shell, cx| {
+            shell.chat_peek("cloud:task-1", None, "1m", cx).unwrap()
+        });
+        assert_eq!(peek.title, "Cloud chat");
+        assert_eq!(peek.project.as_deref(), Some("Hello-World"));
+        assert_eq!(peek.branch.as_deref(), Some("task/cloud"));
+        assert_eq!(peek.place_label(), "Cloud · Boxd · Running");
+        // Leaving the row closes it.
+        cx.simulate_mouse_move(
+            gpui::point(row.left() + px(1.0), row.bottom() + px(400.0)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("chat-peek-card").is_none());
     }
 }
 
