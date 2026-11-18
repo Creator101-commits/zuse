@@ -79,6 +79,23 @@ pub struct MachineDetails {
     pub vcpu: u32,
     #[prost(uint64, tag = "16")]
     pub memory_bytes: u64,
+    /// Creation time (the SDK's `createdAt`).
+    #[prost(int64, tag = "17")]
+    pub created_at: i64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ListMachinesRequest {
+    #[prost(string, tag = "1")]
+    pub org: String,
+    #[prost(bool, tag = "2")]
+    pub all_contexts: bool,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ListMachinesResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub vms: Vec<MachineDetails>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]

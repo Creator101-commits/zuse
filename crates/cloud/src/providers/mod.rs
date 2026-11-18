@@ -47,6 +47,24 @@ pub struct Machine {
     pub memory_bytes: Option<u64>,
 }
 
+/// One machine in a provider listing, compared against the database by the
+/// provider reconciliation pass. A listing never proves that a machine is absent.
+#[derive(Clone, Debug)]
+pub struct ListedMachine {
+    pub id: String,
+    pub name: String,
+    pub state: MachineState,
+    pub created_at_ms: Option<i64>,
+}
+
+/// One machine's provider usage over a closed window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MachineUsage {
+    pub machine_id: String,
+    pub running_seconds: u64,
+    pub cost_micros: i64,
+}
+
 pub struct ExecResult {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,

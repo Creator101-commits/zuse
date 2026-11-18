@@ -37,6 +37,7 @@ mod context_usage;
 mod desktop_analytics;
 pub mod desktop_import;
 mod dictation;
+mod dither_bar;
 pub mod edge_fade;
 pub mod file_icons;
 pub mod files;

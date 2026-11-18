@@ -10,13 +10,16 @@ use async_trait::async_trait;
 use zuse_protocol::cloud_lifecycle::{Action, CAPABILITY, Directive, RuntimeRequest};
 mod admission_intent;
 mod authority_connection;
+pub mod backstop;
 pub mod idle;
 mod locking;
 pub(super) mod memory_authority;
 mod memory_recovery;
+mod reconciliation_pause;
 pub mod scheduling;
 pub mod wakeup;
 pub(super) use memory_recovery::{memory_recovery_for, valid_memory_recovery};
+pub(super) use reconciliation_pause::PauseAdmission;
 #[cfg(test)]
 mod resume_capacity_tests;
 mod task_wake;

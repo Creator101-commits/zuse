@@ -20,6 +20,8 @@ struct Effect {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     received_at_ms: Option<i64>,
 }
+/// How long a pause or archive waits for the guest's quiescence receipt.
+pub(crate) const QUIESCE_TIMEOUT_MS: i64 = 120_000;
 fn effect_error() -> ApiError {
     ApiError::conflict("cloud_lifecycle_provider_receipt_invalid")
 }
@@ -316,8 +318,31 @@ impl RuntimeControl {
                 .await;
         }
         if d.phase == "quiescing" {
-            if now - op["created_at"].as_i64().unwrap_or(now) > 120000 {
-                return Err(ApiError::unavailable("cloud_runtime_quiesce_failed"));
+            if now - op["created_at"].as_i64().unwrap_or(now) > QUIESCE_TIMEOUT_MS {
+                // A recreation's full shutdown keeps its own failure and
+                // attention handling.
+                if d.full_shutdown {
+                    return Err(ApiError::unavailable("cloud_runtime_quiesce_failed"));
+                }
+                // A guest that cannot answer within the bound (gone, fenced or
+                // wedged) must not keep its machine awake: failing here used to
+                // retry until the job gave up, leaving the computer "pausing"
+                // and running. Sleep it without the receipt; retained storage
+                // survives, only unflushed guest state is at risk.
+                let (mut tx, row, op, current) = self
+                    .lifecycle_locked_with(connection.as_mut().map(|c| &mut **c), job)
+                    .await?;
+                if current.phase == "quiescing" && current.operation_id == d.operation_id {
+                    phase(&mut tx, &row, &op, "quiesced", now).await?;
+                    sqlx::query("UPDATE api_cloud_workspaces SET runtime_state='offline',status_code='runtime-quiesce-timed-out' WHERE workspace_id=$1")
+                        .bind(&job.resource_id).execute(&mut *tx).await?;
+                    tracing::warn!(
+                        workspace = %job.resource_id,
+                        operation = %current.operation_id,
+                        "Cloud runtime did not quiesce in time; sleeping without its receipt"
+                    );
+                }
+                tx.commit().await?;
             }
             return self
                 .lifecycle_save_with(

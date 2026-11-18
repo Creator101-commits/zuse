@@ -29,19 +29,21 @@ pub(super) struct OpenTarget {
 pub(super) struct OpenIn {
     pub(super) menu: popover::Popup<()>,
     pub(super) targets: Vec<OpenTarget>,
+    /// The apps that can open a cloud computer over SSH, detected alongside.
+    pub(super) ssh_targets: Vec<super::ssh_open::SshTarget>,
     pub(super) loading: bool,
     detected: bool,
     task: Option<Task<()>>,
 }
 
-struct TargetDefinition {
-    id: &'static str,
-    label: &'static str,
-    app_name: Option<&'static str>,
+pub(super) struct TargetDefinition {
+    pub(super) id: &'static str,
+    pub(super) label: &'static str,
+    pub(super) app_name: Option<&'static str>,
     /// Bundle paths, `~` meaning the home directory.
-    app_paths: &'static [&'static str],
-    icon_names: &'static [&'static str],
-    icon_paths: &'static [&'static str],
+    pub(super) app_paths: &'static [&'static str],
+    pub(super) icon_names: &'static [&'static str],
+    pub(super) icon_paths: &'static [&'static str],
 }
 
 const MAC_TARGETS: &[TargetDefinition] = &[
@@ -148,7 +150,7 @@ const WINDOWS_TARGETS: &[(&str, &str, Option<&str>)] = &[
     ("terminal", "Windows Terminal", Some("wt")),
 ];
 
-fn home_path(path: &str) -> Option<PathBuf> {
+pub(super) fn home_path(path: &str) -> Option<PathBuf> {
     match path.strip_prefix("~/") {
         Some(rest) => std::env::var_os("HOME").map(|home| Path::new(&home).join(rest)),
         None => Some(PathBuf::from(path)),
@@ -163,7 +165,10 @@ fn first_existing(paths: &[&str]) -> Option<PathBuf> {
 }
 
 /// Resolve `command` on PATH (with PATHEXT on Windows).
-fn executable_on_path(command: &str, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+pub(super) fn executable_on_path(
+    command: &str,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
     let extensions: Vec<String> = if cfg!(windows) {
         std::env::var("PATHEXT")
             .unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
@@ -316,7 +321,7 @@ fn bundle_icon_path(target: &TargetDefinition, app: Option<&Path>) -> Option<Pat
 
 /// Convert the app's `.icns` to a PNG under `cache_dir`, keyed by the
 /// source's size and mtime so an app update refreshes it.
-fn cached_icon_png(
+pub(super) fn cached_icon_png(
     target: &TargetDefinition,
     app: Option<&Path>,
     cache_dir: &Path,
@@ -452,7 +457,7 @@ impl Shell {
     }
 
     /// Detect the apps again (the menu refreshes on every open).
-    fn refresh_open_targets(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_open_targets(&mut self, cx: &mut Context<Self>) {
         if self.open_in.loading {
             return;
         }
@@ -460,11 +465,12 @@ impl Shell {
         let cache = self.open_in_icon_cache();
         let detect = cx
             .background_executor()
-            .spawn(async move { detect_targets(&cache) });
+            .spawn(async move { (detect_targets(&cache), super::ssh_open::detect(&cache)) });
         self.open_in.task = Some(cx.spawn(async move |this, cx| {
-            let targets = detect.await;
+            let (targets, ssh_targets) = detect.await;
             this.update(cx, |this, cx| {
                 this.open_in.targets = targets;
+                this.open_in.ssh_targets = ssh_targets;
                 this.open_in.loading = false;
                 this.open_in.detected = true;
                 this.open_in.task = None;

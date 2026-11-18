@@ -163,12 +163,7 @@ pub(crate) fn title_row(
 /// when `high`.
 pub(crate) fn dither_meter(fraction: f64, high: bool, theme: &Theme) -> gpui::Div {
     let on = if high { theme.warning } else { theme.accent };
-    let off = theme.text_muted.opacity(0.3);
-    div()
-        .relative()
-        .w_full()
-        .h(px(METER_HEIGHT))
-        .child(zuse_viewport::dither::meter(fraction as f32, on, off))
+    crate::dither_bar::dither_bar(fraction as f32, on, theme).h(px(METER_HEIGHT))
 }
 
 /// The card's context section, when the harness reports a window.

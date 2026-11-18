@@ -72,6 +72,7 @@ mod actions_ui;
 mod chat_dropzone;
 #[cfg(test)]
 mod chat_dropzone_tests;
+mod chat_peek;
 mod chat_pull_requests;
 #[cfg(test)]
 mod chat_rename_tests;
@@ -90,6 +91,7 @@ mod panel_layout;
 mod panel_menu;
 mod pr_watch;
 mod project_setup;
+mod ssh_open;
 mod update_notes;
 mod update_restart;
 use panel_layout::{AuxiliaryPanel, FitInputs, HorizontalPanelFit, panel_content_tween};
@@ -1243,6 +1245,8 @@ const SIDEBAR_LIST_PAD_TOP: f32 = 4.0;
 
 /// Active and archived sessions share harness/title geometry.
 const SIDEBAR_ACTIVE_HARNESS_ICON_SIZE: f32 = 13.0;
+/// The cloud glyph on a sidebar row that runs on a cloud computer.
+const SIDEBAR_CLOUD_MARK_SIZE: f32 = 16.0;
 /// The working chat's pixel loader in a sidebar row: smaller than the
 /// 13px status slot so the motion stays a quiet accent beside the label.
 const SIDEBAR_WORKING_LOADER: f32 = 10.0;
@@ -2512,6 +2516,9 @@ pub struct Shell {
     session_info_overlay: bool,
     /// The card's sections the user toggled away from their default (by key).
     session_info_folded: std::collections::HashSet<&'static str>,
+    /// The cloud card's Performance submenu, keyboard highlight and hover
+    /// intent.
+    cloud_menu: popover::Submenus,
     /// The session card's pull request: details, menu and updates.
     summary_pr: summary_pull_request::SummaryPullRequest,
     /// Background tasks with a stop request on its way (by task id); their
@@ -3117,6 +3124,7 @@ impl Shell {
             session_info_shown: false,
             session_info_overlay: false,
             session_info_folded: Default::default(),
+            cloud_menu: Default::default(),
             background_stops: Default::default(),
             summary_pr: Default::default(),
             session_info_pressed_open: None,
@@ -7121,6 +7129,33 @@ impl Shell {
         cx.notify();
     }
 
+    /// A row archived (or deleted) under the pointer unmounts without its
+    /// hover ending: forget it, so the next row the pointer rests on can take
+    /// the hover. Cloud task rows (`chat-cloud:<workspace>`) are listed by the
+    /// account catalog, not the local chat list; checking them against local
+    /// chats dropped their hover on every render, so they never showed the
+    /// Archive control.
+    fn forget_unlisted_chat_hover(&mut self, cx: &App) {
+        let Some(chat_id) = self
+            .chat_status_hover
+            .as_deref()
+            .and_then(|row| row.strip_prefix("chat-"))
+        else {
+            return;
+        };
+        let state = self.state.read(cx);
+        let listed = match chat_id.strip_prefix(CLOUD_ROW_PREFIX) {
+            Some(workspace) => state.cloud_sidebar_workspace(workspace).is_some(),
+            None => state
+                .chats
+                .iter()
+                .any(|chat| chat.id == chat_id && !chat.archived),
+        };
+        if !listed {
+            self.chat_status_hover = None;
+        }
+    }
+
     fn reconcile_sidebar_pins(&mut self, cx: &mut Context<Self>) {
         self.discard_stale_sidebar_pin_writes(cx);
         self.migrate_sidebar_sections(cx);
@@ -9458,6 +9493,12 @@ impl Shell {
         // Archived organization tasks have no restore list yet (Settings →
         // Archived lists personal computers), so they are not offered.
         let cloud_locked = cloud && self.state.read(cx).cloud_organization_id().is_some();
+        // Cloud rows wear a small cloud beside their age, green while the
+        // computer is up (the catalog's own state; nothing is polled).
+        let cloud_online = id
+            .strip_prefix(CLOUD_ROW_PREFIX)
+            .and_then(|workspace| self.state.read(cx).cloud_sidebar_workspace(workspace))
+            .is_some_and(|row| chat_peek::cloud_machine(row["state"].as_str()).1);
         let corner_hovered = !preview
             && !cloud_locked
             && !(cloud && archived)
@@ -9907,6 +9948,12 @@ impl Shell {
                     .inset_0(),
                 )
             });
+        // Resting on a sidebar row opens its details card beside it.
+        let row = if sidebar && !preview && rename_input.is_none() {
+            self.with_chat_peek(row, id.clone(), status_label, time_ago.clone(), cx)
+        } else {
+            row
+        };
         let row = if sidebar {
             // Sidebar rows: one line under a project heading (branch glyph,
             // title, size or age), or the one-list card (avatar; title + age;
@@ -9940,15 +9987,24 @@ impl Shell {
                 .is_some_and(|label| label.chars().count() > 3);
             let archive_id = id.clone();
             let trailing_info: AnyElement = if show_archive {
-                icon(if archived {
-                    icons::ARCHIVE_UP_MINIMALISTIC
-                } else {
-                    icons::ARCHIVE_MINIMALISTIC
-                })
-                .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
-                .flex_none()
-                .text_color(theme.text_muted)
-                .into_any_element()
+                div()
+                    .id(SharedString::from(format!("{row_id}-archive")))
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("chat-archive-{id}")
+                    })
+                    .flex_none()
+                    .child(
+                        icon(if archived {
+                            icons::ARCHIVE_UP_MINIMALISTIC
+                        } else {
+                            icons::ARCHIVE_MINIMALISTIC
+                        })
+                        .size(px(SIDEBAR_ACTIVE_HARNESS_ICON_SIZE))
+                        .flex_none()
+                        .text_color(theme.text_muted),
+                    )
+                    .into_any_element()
             } else if let (false, false, Some((additions, deletions))) =
                 (show_legend, two_line, diff_stat)
             {
@@ -10167,6 +10223,29 @@ impl Shell {
                 )
                 .into_any_element(),
             };
+            // Stays put while the trailing slot swaps to Archive on hover.
+            let cloud_mark = cloud.then(|| {
+                div()
+                    .id(SharedString::from(format!("{row_id}-cloud")))
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("chat-cloud-mark-{id}")
+                    })
+                    .size(px(SIDEBAR_CLOUD_MARK_SIZE))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .aria_label("Runs on a cloud computer")
+                    .child(
+                        icon(icons::DITHER_CLOUD)
+                            .size(px(SIDEBAR_CLOUD_MARK_SIZE))
+                            .text_color(cloud_conversation::header_status_color(
+                                cloud_online,
+                                theme,
+                            )),
+                    )
+            });
             let title_line = div()
                 .w_full()
                 .min_w_0()
@@ -10176,6 +10255,7 @@ impl Shell {
                 .gap(px(6.0))
                 .children(title_glyph)
                 .child(title_el)
+                .children(cloud_mark)
                 .child(trailing);
             let body = if two_line {
                 // Line 2: project, then the pull request (state glyph,
@@ -10695,24 +10775,7 @@ impl Shell {
             self.cancel_pinned_session_drag(cx);
         }
 
-        // A row archived (or deleted) under the pointer unmounts without its
-        // hover ending: forget it, so the next row the pointer rests on can
-        // take the hover.
-        if let Some(chat_id) = self
-            .chat_status_hover
-            .as_deref()
-            .and_then(|row| row.strip_prefix("chat-"))
-        {
-            let listed = self
-                .state
-                .read(cx)
-                .chats
-                .iter()
-                .any(|chat| chat.id == chat_id && !chat.archived);
-            if !listed {
-                self.chat_status_hover = None;
-            }
-        }
+        self.forget_unlisted_chat_hover(cx);
 
         // Keyed rows: (stable key, estimated height, element) — the key + height
         // list drives the §1.6 resort FLIP diff below (attention-bucket
@@ -12599,6 +12662,10 @@ impl Shell {
             return;
         }
         if matches!(self.route, Route::Settings(_)) {
+            return;
+        }
+        if self.cloud_menu_key(event, cx) {
+            cx.stop_propagation();
             return;
         }
         if self.open_in_key(event, cx) {
