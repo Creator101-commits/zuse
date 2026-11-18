@@ -6,6 +6,12 @@ impl Shell {
         project: serde_json::Value,
         cx: &mut Context<Self>,
     ) {
+        // New cloud chats are for Cloud subscribers; anyone else lands on
+        // Billing (or General when signed out) to subscribe first.
+        if self.state.read(cx).cloud_access().withholds_cloud() {
+            self.open_settings(SettingsSection::Billing, cx);
+            return;
+        }
         self.sync_cloud_tab_scope(cx);
         if !self.cloud_tab_navigation_ready(cx) {
             return;

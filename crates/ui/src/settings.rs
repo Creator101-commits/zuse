@@ -2576,7 +2576,9 @@ mod tests {
         let alias: UiSettings = serde_json::from_str(r#"{"settingsSection":"agents"}"#).unwrap();
         assert_eq!(alias.settings_section, SettingsSection::Agents);
         assert_eq!(
-            alias.settings_section.reopenable(),
+            alias
+                .settings_section
+                .reopenable(crate::state::CloudAccess::Subscribed),
             SettingsSection::Harnesses
         );
     }

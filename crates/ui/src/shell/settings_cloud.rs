@@ -37,9 +37,29 @@ impl Shell {
         self.set_usage_settings_compute(true, cx);
     }
 
+    /// Subscribing, or a subscription ending, applies at once: the Settings
+    /// menu re-renders from [`AppState::cloud_access`], and a page that is no
+    /// longer offered gives way to Billing (Cloud pages) or General. Waits
+    /// for a settled answer so start-up and engine restarts never bounce the
+    /// user off a Cloud page.
+    pub(super) fn follow_cloud_access(&mut self, cx: &mut Context<Self>) {
+        let access = self.state.read(cx).cloud_access();
+        if !access.settled() {
+            return;
+        }
+        if self.usage_settings_compute && !access.subscribed() {
+            self.set_usage_settings_compute(false, cx);
+        }
+        if let Route::Settings(section) = self.route
+            && !section.reachable(access)
+        {
+            self.open_settings(section, cx);
+        }
+    }
+
     fn set_usage_settings_compute(&mut self, compute: bool, cx: &mut Context<Self>) {
-        // Local-only builds have no Cloud compute tab to switch to.
-        let compute = compute && zuse_viewport::cloud_gate::enabled();
+        // Only subscribers have a Cloud compute tab to switch to.
+        let compute = compute && !self.state.read(cx).cloud_access().withholds_cloud();
         if self.usage_settings_compute == compute {
             return;
         }
@@ -104,8 +124,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = Theme::of(cx).for_settings_surface();
-        // Local-only builds show model usage alone: no Cloud compute tab.
-        let cloud = zuse_viewport::cloud_gate::enabled();
+        // Model usage alone unless the account has a Cloud subscription: no
+        // Cloud compute tab for local-only builds, signed-out or unsubscribed
+        // accounts.
+        let cloud = self.state.read(cx).cloud_access().subscribed();
         let compute = cloud && self.usage_settings_compute;
         let tabs = div()
             .id("usage-settings-tabs")

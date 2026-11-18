@@ -88,8 +88,10 @@ use history_window::{HistoryFrame, NativeHistory, WatchSeed};
 
 mod account_connection;
 mod cloud_connection;
+mod cloud_plan;
 mod cloud_sidebar;
 pub use cloud_connection::CloudTarget;
+pub use cloud_plan::CloudAccess;
 mod remote_connection;
 pub use account_connection::{AccountTarget, RemoteTarget};
 
@@ -931,6 +933,8 @@ pub struct AppState {
     /// Account identity for cloud features, independent of device/workspace auth.
     pub cloud_account: Option<serde_json::Value>,
     cloud_sidebar: cloud_sidebar::Catalog,
+    /// The signed-in account's Cloud subscription; see [`Self::cloud_access`].
+    cloud_plan: cloud_plan::Plan,
     pub devices: Vec<Device>,
     pub project_creations: HashMap<String, Vec<zuse_protocol::project_creation::ProjectCreation>>,
     project_creation_watches: HashMap<String, Task<()>>,
@@ -1148,6 +1152,7 @@ impl AppState {
             auth: None,
             cloud_account: None,
             cloud_sidebar: Default::default(),
+            cloud_plan: Default::default(),
             devices: Vec::new(),
             project_creations: HashMap::new(),
             project_creation_watches: HashMap::new(),
@@ -3664,6 +3669,7 @@ impl AppState {
             ),
             spawn_local_device_probe(cx, handle.clone()),
             cloud_sidebar::spawn(cx, handle.controller()),
+            cloud_plan::spawn(cx, handle.controller()),
         ]);
         if supports_harness_updates {
             watch_tasks.push(spawn_watch(
