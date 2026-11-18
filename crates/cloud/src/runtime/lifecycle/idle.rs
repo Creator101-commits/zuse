@@ -86,7 +86,8 @@ impl RuntimeControl {
         } else {
             None
         };
-        Ok(crate::db::wake::earliest([idle, credit]))
+        let backstop = self.backstop_due(now).await?;
+        Ok(crate::db::wake::earliest([idle, credit, backstop]))
     }
     /// Admit at most one due computer per worker round. Empty scans are paced
     /// by the worker; an open event subscription is not user activity.
@@ -111,7 +112,9 @@ impl RuntimeControl {
             .fetch_optional(&self.pool)
             .await?;
         let Some(id) = candidate else {
-            return Ok(false);
+            // Nothing passed the normal eligibility: let the independent
+            // max-quiet-awake backstop look for computers it missed.
+            return self.backstop_sleep_once(now).await;
         };
         let mut tx = self.pool.begin().await?;
         let (row, generation, _) = locking::workspace(&mut tx, &id, true).await?;

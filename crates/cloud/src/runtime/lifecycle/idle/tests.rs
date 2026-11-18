@@ -6,6 +6,7 @@ fn config() -> Value {
         "runtimeGeneration":2,"gatewayEpoch":2,"runtimeRpcProtocol":"zuse-rpc-v1",
         "commandDeliveryMode":zuse_protocol::cloud_task_commands::MODE,
         "rustCommandAdmissionVersion":2,"rustCommandMailboxEnabled":true,
+        "runtimeCredentialExpiresAtMs":9_000_000_000_000_i64,
         "runtimeBootstrapReceipt":{"workspaceId":"ws-bob","generation":2,"gatewayEpoch":2},
         "runtimeCredentialKeyThumbprint":"credential-key","runtimeSigningKeyThumbprint":"signing-key",
         "rustRuntimeStorage":{"storageIncarnationId":"retained-disk"},
@@ -65,7 +66,7 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
     ] {
         sqlx::raw_sql(ddl).execute(&pool).await.unwrap();
     }
-    sqlx::raw_sql("CREATE TABLE zuse_rust_task_command_execution(workspace_id text NOT NULL,command_id text NOT NULL,state text NOT NULL,updated_at bigint NOT NULL,PRIMARY KEY(workspace_id,command_id)); INSERT INTO zuse_rust_control_owners VALUES('workspace','ws-bob','rust',2,0)").execute(&pool).await.unwrap();
+    sqlx::raw_sql("CREATE TABLE zuse_rust_task_command_execution(workspace_id text NOT NULL,command_id text NOT NULL,state text NOT NULL,updated_at bigint NOT NULL,runtime_generation bigint NOT NULL DEFAULT 2,PRIMARY KEY(workspace_id,command_id)); INSERT INTO zuse_rust_control_owners VALUES('workspace','ws-bob','rust',2,0)").execute(&pool).await.unwrap();
     let control = std::sync::Arc::new(control(pool.clone()));
     let now = 2_000_000;
     let grace = crate::runtime::activity::COALESCE_MS;
@@ -82,13 +83,8 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         "the deadline is the instant admission becomes possible"
     );
     sqlx::query("UPDATE api_cloud_workspaces SET last_activity_at=1,next_action_at=0 WHERE workspace_id='ws-bob'").execute(&pool).await.unwrap();
-    for state in [
-        "queued",
-        "starting",
-        "running",
-        "waiting-input",
-        "outcome-unknown",
-    ] {
+    // Live turns of a runtime that renews its credential: no deadline at all.
+    for state in ["starting", "running", "waiting-input"] {
         sqlx::query("INSERT INTO zuse_rust_task_command_execution VALUES('ws-bob','held',$1,1) ON CONFLICT(workspace_id,command_id) DO UPDATE SET state=excluded.state")
             .bind(state).execute(&pool).await.unwrap();
         assert!(
@@ -101,6 +97,36 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
             "a live command has no idle deadline ({state})"
         );
     }
+    // A queued command blocks ordinary idle sleep; only the max-quiet-awake
+    // backstop has a deadline for it.
+    sqlx::query("UPDATE zuse_rust_task_command_execution SET state='queued'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!control.idle_sleep_once(now).await.unwrap());
+    assert_eq!(
+        control.idle_sleep_due(now).await.unwrap(),
+        Some(1 + control.max_quiet_awake_ms()),
+        "a queued command is held only until the backstop bound"
+    );
+    // outcome-unknown is terminal: it holds the computer for one idle window
+    // from when it was recorded, like a completed turn, never indefinitely.
+    sqlx::query(
+        "UPDATE zuse_rust_task_command_execution SET state='outcome-unknown',updated_at=$1",
+    )
+    .bind(now - 1_000)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        !control.idle_sleep_once(now).await.unwrap(),
+        "a fresh outcome-unknown still holds the idle window"
+    );
+    assert_eq!(
+        control.idle_sleep_due(now).await.unwrap(),
+        Some(now - 1_000 + quiet),
+        "an outcome-unknown turn moves the deadline like any finished turn"
+    );
     sqlx::query("UPDATE zuse_rust_task_command_execution SET state='completed',updated_at=$1")
         .bind(now - 300_000)
         .execute(&pool)
@@ -146,10 +172,13 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
             !control.idle_sleep_once(now).await.unwrap(),
             "unsupported/repairing computers must not block or be paused"
         );
-        assert_eq!(
-            control.idle_sleep_due(now).await.unwrap(),
-            None,
-            "ineligible computers never produce a past-due deadline"
+        assert!(
+            control
+                .idle_sleep_due(now)
+                .await
+                .unwrap()
+                .is_none_or(|at| at == 1 + control.max_quiet_awake_ms()),
+            "ineligible computers never produce a past-due deadline, only the backstop bound"
         );
     }
     sqlx::query("UPDATE api_cloud_workspaces SET request_config=$1,state='setup' WHERE workspace_id='ws-bob'").bind(config()).execute(&pool).await.unwrap();
@@ -178,7 +207,11 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         !control.idle_sleep_once(now).await.unwrap(),
         "launch must finish first"
     );
-    assert_eq!(control.idle_sleep_due(now).await.unwrap(), None);
+    assert_eq!(
+        control.idle_sleep_due(now).await.unwrap(),
+        Some(1 + control.max_quiet_awake_ms()),
+        "a launch that never finishes is held only until the backstop bound"
+    );
     sqlx::query("DELETE FROM api_cloud_workspace_launch_intents")
         .execute(&pool)
         .await
@@ -242,8 +275,8 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
     assert!(!control.idle_sleep_once(now).await.unwrap());
     assert_eq!(
         control.idle_sleep_due(now).await.unwrap(),
-        None,
-        "a pausing computer has no deadline"
+        Some(now + control.max_quiet_awake_ms()),
+        "a pausing computer has only the backstop deadline of its operation"
     );
     let counts:(i64,i64)=sqlx::query_as("SELECT (SELECT count(*)FROM zuse_rust_lifecycle_operations),(SELECT count(*)FROM zuse_rust_jobs WHERE kind='workspace-lifecycle')").fetch_one(&pool).await.unwrap();
     assert_eq!(counts, (1, 1));

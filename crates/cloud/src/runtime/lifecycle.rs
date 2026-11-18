@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use zuse_protocol::cloud_lifecycle::{Action, CAPABILITY, Directive, RuntimeRequest};
 mod admission_intent;
 mod authority_connection;
+pub mod backstop;
 pub mod idle;
 mod locking;
 pub(super) mod memory_authority;
