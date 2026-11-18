@@ -578,6 +578,9 @@ impl Mailbox {
                     return Ok(());
                 }
             }
+            // The pacer may have slept across a credential renewal; a lease
+            // must present the credential the identity holds now.
+            let boot = bootstrap.borrow().clone();
             let request = json!({"storageIncarnationId":self.incarnation,"waitMs":plan.wait_ms});
             let page = tokio::select! {_=cancel.cancelled()=>return Ok(()),page=authority.post(&self.workspace,&["runtime","commands","lease"],&boot.runtime_credential,&request)=>page};
             let page: LeasePage = match page {
@@ -699,6 +702,9 @@ impl Mailbox {
                     return Ok(());
                 }
             }
+            // The pacer may have slept across a credential renewal; a lease
+            // must present the credential the identity holds now.
+            let boot = bootstrap.borrow().clone();
             let request = json!({"storageIncarnationId":self.incarnation,"waitMs":plan.wait_ms,"controlOnly":control_only,"maxItems":available});
             // Keep the same lease HTTP future alive while preparing earlier
             // commands: dropping its response could lose a committed lease.

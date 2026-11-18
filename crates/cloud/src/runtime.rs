@@ -1563,7 +1563,17 @@ pub(super) fn fence_reason(row: &Value, credential: &str, now: i64) -> &'static 
         .as_str()
         .is_none_or(|h| !equal(h, &hash(credential)))
     {
-        "credential_mismatch"
+        // The runtime's own renewal replaced this credential: a request that
+        // was already in flight (for example a command long-poll) still
+        // carries it. Distinct from a credential the server never issued.
+        if row["request_config"]["runtimeCredentialRenewal"]["previousCredentialHash"]
+            .as_str()
+            .is_some_and(|h| equal(h, &hash(credential)))
+        {
+            "credential_renewed"
+        } else {
+            "credential_mismatch"
+        }
     } else if row["request_config"]["runtimeCredentialExpiresAtMs"]
         .as_i64()
         .unwrap_or(0)
@@ -1579,15 +1589,19 @@ pub(super) fn fence_reason(row: &Value, credential: &str, now: i64) -> &'static 
 /// Record why a runtime was fenced so intermittent startup failures are
 /// diagnosable from one log line.
 pub(super) fn log_fence(site: &'static str, id: &str, row: &Value, credential: &str, now: i64) {
-    tracing::warn!(
-        workspace = %id,
-        site,
-        reason = fence_reason(row, credential, now),
-        generation = row["request_config"]["runtimeGeneration"].as_i64().unwrap_or(0),
-        state = row["state"].as_str().unwrap_or(""),
-        runtime_state = row["runtime_state"].as_str().unwrap_or(""),
-        "Cloud runtime fenced"
-    );
+    let reason = fence_reason(row, credential, now);
+    let generation = row["request_config"]["runtimeGeneration"]
+        .as_i64()
+        .unwrap_or(0);
+    let state = row["state"].as_str().unwrap_or("");
+    let runtime_state = row["runtime_state"].as_str().unwrap_or("");
+    // A request that crossed the runtime's own renewal is expected about
+    // once per renewal; a warning there would hide real fences.
+    if reason == "credential_renewed" {
+        tracing::info!(workspace = %id, site, reason, generation, state, runtime_state, "Cloud runtime fenced");
+    } else {
+        tracing::warn!(workspace = %id, site, reason, generation, state, runtime_state, "Cloud runtime fenced");
+    }
 }
 fn required<'a>(row: &'a Value, key: &str) -> Result<&'a str, ApiError> {
     row[key].as_str().ok_or_else(rejected)
@@ -1768,5 +1782,20 @@ impl RuntimeControl {
             tenant,
             subject: owner,
         })
+    }
+}
+#[cfg(test)]
+mod fence_reason_tests {
+    use super::*;
+    #[test]
+    fn a_credential_replaced_by_its_own_renewal_is_not_a_mismatch() {
+        let row = json!({
+            "state":"ready","desired_state":"ready",
+            "runtime_credential_hash":hash("current"),
+            "request_config":{"runtimeCredentialExpiresAtMs":10,
+                "runtimeCredentialRenewal":{"previousCredentialHash":hash("previous")}}
+        });
+        assert_eq!(fence_reason(&row, "previous", 1), "credential_renewed");
+        assert_eq!(fence_reason(&row, "forged", 1), "credential_mismatch");
     }
 }

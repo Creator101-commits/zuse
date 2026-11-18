@@ -1818,15 +1818,27 @@ async fn command_lease(
     }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait.into());
     let mut events = runtime.mailbox_changes.subscribe();
+    let mut authorized: Option<zuse_protocol::cloud_commands::LeasePage> = None;
     loop {
-        let page = runtime
+        let page = match runtime
             .command_lease(
                 &id,
                 credential,
                 &request,
                 chrono::Utc::now().timestamp_millis(),
             )
-            .await?;
+            .await
+        {
+            Ok(page) => page,
+            // A recheck fenced after this request already authenticated, most
+            // often because the runtime renewed its credential while the
+            // poll was waiting. End the poll with the last authorized (empty)
+            // page; the next poll authenticates afresh and sees any fence.
+            Err(error) => match authorized {
+                Some(page) if error.code == "workspace_runtime_fenced" => return Ok(Json(page)),
+                _ => return Err(error),
+            },
+        };
         if !page.leases.is_empty()
             || page.fence_required
             || request
@@ -1836,6 +1848,7 @@ async fn command_lease(
         {
             return Ok(Json(page));
         }
+        authorized = Some(page);
         tokio::select! {_=events.recv()=>{},_=tokio::time::sleep_until(deadline.min(tokio::time::Instant::now()+runtime.mailbox_recheck()))=>{}}
     }
 }
