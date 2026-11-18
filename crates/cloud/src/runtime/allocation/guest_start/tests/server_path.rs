@@ -257,24 +257,25 @@ async fn one_dispatch_then_enrollment_wakes_the_job_and_failures_fall_back_once(
                 let _ = control.allocate_once(&guest, clock_ms()).await;
                 assert_eq!(guest.status_reads.load(Ordering::SeqCst), 1);
                 let (code, marker): (Option<String>, Value) = sqlx::query_as("SELECT j.last_error_code,w.request_config->'rustGuestStart' FROM zuse_rust_jobs j JOIN api_cloud_workspaces w ON w.workspace_id=j.resource_id WHERE j.resource_id=$1").bind(&workspace).fetch_one(&pool).await.unwrap();
-                if case == "rejected" {
-                    assert_eq!(code.as_deref(), Some("cloud_provider_rejected"));
-                    assert!(marker["serverPath"].is_null());
-                } else {
-                    let expected = if case == "timeout" {
-                        "cloud_guest_start_timeout"
-                    } else {
-                        "cloud_guest_start_not_enrolled"
-                    };
-                    assert_eq!(code.as_deref(), Some(expected));
-                    assert_eq!(marker["serverPath"], true);
-                    // The next attempt uses the server path exactly once.
-                    due_now(&pool, &workspace).await;
-                    control.allocate_once(&guest, clock_ms()).await.unwrap();
-                    assert_eq!(guest.helper_calls.load(Ordering::SeqCst), 1);
-                    assert_eq!(guest.launches.load(Ordering::SeqCst), 1);
-                    assert_eq!(guest.dispatches.load(Ordering::SeqCst), 1);
-                }
+                let (expected, marked) = match case {
+                    "timeout" => ("cloud_guest_start_timeout", "cloud_guest_start_timeout"),
+                    "rejected" => ("cloud_provider_rejected", "cloud_guest_start_rejected"),
+                    _ => (
+                        "cloud_guest_start_not_enrolled",
+                        "cloud_guest_start_not_enrolled",
+                    ),
+                };
+                assert_eq!(code.as_deref(), Some(expected));
+                assert_eq!(marker["serverPath"], true);
+                assert_eq!(marker["code"], marked);
+                // The next attempt uses the server path exactly once, never
+                // another status read or in-computer dispatch.
+                due_now(&pool, &workspace).await;
+                control.allocate_once(&guest, clock_ms()).await.unwrap();
+                assert_eq!(guest.helper_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(guest.launches.load(Ordering::SeqCst), 1);
+                assert_eq!(guest.dispatches.load(Ordering::SeqCst), 1);
+                assert_eq!(guest.status_reads.load(Ordering::SeqCst), 1);
             }
         }
         pool.close().await;

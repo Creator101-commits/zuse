@@ -188,16 +188,20 @@ impl RuntimeControl {
                 .guest_start_status(machine, &request.operation_id)
                 .await
                 .map_err(provider_error)?;
-            let code = match outcome(&status, &request) {
+            let outcome = outcome(&status, &request);
+            let code = match outcome {
                 Outcome::Rejected => {
                     tracing::warn!(workspace = %job.resource_id,
                         code = %safe_code(status["code"].as_str().unwrap_or("")),
+                        helper = %safe_code(status["helperCode"].as_str().unwrap_or("")),
                         "Boat in-computer start was refused");
-                    return Err(provider_error(ProviderError::Rejected));
+                    "cloud_guest_start_rejected"
                 }
                 Outcome::Launched => "cloud_guest_start_not_enrolled",
                 Outcome::Failed(code) => code,
             };
+            // Later attempts use the server-side path; its helper call
+            // reconciles the same journal (and applies its own refusals).
             let mut next = marker.clone();
             next["serverPath"] = json!(true);
             next["code"] = json!(code);
@@ -209,6 +213,9 @@ impl RuntimeControl {
                 &provider.startup_observations(),
             )
             .await?;
+            if outcome == Outcome::Rejected {
+                return Err(provider_error(ProviderError::Rejected));
+            }
             return Err(ApiError::unavailable(code));
         }
         let config = &workspace["request_config"];

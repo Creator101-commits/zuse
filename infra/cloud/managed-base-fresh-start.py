@@ -27,6 +27,7 @@ VERSION = 1
 ROOT = Path('/run/zuse-fresh-start')
 HELPER = Path('/usr/local/lib/zuse/managed-base-fresh-boot.py')
 FALLBACK_SECONDS = 0.25
+REJECTED_RETRY_SECONDS = 0.5
 SAFE_ID = re.compile(r'[A-Za-z0-9_.:-]{1,160}\Z')
 HEX64 = re.compile(r'[a-f0-9]{64}\Z')
 BINDING = ('version', 'provider', 'purpose', 'operationId', 'workspaceId', 'generation',
@@ -185,11 +186,22 @@ def write_private(path, data):
         tmp.unlink(missing_ok=True)
 
 
-def status(directory, operation, state, code=None, receipt=None):
+def helper_code(result):
+    """The helper's or loader's fixed refusal code, when it printed one."""
+    try:
+        code = json.loads(result.stdout).get('code')
+    except (ValueError, AttributeError):
+        return 'unparsed'
+    return code if isinstance(code, str) and re.fullmatch(r'[a-z0-9_]{1,80}', code) else 'unknown'
+
+
+def status(directory, operation, state, code=None, receipt=None, helper=None):
     value = {'version': VERSION, 'operationId': operation, 'status': state,
              'updatedAtMs': int(time.time() * 1000)}
     if code:
         value['code'] = code
+    if helper:
+        value['helperCode'] = helper
     if receipt is not None:
         value['receipt'] = receipt
     write_private(directory / 'status.json', canonical(value) + b'\n')
@@ -277,7 +289,7 @@ def dispatch(args, root=ROOT):
     return {'status': 'accepted'}
 
 
-def run_start(directory, watch=None, clock=time.monotonic, run=subprocess.run):
+def run_start(directory, watch=None, clock=time.monotonic, run=subprocess.run, sleep=time.sleep):
     args, request = validated(json.loads((directory / 'arguments.json').read_bytes()))
     operation = args['operationId']
     deadline = clock() + args['deadlineSeconds']
@@ -291,7 +303,18 @@ def run_start(directory, watch=None, clock=time.monotonic, run=subprocess.run):
                          capture_output=True, timeout=40, env={'PATH': '/usr/bin:/bin'})
             state = helper_state(result)
             if state == 'rejected':
-                return status(directory, operation, 'rejected', 'fresh_start_helper_rejected')
+                # Right after its own `systemctl start` the helper can see the
+                # resident before it has switched to the task user
+                # (`fresh_boot_resident_not_owned_idle`). The server path
+                # retried every refusal on its next attempt; do the same here,
+                # bounded by the deadline. The helper's journal makes a retry
+                # observe the original start, never issue another.
+                rejected = helper_code(result)
+                if clock() + REJECTED_RETRY_SECONDS >= deadline:
+                    return status(directory, operation, 'rejected', 'fresh_start_helper_rejected',
+                                  helper=rejected)
+                sleep(REJECTED_RETRY_SECONDS)
+                continue
             if state == 'ready':
                 receipt = accepted_receipt(result.stdout, request)
                 if receipt is None:
