@@ -392,6 +392,7 @@ impl<T: 'static> SubmenuLevel<T> {
     /// Pointer intent over row `index`: highlight it, and open its submenu
     /// (or close a sibling's) once the pointer settles rather than while it
     /// heads diagonally into an open submenu.
+    #[allow(clippy::too_many_arguments)]
     fn hover(
         access: SubmenuAccess<T>,
         depth: usize,
@@ -528,10 +529,9 @@ impl<T: 'static> SubmenuLevel<T> {
             }));
         if let Some(panel) = panel {
             let entity = cx.entity().downgrade();
-            let on_placed: Rc<dyn Fn(Bounds<Pixels>, SubmenuSide, &mut App)> =
-                Rc::new(move |bounds, side, cx| {
-                    let _ = entity.update(cx, |this, _| access(this).placed(depth, bounds, side));
-                });
+            let on_placed: OnPlaced = Rc::new(move |bounds, side, cx| {
+                let _ = entity.update(cx, |this, _| access(this).placed(depth, bounds, side));
+            });
             let card = crate::frost::floating_glass(self.radius, crate::frost::MENU_BLUR, panel);
             let content = menu_motion(
                 SharedString::from(format!("{}-{}-{key}-submenu", self.id, depth)),
@@ -568,12 +568,15 @@ pub fn submenu_chevron(theme: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// Reports where a submenu painted, and on which side, back to its host.
+type OnPlaced = Rc<dyn Fn(Bounds<Pixels>, SubmenuSide, &mut App)>;
+
 /// Lays its content out over the trigger row, then moves it beside the row
 /// by [`submenu_placement`] once its size is known.
 struct SubmenuLayer {
     content: AnyElement,
     parent_inset: Pixels,
-    on_placed: Rc<dyn Fn(Bounds<Pixels>, SubmenuSide, &mut App)>,
+    on_placed: OnPlaced,
 }
 
 impl IntoElement for SubmenuLayer {

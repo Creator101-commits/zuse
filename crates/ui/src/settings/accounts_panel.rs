@@ -589,7 +589,7 @@ impl HarnessesPage {
                             .text_color(theme.text_muted)
                             .child(SharedString::from(short)),
                     )
-                    .child(crate::dither_bar::dither_bar(used, color, &theme).w(px(48.)))
+                    .child(crate::dither_bar::dither_bar(used, color, theme).w(px(48.)))
                     .child(
                         div()
                             .w(px(28.))
