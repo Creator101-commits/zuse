@@ -34,7 +34,8 @@ pub use form::{
     FieldValue, FormField, default_field_values, default_value, form_fields, form_submission_text,
 };
 pub use model::{
-    ChartPoint, Component, FlowNode, FollowUp, KeyValuePair, Step, StepStatus, Tab, Tone,
+    ChartPoint, Component, FlowNode, FollowUp, KeyValuePair, ServerStatus, Step, StepStatus, Tab,
+    Tone,
 };
 pub use prompt::{EXAMPLES, RESPONSE_INSTRUCTIONS, tool_description};
 

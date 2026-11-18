@@ -906,6 +906,33 @@ impl ChatDocHandle {
         })
     }
 
+    /// Write a Zuse-authored reply holding one UI block (a slash command's
+    /// card), idempotent by id like [`Self::write_user_message`].
+    pub fn write_card_reply(
+        &self,
+        message_id: &str,
+        spec: &str,
+        created_at: i64,
+    ) -> Result<(), DocError> {
+        if self.doc.read_entries()?.iter().any(|e| e.id == message_id) {
+            return Ok(());
+        }
+        self.doc.push_message(&SessionMessageEntry {
+            id: message_id.to_string(),
+            role: MessageRole::Assistant,
+            // Unique per card: hosts key block views by part id.
+            parts: vec![MessagePart::UiBlock {
+                id: format!("ui:{message_id}"),
+                spec: spec.to_string(),
+            }],
+            created_at,
+            device_id: self.device_id.clone(),
+            status: Some(MessageStatus::Complete),
+            continuation_of: None,
+            duration_ms: Some(0),
+        })
+    }
+
     /// Stamp the actual dispatched selection, never the current picker draft.
     pub fn record_agent_context(
         &self,
@@ -5786,6 +5813,73 @@ impl DocHost {
             .unwrap_or(self.inner.config.default_harness)
     }
 
+    /// Answer a Zuse slash command in the transcript: the user's text, then
+    /// the command's card as the reply. The agent never sees either.
+    async fn answer_chat_command(
+        &self,
+        sessions: &SessionsEngine,
+        handle: &Arc<ChatDocHandle>,
+        name: &str,
+        message_id: &str,
+        text: &str,
+        issued_at: i64,
+    ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
+        use crate::chat_commands::{AgentServers, NAMES, config_source, mcp_spec};
+        if !NAMES.contains(&name) {
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some(format!(
+                    "/{name} isn't a command Zuse answers on this computer"
+                )),
+            ));
+        }
+        let chat_id = &handle.chat_id;
+        // Written mid-turn, the card would become the chat's latest entry and
+        // turn a Stop aimed at the running reply into a superseded no-op.
+        if sessions.session_status(chat_id).is_some_and(|session| {
+            matches!(
+                session.status,
+                zuse_protocol::SessionStatus::Working | zuse_protocol::SessionStatus::AwaitingInput
+            )
+        }) {
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some(format!("Run /{name} once the agent finishes this turn")),
+            ));
+        }
+        let harness = self.harness_for(chat_id);
+        let servers = match sessions.harness_mcp_servers(chat_id) {
+            Some((reported_by, servers)) if reported_by == harness => {
+                AgentServers::Reported(servers)
+            }
+            _ => {
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                let configured = match (home, config_source(harness)) {
+                    (Some(home), Some(source)) => tokio::task::spawn_blocking(move || {
+                        crate::local_mcp::discover_for(&home, source)
+                    })
+                    .await
+                    .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                AgentServers::Configured(configured)
+            }
+        };
+        let spec = mcp_spec(harness, servers);
+        // Never store a card readers can't render.
+        if let Err(error) = zuse_ui_block::parse(&spec) {
+            tracing::warn!(chat = %chat_id, %error, "the /mcp card failed validation");
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some("Couldn't build the /mcp card".into()),
+            ));
+        }
+        let at = issued_at.min(now_ms());
+        handle.write_user_message(message_id, text, at)?;
+        handle.write_card_reply(&format!("{message_id}:card"), &spec, at.saturating_add(1))?;
+        Ok((SessionCommandStatus::Applied, None))
+    }
+
     /// The harness a request dispatches on: the request's own pick when it
     /// carries one (rides the command plane, immune to registry-row races),
     /// else [`Self::harness_for`].
@@ -6510,6 +6604,23 @@ impl DocHost {
                 }
                 self.interrupt_and_pause_queue(sessions, handle).await?;
                 Ok((SessionCommandStatus::Applied, None))
+            }
+            SessionCommandPayload::ChatCommand {
+                name,
+                message_id,
+                text,
+            } => {
+                // Boxed: keeps this rarely taken arm out of `execute`'s
+                // (already large) future.
+                Box::pin(self.answer_chat_command(
+                    sessions,
+                    handle,
+                    name,
+                    message_id,
+                    text,
+                    entry.issued_at,
+                ))
+                .await
             }
             SessionCommandPayload::StopBackgroundTask { task_id } => {
                 if sessions.stop_background_task(chat_id, task_id) {

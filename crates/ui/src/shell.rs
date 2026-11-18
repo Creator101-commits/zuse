@@ -5048,6 +5048,37 @@ impl Shell {
                     transcript.ui_block_reply_sent(row_id, sent, cx)
                 });
             }
+            TranscriptEvent::UiBlockPlugin(action) => {
+                self.run_ui_block_plugin_action(action.clone(), cx)
+            }
+        }
+    }
+
+    /// A chat plugin card's button. Connecting an OAuth plugin happens in
+    /// place (its sign-in page opens in the browser and the card follows);
+    /// managing, browsing and key-based plugins open the plugins page on it.
+    fn run_ui_block_plugin_action(
+        &mut self,
+        action: zuse_viewport::ui_block::PluginAction,
+        cx: &mut Context<Self>,
+    ) {
+        use zuse_viewport::ui_block::PluginAction;
+        let plugins = settings::plugins::PluginsCard::shared(self.state.clone(), cx);
+        match action {
+            PluginAction::SignIn => plugins.update(cx, |plugins, cx| plugins.sign_in_from_chat(cx)),
+            PluginAction::Connect { plugin_id } | PluginAction::AddAccount { plugin_id } => {
+                if plugins.update(cx, |plugins, cx| plugins.connect_from_chat(&plugin_id, cx)) {
+                    self.open_plugins_page(cx);
+                }
+            }
+            PluginAction::Manage { plugin_id } => {
+                plugins.update(cx, |plugins, cx| plugins.show_plugin(&plugin_id, cx));
+                self.open_plugins_page(cx);
+            }
+            PluginAction::Browse { query } => {
+                plugins.update(cx, |plugins, cx| plugins.browse_for(&query, cx));
+                self.open_plugins_page(cx);
+            }
         }
     }
 

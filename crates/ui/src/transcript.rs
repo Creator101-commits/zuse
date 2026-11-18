@@ -3844,6 +3844,8 @@ pub struct Transcript {
     visuals: HashMap<SharedString, Entity<crate::visuals::VisualFrame>>,
     /// Inline `show_ui` blocks, keyed by row id.
     ui_blocks: HashMap<SharedString, Entity<zuse_viewport::ui_block::UiBlockView>>,
+    /// Follows the app's plugins once a block shows live plugin cards.
+    plugin_watch: Option<Subscription>,
     /// Live pull request cards by row id, like [`Self::visuals`].
     pull_request_cards: HashMap<SharedString, Entity<crate::pull_request_card::PullRequestCard>>,
     /// Scheduled retry wake-ups for errored sources (the 2s→15s ladder).
@@ -3901,6 +3903,8 @@ pub enum TranscriptEvent {
     /// message through this transcript's composer, then report back with
     /// [`Transcript::ui_block_reply_sent`].
     SendUiBlockReply { row_id: SharedString, text: String },
+    /// A plugin card's button (connect, manage, browse, sign in).
+    UiBlockPlugin(zuse_viewport::ui_block::PluginAction),
 }
 
 /// Where a reply's Fork menu sends the copy.
@@ -4206,6 +4210,7 @@ impl Transcript {
             attachment_loads: HashMap::new(),
             visuals: HashMap::new(),
             ui_blocks: HashMap::new(),
+            plugin_watch: None,
             pull_request_cards: HashMap::new(),
             attachment_retries: HashMap::new(),
             blob_details: HashMap::new(),
@@ -8036,6 +8041,9 @@ impl Transcript {
                                 text: text.clone(),
                             });
                         }
+                        zuse_viewport::ui_block::UiBlockEvent::Plugin(action) => {
+                            cx.emit(TranscriptEvent::UiBlockPlugin(action.clone()));
+                        }
                     },
                 )
                 .detach();
@@ -8043,11 +8051,52 @@ impl Transcript {
                 view
             }
         };
+        let plugins = view
+            .read(cx)
+            .uses_plugins()
+            .then(|| self.plugin_directory(cx));
+        let plugin_actions = self.doc_override.is_none();
         view.update(cx, |view, cx| {
             view.set_palette(palette, cx);
             view.set_interactive(interactive, cx);
+            if let Some(plugins) = plugins {
+                view.set_plugins(plugins, cx);
+                view.set_plugin_actions(plugin_actions, cx);
+            }
         });
         div().w_full().child(view).into_any_element()
+    }
+
+    /// The app's plugins for live plugin cards. The first card starts
+    /// following the shared plugin state, pushing every change to each
+    /// card's view (rows are cached, so they won't re-render on their own).
+    fn plugin_directory(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> std::rc::Rc<zuse_viewport::ui_block::PluginDirectory> {
+        use crate::settings::plugins::PluginsCard;
+        // The app's one plugins entity follows the state it was made with,
+        // so only a state with an engine may make it (an archive preview's
+        // transcript has none). Until then cards show "Checking…".
+        let plugins = match PluginsCard::existing(cx) {
+            Some(plugins) => plugins,
+            None if self.state.read(cx).engine().is_some() => {
+                PluginsCard::shared(self.state.clone(), cx)
+            }
+            None => return std::rc::Rc::new(Default::default()),
+        };
+        if self.plugin_watch.is_none() {
+            self.plugin_watch = Some(cx.observe(&plugins, |this, plugins, cx| {
+                let directory = std::rc::Rc::new(plugins.read(cx).directory());
+                let views: Vec<_> = this.ui_blocks.values().cloned().collect();
+                for view in views {
+                    if view.read(cx).uses_plugins() {
+                        view.update(cx, |view, cx| view.set_plugins(directory.clone(), cx));
+                    }
+                }
+            }));
+        }
+        std::rc::Rc::new(plugins.read(cx).directory())
     }
 
     /// The shell's answer to [`TranscriptEvent::SendUiBlockReply`]: lock the

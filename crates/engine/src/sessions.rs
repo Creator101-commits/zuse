@@ -293,6 +293,10 @@ struct Inner {
     /// (zuse kept the same pair on `chats.harness_session_id`). An empty
     /// session id is the "do not resume" tombstone after a rejected resume.
     harness_sessions: Mutex<HashMap<String, HarnessSessionRef>>,
+    /// The harness's own MCP servers as its latest session reported them,
+    /// per chat (`/mcp`). Memory only: after a restart `/mcp` falls back to
+    /// the configured servers until the next turn reports again.
+    harness_mcp: Mutex<HashMap<String, (HarnessId, Vec<zuse_protocol::HarnessMcpServer>)>>,
     /// Auto-titler for untitled chats (wired at engine assembly; absent in bare tests).
     titles: OnceLock<crate::titles::TitleGenerator>,
     generated_images: OnceLock<(crate::uploads::Uploads, std::path::PathBuf)>,
@@ -495,6 +499,7 @@ impl SessionsEngine {
                 sessions_tx,
                 last_requests: Mutex::new(HashMap::new()),
                 harness_sessions: Mutex::new(HashMap::new()),
+                harness_mcp: Mutex::new(HashMap::new()),
                 titles: OnceLock::new(),
                 generated_images: OnceLock::new(),
                 scratch_root: OnceLock::new(),
@@ -1862,6 +1867,15 @@ impl SessionsEngine {
 
     /// Resolve a pending `request_input` question set. Returns `false` when no such
     /// request is pending (unknown id, or the run already settled).
+    /// The harness MCP servers `chat_id`'s latest session reported, with the
+    /// harness that reported them. `None` until a session reports any.
+    pub fn harness_mcp_servers(
+        &self,
+        chat_id: &str,
+    ) -> Option<(HarnessId, Vec<zuse_protocol::HarnessMcpServer>)> {
+        lock(&self.inner.harness_mcp).get(chat_id).cloned()
+    }
+
     /// Ask the runtime of `chat_id` to stop one of its background tasks.
     /// False when no runtime holds a stoppable running task by that id.
     pub fn stop_background_task(&self, chat_id: &str, task_id: &str) -> bool {
@@ -4385,6 +4399,11 @@ async fn drive_run(
                 );
                 continue;
             }
+        }
+        // Session metadata for `/mcp`; it never reopens a parked turn.
+        if let AgentEvent::McpServers { servers } = &event {
+            lock(&inner.harness_mcp).insert(chat_id.clone(), (harness_id, servers.clone()));
+            continue;
         }
         // Capacity/occupancy can settle after Done; updating it must not reopen a turn.
         if let AgentEvent::ContextUsage { tokens, window } = &event {

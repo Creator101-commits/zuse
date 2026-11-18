@@ -6319,6 +6319,9 @@ pub enum WorkspaceCommand {
     Terminal,
     Rename,
     Stop,
+    /// `/mcp`: the agent's MCP servers and the user's plugins, as a card in
+    /// the chat. Answered by Zuse, never sent to the agent.
+    Mcp,
     /// The toolbar's plugins button; not offered as a slash command.
     Plugins,
     /// Provider accounts (the tray's Switch account); not a slash command.
@@ -6326,6 +6329,9 @@ pub enum WorkspaceCommand {
 }
 
 impl WorkspaceCommand {
+    /// Provider command names Zuse's own commands replace.
+    const OVERRIDES: &'static [&'static str] = &["mcp"];
+
     fn catalog() -> &'static [(Self, &'static str, &'static str, bool)] {
         &[
             (
@@ -6342,6 +6348,12 @@ impl WorkspaceCommand {
                 false,
             ),
             (Self::Settings, "settings", "Zuse: open settings", false),
+            (
+                Self::Mcp,
+                "mcp",
+                "Zuse: MCP servers and plugins, with connect and manage",
+                false,
+            ),
             (Self::Diff, "diff", "Zuse: open changes", true),
             (Self::Files, "files", "Zuse: open project files", true),
             (Self::Terminal, "terminal", "Zuse: open a terminal", true),
@@ -6361,6 +6373,10 @@ fn with_workspace_commands(
     in_chat: bool,
 ) -> Vec<InvocationCandidate> {
     rows.retain(|row| row.workspace_command.is_none());
+    // Zuse answers these better than providers do in a non-interactive
+    // session (Claude Code's `/mcp` prints one summary line there), so
+    // Zuse's take the plain name.
+    rows.retain(|row| !WorkspaceCommand::OVERRIDES.contains(&row.name.as_str()));
     for &(command, name, description, needs_chat) in WorkspaceCommand::catalog() {
         if needs_chat && !in_chat {
             continue;
@@ -10133,8 +10149,69 @@ impl Composer {
         self.reset_slash(None, cx);
         self.failure = None;
         self.failure_key = None;
+        if command == WorkspaceCommand::Mcp && self.queue_chat_command("mcp", cx) {
+            cx.notify();
+            return;
+        }
+        // Without a local chat to answer in, `/mcp` opens Plugins.
+        let command = match command {
+            WorkspaceCommand::Mcp => WorkspaceCommand::Plugins,
+            command => command,
+        };
         cx.emit(ComposerEvent::WorkspaceCommand(command));
         cx.notify();
+    }
+
+    /// Ask the selected chat's host to answer `/name` with a card in the
+    /// transcript. False when there is no local chat to answer in (a new
+    /// conversation, or a cloud task, whose runtime doesn't answer these).
+    fn queue_chat_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        if self.is_native_cloud() || self.cached_cloud() {
+            return false;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return false;
+        };
+        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+            return false;
+        };
+        // A host that can answer: never an unsaved side chat (no host row
+        // yet) or an older build, which would leave the command pending.
+        if !self
+            .state
+            .read(cx)
+            .chat_host_supports(&chat_id, zuse_protocol::capabilities::CHAT_COMMANDS_V1)
+        {
+            return false;
+        }
+        // The card would land after the running reply and move the chat's
+        // "current turn", so it waits for the turn to end.
+        if self.run_live(cx) {
+            self.failure = Some(format!("Run /{name} once the agent finishes this turn.").into());
+            self.failure_key = Some(chat_id);
+            return true;
+        }
+        let command = SessionCommandPayload::ChatCommand {
+            name: name.to_owned(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            text: format!("/{name}"),
+        };
+        let Ok(command) = serde_json::to_value(&command) else {
+            return false;
+        };
+        let params = serde_json::json!({ "chatId": chat_id, "command": command });
+        let failure_chat = chat_id.clone();
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            if let Err(err) = engine.client().call(methods::QUEUE_COMMAND, params).await {
+                this.update(cx, |composer, cx| {
+                    composer.failure = Some(format!("Couldn't run /mcp: {err}").into());
+                    composer.failure_key = Some(failure_chat);
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+        true
     }
 
     /// Send `text` for a control outside the editor (a pull request card's
@@ -15470,7 +15547,7 @@ mod tests {
             vec![],
         );
         let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 12);
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
@@ -15479,9 +15556,9 @@ mod tests {
             workspace_command_for_text("/zuse:zuse:model", &rows),
             Some(WorkspaceCommand::Model)
         );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        assert_eq!(with_workspace_commands(rows, true).len(), 12);
         let draft_rows = with_workspace_commands(vec![], false);
-        assert_eq!(draft_rows.len(), 4);
+        assert_eq!(draft_rows.len(), 5);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
         assert_eq!(
             workspace_command_for_text("/model  ", &draft_rows),
@@ -15501,6 +15578,59 @@ mod tests {
                 "{literal:?}"
             );
         }
+    }
+
+    #[test]
+    fn zuse_mcp_replaces_the_provider_command_of_the_same_name() {
+        let native = invocation_candidates(
+            vec![
+                SlashCommand {
+                    name: "mcp".into(),
+                    description: "Manage MCP servers".into(),
+                    input_hint: None,
+                },
+                SlashCommand {
+                    name: "compact".into(),
+                    description: "Compact the conversation".into(),
+                    input_hint: None,
+                },
+            ],
+            vec![],
+        );
+        let rows = with_workspace_commands(native, true);
+        let mcp: Vec<_> = rows.iter().filter(|row| row.name.contains("mcp")).collect();
+        assert_eq!(mcp.len(), 1, "one /mcp, and no zuse:mcp alias");
+        assert_eq!(mcp[0].workspace_command, Some(WorkspaceCommand::Mcp));
+        assert_eq!(
+            workspace_command_for_text("/mcp", &rows),
+            Some(WorkspaceCommand::Mcp)
+        );
+        assert!(rows.iter().any(|row| row.name == "compact"));
+    }
+
+    #[gpui::test]
+    fn mcp_without_a_chat_to_answer_in_opens_plugins(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        let actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = actions.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                if let ComposerEvent::WorkspaceCommand(command) = event {
+                    captured.borrow_mut().push(*command);
+                }
+            })
+        });
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("/mcp", cx));
+            composer.update_slash("/mcp", 4, cx);
+            composer.on_submit(cx);
+            assert!(composer.input.read(cx).text().is_empty());
+            assert!(composer.failure.is_none());
+        });
+        assert_eq!(&*actions.borrow(), &[WorkspaceCommand::Plugins]);
     }
 
     #[gpui::test]

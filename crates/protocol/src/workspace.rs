@@ -21,6 +21,9 @@ pub mod capabilities {
     /// The host creates a projectless chat's scratch folder
     /// (`crate::projectless`) when it runs; older hosts only know `~`.
     pub const PROJECTLESS_SCRATCH_V1: &str = "projectless-scratch-v1";
+    /// The host answers Zuse slash commands (`SessionCommandPayload::ChatCommand`,
+    /// `/mcp`) in the transcript. Older hosts skip the entry.
+    pub const CHAT_COMMANDS_V1: &str = "chat-commands-v1";
 
     pub const CURRENT: &[&str] = &[
         crate::zots::CAPABILITY,
@@ -35,6 +38,7 @@ pub mod capabilities {
         CHECKOUT_ARCHIVES_V1,
         CUSTOM_ACP_AGENTS_V1,
         PROJECTLESS_SCRATCH_V1,
+        CHAT_COMMANDS_V1,
         crate::voice::remote::CAPABILITY,
         crate::visual_session::CAPABILITY,
     ];
@@ -122,6 +126,7 @@ mod tests {
                     "checkout-archives-v1",
                     "custom-acp-agents-v1",
                     "projectless-scratch-v1",
+                    "chat-commands-v1",
                     "voice-client-media-v1",
                     "visual-sessions-v1"
                 ],
