@@ -1222,6 +1222,8 @@ impl CloudConversation {
             .into_any_element()
     }
     pub(super) fn render_computer(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        /// The width of a reading's load bar.
+        const COMPUTER_LOAD_BAR_WIDTH: f32 = 36.;
         self.watch_sync(cx);
         let theme = Theme::of(cx).for_popup();
         let row = self.computer.metadata.clone();
@@ -1437,24 +1439,45 @@ impl CloudConversation {
                 ),
             );
         }
-        for (id, label, glyph, reading) in [
-            ("computer-cpu", "CPU", icons::CLOUD_CPU, card.cpu.clone()),
+        // Live readings carry a small dithered load bar before the value.
+        let load = super::load::machine_load(&self.computer.resources);
+        for (id, label, glyph, reading, fraction) in [
+            (
+                "computer-cpu",
+                "CPU",
+                icons::CLOUD_CPU,
+                card.cpu.clone(),
+                load.cpu,
+            ),
             (
                 "computer-memory",
                 "Memory",
                 icons::CLOUD_MEMORY,
                 card.memory.clone(),
+                load.memory,
             ),
             (
                 "computer-disk",
                 "Disk",
                 icons::HARD_DRIVE,
                 card.disk.clone(),
+                load.disk,
             ),
-            ("computer-size", "Size", icons::MONITOR, card.size.clone()),
+            (
+                "computer-size",
+                "Size",
+                icons::MONITOR,
+                card.size.clone(),
+                None,
+            ),
         ] {
             if let Some(reading) = reading {
-                menu = menu.child(detail(id, label, glyph).child(value().child(text(reading))));
+                let bar = fraction.map(|fraction| {
+                    crate::dither_bar::load_bar(fraction, &theme).w(px(COMPUTER_LOAD_BAR_WIDTH))
+                });
+                menu = menu.child(
+                    detail(id, label, glyph).child(value().children(bar).child(text(reading))),
+                );
             }
         }
 

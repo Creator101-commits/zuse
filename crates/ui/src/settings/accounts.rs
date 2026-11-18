@@ -354,26 +354,8 @@ pub(crate) fn render_usage_meter(
                 .text_color(theme.text_muted)
                 .child(SharedString::from(window.label.clone())),
         )
-        .child(
-            div()
-                .w(px(USAGE_BAR_WIDTH))
-                .flex_none()
-                .h(px(4.0))
-                .rounded_full()
-                .overflow_hidden()
-                .bg(theme.wash(0.08))
-                .when(fraction > 0.0, |el| {
-                    el.child(
-                        div()
-                            .h_full()
-                            // A 1.5% floor keeps tiny non-zero usage
-                            // visible (zuse `max(used, 1.5)%`).
-                            .w(gpui::relative(fraction.max(0.015)))
-                            .rounded_full()
-                            .bg(fill),
-                    )
-                }),
-        )
+        // Any usage at all lights a column, so tiny non-zero usage shows.
+        .child(crate::dither_bar::dither_bar(fraction, fill, theme).w(px(USAGE_BAR_WIDTH)))
         .child(
             div()
                 .w(px(USAGE_PERCENT_WIDTH))

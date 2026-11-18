@@ -9,6 +9,8 @@ mod environment_card;
 
 pub(super) use computer::Tone;
 mod history;
+mod load;
+pub(super) use load::{MachineLoad, machine_load};
 
 pub(super) enum CloudConversationEvent {
     Terminal,

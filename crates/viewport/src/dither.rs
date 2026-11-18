@@ -80,41 +80,67 @@ pub fn fill_color(color: Hsla, radius: f32) -> impl IntoElement {
 
 /// How many of `columns` a usage fraction lights. Any usage at all lights one,
 /// so a fresh window never reads as unreported.
-fn lit_columns(fraction: f32, columns: usize) -> usize {
+pub fn lit_columns(fraction: f32, columns: usize) -> usize {
     (fraction.clamp(0.0, 1.0) * columns as f32).ceil() as usize
+}
+
+/// One cell of a [`meter`]: a full `on` cell, a faint `on` cell inside the
+/// fill, a sparse track cell past it, or nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeterCell {
+    On,
+    Faint,
+    Track,
+    Empty,
+}
+
+/// Cell `(x, y)` of a meter whose first `lit` columns are filled. Inside the
+/// fill the ordered-dither density ramps from half at the start to solid at
+/// the leading edge; past it only the sparsest Bayer cells draw the track.
+pub fn meter_cell(x: usize, y: usize, lit: usize) -> MeterCell {
+    let cutoff = threshold(x, y);
+    if x < lit {
+        let density = 0.5 + 0.5 * (x + 1) as f32 / lit as f32;
+        if density > cutoff {
+            MeterCell::On
+        } else {
+            MeterCell::Faint
+        }
+    } else if cutoff < 0.3 {
+        MeterCell::Track
+    } else {
+        MeterCell::Empty
+    }
 }
 
 /// A horizontal usage meter drawn as density: `on` cells thicken toward the
 /// reading's leading edge, the rest of the track is a sparse `off` dust.
-/// Fills its positioned parent.
+/// Fills its positioned parent. The grid snaps to device pixels, so its 2px
+/// cells stay crisp at 1x and 2x.
 pub fn meter(fraction: f32, on: Hsla, off: Hsla) -> impl IntoElement {
     const CELL: f32 = 2.0;
     gpui::canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
+            let scale = window.scale_factor().max(1.0);
+            let snap = |value: gpui::Pixels| px((f32::from(value) * scale).round() / scale);
+            let origin = point(snap(bounds.origin.x), snap(bounds.origin.y));
             let columns = (f32::from(bounds.size.width) / CELL) as usize;
             let rows = (f32::from(bounds.size.height) / CELL) as usize;
             let lit = lit_columns(fraction, columns);
             for y in 0..rows {
                 for x in 0..columns {
-                    let cutoff = threshold(x, y);
-                    let color = if x < lit {
-                        let density = 0.5 + 0.5 * (x + 1) as f32 / lit as f32;
-                        Some(if density > cutoff {
-                            on
-                        } else {
-                            on.opacity(0.25)
-                        })
-                    } else {
-                        (cutoff < 0.3).then_some(off)
+                    let color = match meter_cell(x, y, lit) {
+                        MeterCell::On => on,
+                        MeterCell::Faint => on.opacity(0.25),
+                        MeterCell::Track => off,
+                        MeterCell::Empty => continue,
                     };
-                    if let Some(color) = color {
-                        let origin = point(px(x as f32 * CELL), px(y as f32 * CELL));
-                        window.paint_quad(gpui::fill(
-                            gpui::Bounds::new(bounds.origin + origin, size(px(CELL), px(CELL))),
-                            color,
-                        ));
-                    }
+                    let at = point(px(x as f32 * CELL), px(y as f32 * CELL));
+                    window.paint_quad(gpui::fill(
+                        gpui::Bounds::new(origin + at, size(px(CELL), px(CELL))),
+                        color,
+                    ));
                 }
             }
         },
@@ -843,6 +869,36 @@ mod tests {
         assert_eq!(lit_columns(0.001, 100), 1);
         assert_eq!(lit_columns(0.5, 100), 50);
         assert_eq!(lit_columns(2.0, 100), 100);
+    }
+
+    #[test]
+    fn meter_cells_fill_to_the_reading_and_densify_at_its_edge() {
+        let row = |y: usize, lit: usize| -> Vec<MeterCell> {
+            (0..20).map(|x| meter_cell(x, y, lit)).collect()
+        };
+        // Nothing past the fill but sparse track dust.
+        for y in 0..4 {
+            for cell in &row(y, 10)[10..] {
+                assert!(matches!(cell, MeterCell::Track | MeterCell::Empty));
+            }
+            for cell in &row(y, 10)[..10] {
+                assert!(matches!(cell, MeterCell::On | MeterCell::Faint));
+            }
+        }
+        // The leading column is solid; the start is half dense.
+        for y in 0..4 {
+            assert_eq!(meter_cell(9, y, 10), MeterCell::On);
+        }
+        let on = |x0: usize, x1: usize| {
+            (0..4)
+                .flat_map(|y| (x0..x1).map(move |x| meter_cell(x, y, 16)))
+                .filter(|cell| *cell == MeterCell::On)
+                .count()
+        };
+        assert!(on(0, 4) < on(12, 16));
+        assert!(on(12, 16) >= 14);
+        // An empty meter is only track.
+        assert!(row(0, 0).iter().all(|cell| *cell != MeterCell::On));
     }
 
     fn samples(depth: f64, opts: PaintOpts) -> Vec<f32> {

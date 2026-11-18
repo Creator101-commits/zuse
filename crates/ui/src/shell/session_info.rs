@@ -208,6 +208,151 @@ fn agent_status_glyph(status: zuse_doc::SubagentStatus, theme: &Theme) -> AnyEle
     .into_any_element()
 }
 
+/// The cloud card's Performance submenu: its key and card width.
+const CLOUD_PERFORMANCE: &str = "performance";
+const CLOUD_PERFORMANCE_WIDTH: f32 = 232.0;
+
+/// The cloud card's rows that take the pointer and keys, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloudMenuRow {
+    Performance,
+    Sleep,
+    Folder,
+    Details,
+}
+
+fn cloud_menu_rows(has_folder: bool) -> Vec<CloudMenuRow> {
+    let mut rows = vec![CloudMenuRow::Performance, CloudMenuRow::Sleep];
+    if has_folder {
+        rows.push(CloudMenuRow::Folder);
+    }
+    rows.push(CloudMenuRow::Details);
+    rows
+}
+
+fn cloud_menu_index(row: CloudMenuRow, has_folder: bool) -> usize {
+    cloud_menu_rows(has_folder)
+        .iter()
+        .position(|known| *known == row)
+        .unwrap_or_default()
+}
+
+/// The cloud card as a cascading menu: its rows sit inside the card's
+/// padding, which the submenu clears.
+fn cloud_menu_level() -> popover::SubmenuLevel<Shell> {
+    popover::SubmenuLevel::root("cloud-menu", |shell: &mut Shell| &mut shell.cloud_menu)
+        .parent_inset(SUMMARY_CARD_PADDING)
+}
+
+/// What each menu of the cloud card holds, for keyboard navigation.
+fn cloud_menu_shape(
+    path: &[SharedString],
+    has_folder: bool,
+    running: bool,
+) -> Vec<popover::SubmenuRow> {
+    match path {
+        [] => cloud_menu_rows(has_folder)
+            .into_iter()
+            .map(|row| match row {
+                CloudMenuRow::Performance => popover::SubmenuRow::Submenu(CLOUD_PERFORMANCE.into()),
+                _ => popover::SubmenuRow::Item,
+            })
+            .collect(),
+        [key] if key.as_ref() == CLOUD_PERFORMANCE => {
+            vec![popover::SubmenuRow::Item; if running { 3 } else { 1 }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The Performance submenu's rows: CPU, memory and disk, each a label, its
+/// reading, and a dithered load bar.
+fn performance_meters(
+    resources: &serde_json::Value,
+    load: super::cloud_conversation::MachineLoad,
+    running: bool,
+    theme: &Theme,
+    menus: &popover::Submenus,
+) -> Vec<AnyElement> {
+    let line = |index: usize| {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .px(px(8.0))
+            .py(px(7.0))
+            .rounded(px(popover::MENU_ITEM_RADIUS))
+            .when(menus.is_highlighted(1, index), |row| {
+                row.bg(theme.ink(0.06))
+            })
+    };
+    if !running {
+        return vec![
+            line(0)
+                .text_size(crate::typography::text_xs())
+                .text_color(theme.text_muted)
+                .child("Wake the computer to measure it")
+                .into_any_element(),
+        ];
+    }
+    let meter = |index: usize, label: &'static str, fraction: Option<f32>, detail: String| {
+        line(index)
+            .id(SharedString::from(format!("cloud-performance-{index}")))
+            .debug_selector(move || format!("cloud-performance-{label}"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .text_size(crate::typography::text_sm())
+                    .text_color(theme.text)
+                    .child(label)
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.text_muted)
+                            .child(detail),
+                    ),
+            )
+            .child(crate::dither_bar::load_bar(fraction.unwrap_or(0.0), theme))
+            .into_any_element()
+    };
+    let gigabytes = |key: &str| resources[key].as_f64().map(|bytes| bytes / 1e9);
+    let cpu = resources["cpuPercent"].as_f64();
+    let mut rows = vec![meter(
+        0,
+        "CPU",
+        load.cpu,
+        match (cpu, resources["cores"].as_u64()) {
+            (Some(cpu), Some(cores)) => format!("{cpu:.0}% of {cores} cores"),
+            (Some(cpu), None) => format!("{cpu:.0}%"),
+            _ => "—".into(),
+        },
+    )];
+    for (index, label, fraction, used, total) in [
+        (
+            1,
+            "Memory",
+            load.memory,
+            "memoryUsedBytes",
+            "memoryTotalBytes",
+        ),
+        (2, "Disk", load.disk, "diskUsedBytes", "diskTotalBytes"),
+    ] {
+        rows.push(meter(
+            index,
+            label,
+            fraction,
+            match (gigabytes(used), gigabytes(total)) {
+                (Some(used), Some(total)) => format!("{used:.1} of {total:.1} GB"),
+                _ => "—".into(),
+            },
+        ));
+    }
+    rows
+}
+
 impl Shell {
     /// Whether the card is open over the transcript.
     pub(super) fn session_info_visible(&self) -> bool {
@@ -239,10 +384,109 @@ impl Shell {
     pub(super) fn close_session_info_overlay(&mut self, cx: &mut Context<Self>) {
         if self.session_info_overlay {
             self.session_info_overlay = false;
+            self.cloud_menu.close_all();
             self.close_summary_pr_menu(cx);
             self.close_branch_menu(cx);
             cx.notify();
         }
+    }
+
+    /// Run one of the cloud card's rows, from a click or Enter.
+    fn run_cloud_menu_row(
+        &mut self,
+        row: CloudMenuRow,
+        conversation: &Entity<super::cloud_conversation::CloudConversation>,
+        cx: &mut Context<Self>,
+    ) {
+        match row {
+            CloudMenuRow::Performance => {
+                let has_folder = conversation.read(cx).synced_folder().is_some();
+                let index = cloud_menu_index(row, has_folder);
+                self.cloud_menu.open(0, index, CLOUD_PERFORMANCE);
+                cx.notify();
+            }
+            CloudMenuRow::Sleep => {
+                self.close_session_info_overlay(cx);
+                conversation.update(cx, |view, cx| view.toggle_sleep(cx));
+            }
+            CloudMenuRow::Folder => {
+                let path = conversation.read(cx).synced_folder();
+                self.close_session_info_overlay(cx);
+                if let Some(path) = path {
+                    cx.reveal_path(std::path::Path::new(&path));
+                }
+            }
+            CloudMenuRow::Details => {
+                self.close_session_info_overlay(cx);
+                conversation.update(cx, |view, cx| view.open_computer(cx));
+            }
+        }
+    }
+
+    /// Keys for the open cloud card: ↑/↓ walk its rows, → or Enter opens
+    /// Performance beside it, ← or Esc closes back, Esc on the card closes
+    /// it. Until a row is highlighted only ↑, ↓ and Esc are taken, so the
+    /// composer keeps its other keys. Returns whether the key was used.
+    pub(super) fn cloud_menu_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = event.keystroke.modifiers;
+        if !self.session_info_overlay
+            || modifiers.platform
+            || modifiers.control
+            || modifiers.alt
+            || modifiers.shift
+        {
+            return false;
+        }
+        let Some(conversation) = self.cloud_conversation.clone() else {
+            return false;
+        };
+        // Space stays the composer's.
+        let Some(key) = popover::SubmenuKey::from_keystroke(&event.keystroke.key)
+            .filter(|_| event.keystroke.key != "space")
+        else {
+            return false;
+        };
+        let engaged = self.cloud_menu.any_open()
+            || self
+                .cloud_menu
+                .highlighted(self.cloud_menu.focus())
+                .is_some();
+        if !engaged
+            && !matches!(
+                key,
+                popover::SubmenuKey::Up | popover::SubmenuKey::Down | popover::SubmenuKey::Escape
+            )
+        {
+            return false;
+        }
+        let (has_folder, running) = {
+            let view = conversation.read(cx);
+            (
+                view.synced_folder().is_some(),
+                matches!(
+                    view.computer_summary().tone,
+                    super::cloud_conversation::Tone::Running
+                ),
+            )
+        };
+        match self
+            .cloud_menu
+            .key(key, |path| cloud_menu_shape(path, has_folder, running))
+        {
+            popover::SubmenuOutcome::Handled => cx.notify(),
+            popover::SubmenuOutcome::Dismiss => self.close_session_info_overlay(cx),
+            popover::SubmenuOutcome::Activate { path, index } => {
+                if let (true, Some(row)) = (path.is_empty(), cloud_menu_rows(has_folder).get(index))
+                {
+                    self.run_cloud_menu_row(*row, &conversation, cx);
+                }
+            }
+        }
+        true
     }
 
     /// This frame's reveal of the card, 0 (hidden) → 1 (shown), eased on the
@@ -577,96 +821,70 @@ impl Shell {
             info_row(&theme, row_glyph(icons::CLOCK_CIRCLE, &theme), wake.into())
                 .id("cloud-session-info-wake")
         });
-        // Performance: one row with CPU at a glance, unfolding to the bars.
-        let cpu = resources["cpuPercent"].as_f64();
-        let (performance_header, performance_open) = self.session_info_section(
-            "cloud-performance",
-            false,
-            row_glyph(icons::MONITOR, &theme),
-            "Performance",
-            Some(SharedString::from(match (running, cpu) {
-                (false, _) => "Not running".to_owned(),
-                (true, Some(cpu)) => format!("{cpu:.0}% CPU"),
-                (true, None) => "Measuring…".to_owned(),
-            })),
-            &theme,
-            cx,
-        );
-        let mut performance = vec![performance_header];
-        if performance_open && running {
-            let bytes = |value: &serde_json::Value| value.as_u64().map(|v| v as f64 / 1e9);
-            let meter = |label: &'static str, fraction: Option<f64>, detail: String| {
-                let fraction = fraction.unwrap_or(0.0).clamp(0.0, 1.0) as f32;
-                let tone = if fraction > 0.9 {
-                    theme.danger
-                } else if fraction > 0.7 {
-                    theme.warning
-                } else {
-                    theme.success
-                };
-                sub_row(&theme)
-                    .flex_col()
-                    .items_start()
-                    .gap(px(4.0))
-                    .py(px(4.0))
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .justify_between()
-                            .child(label)
-                            .child(div().text_color(theme.text_muted).child(detail)),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .h(px(4.0))
-                            .rounded_full()
-                            .bg(theme.text.opacity(0.08))
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(gpui::relative(fraction))
-                                    .rounded_full()
-                                    .bg(tone),
-                            ),
-                    )
-                    .into_any_element()
+        // Performance: one row with CPU at a glance; its submenu opens
+        // beside the card with the dithered CPU, memory and disk bars.
+        let load = super::cloud_conversation::machine_load(&resources);
+        let has_folder = synced.is_some();
+        let menu = cloud_menu_level();
+        let item_row = |row: CloudMenuRow, menus: &popover::Submenus| {
+            let index = cloud_menu_index(row, has_folder);
+            let highlighted = menus.is_highlighted(0, index);
+            let id = match row {
+                CloudMenuRow::Performance => "session-info-section-cloud-performance",
+                CloudMenuRow::Sleep => "cloud-session-info-sleep",
+                CloudMenuRow::Folder => "cloud-session-info-folder",
+                CloudMenuRow::Details => "cloud-session-info-details",
             };
-            let cores = resources["cores"].as_u64();
-            performance.push(meter(
-                "CPU",
-                cpu.map(|cpu| cpu / 100.0),
-                match (cpu, cores) {
-                    (Some(cpu), Some(cores)) => format!("{cpu:.0}% of {cores} cores"),
-                    (Some(cpu), None) => format!("{cpu:.0}%"),
-                    _ => "—".into(),
-                },
-            ));
-            for (label, used, total) in [
-                ("Memory", "memoryUsedBytes", "memoryTotalBytes"),
-                ("Disk", "diskUsedBytes", "diskTotalBytes"),
-            ] {
-                let (used, total) = (bytes(&resources[used]), bytes(&resources[total]));
-                performance.push(meter(
-                    label,
-                    used.zip(total)
-                        .filter(|(_, t)| *t > 0.0)
-                        .map(|(u, t)| u / t),
-                    match (used, total) {
-                        (Some(used), Some(total)) => format!("{used:.1} of {total:.1} GB"),
-                        _ => "—".into(),
-                    },
-                ));
-            }
-        }
+            (
+                index,
+                action_row(&theme, id)
+                    .debug_selector(move || id.into())
+                    .when(highlighted, |row| row.bg(theme.ink(0.06))),
+            )
+        };
+        let performance = {
+            let (index, row) = item_row(CloudMenuRow::Performance, &self.cloud_menu);
+            let open = self.cloud_menu.is_open(0, CLOUD_PERFORMANCE);
+            let panel = open.then(|| {
+                let child = menu.child();
+                let mut card = popover::popover_card(&theme)
+                    .w(px(CLOUD_PERFORMANCE_WIDTH))
+                    .flex()
+                    .flex_col();
+                for (ix, meter) in
+                    performance_meters(&resources, load, running, &theme, &self.cloud_menu)
+                        .into_iter()
+                        .enumerate()
+                {
+                    card = card.child(child.item(ix, meter, cx));
+                }
+                card.into_any_element()
+            });
+            let cpu = load.cpu.map(|cpu| cpu * 100.0);
+            let row = row
+                .when(open, |row| row.bg(theme.ink(0.06)))
+                .role(gpui::Role::Button)
+                .aria_label("Performance")
+                .aria_expanded(open)
+                .child(popover::picker_icon_slot(row_glyph(icons::MONITOR, &theme)))
+                .child(div().flex_1().min_w_0().truncate().child("Performance"))
+                .child(
+                    row_meta(&theme)
+                        .child(SharedString::from(match (running, cpu) {
+                            (false, _) => "Not running".to_owned(),
+                            (true, Some(cpu)) => format!("{cpu:.0}% CPU"),
+                            (true, None) => "Measuring…".to_owned(),
+                        }))
+                        .child(popover::submenu_chevron(&theme)),
+                );
+            menu.trigger(index, CLOUD_PERFORMANCE, row, panel, cx)
+        };
         let sleep = {
             let conversation = conversation.clone();
-            action_row(&theme, "cloud-session-info-sleep")
-                .debug_selector(|| "cloud-session-info-sleep".into())
+            let (index, row) = item_row(CloudMenuRow::Sleep, &self.cloud_menu);
+            let row = row
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.close_session_info_overlay(cx);
-                    conversation.update(cx, |view, cx| view.toggle_sleep(cx));
+                    this.run_cloud_menu_row(CloudMenuRow::Sleep, &conversation, cx);
                 }))
                 .child(popover::picker_icon_slot(row_glyph(
                     if summary.sleeping {
@@ -680,35 +898,37 @@ impl Shell {
                     "Wake computer"
                 } else {
                     "Put computer to sleep"
-                }))
+                }));
+            menu.item(index, row, cx)
         };
         let details = {
             let conversation = conversation.clone();
-            action_row(&theme, "cloud-session-info-details")
-                .debug_selector(|| "cloud-session-info-details".into())
+            let (index, row) = item_row(CloudMenuRow::Details, &self.cloud_menu);
+            let row = row
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.close_session_info_overlay(cx);
-                    conversation.update(cx, |view, cx| view.open_computer(cx));
+                    this.run_cloud_menu_row(CloudMenuRow::Details, &conversation, cx);
                 }))
                 .child(popover::picker_icon_slot(row_glyph(
                     icons::SETTINGS,
                     &theme,
                 )))
-                .child(div().flex_1().child("Computer details and sync"))
+                .child(div().flex_1().child("Computer details and sync"));
+            menu.item(index, row, cx)
         };
         let folder = synced.map(|path| {
-            let reveal_path = path.clone();
-            action_row(&theme, "cloud-session-info-folder")
+            let conversation = conversation.clone();
+            let (index, row) = item_row(CloudMenuRow::Folder, &self.cloud_menu);
+            let row = row
                 .tip(path)
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.close_session_info_overlay(cx);
-                    cx.reveal_path(std::path::Path::new(&reveal_path));
+                    this.run_cloud_menu_row(CloudMenuRow::Folder, &conversation, cx);
                 }))
                 .child(popover::picker_icon_slot(row_glyph(
                     icons::FOLDER_OPEN,
                     &theme,
                 )))
-                .child(div().flex_1().child("Open synced folder"))
+                .child(div().flex_1().child("Open synced folder"));
+            menu.item(index, row, cx)
         });
         let body = div()
             .id("cloud-session-info-body")
@@ -723,7 +943,7 @@ impl Shell {
             .child(size_row)
             .children(wake_row)
             .child(fade_rule(&theme))
-            .children(performance)
+            .child(performance)
             .child(fade_rule(&theme))
             .child(sleep)
             .children(folder)
@@ -743,9 +963,13 @@ impl Shell {
                 .right(px(SESSION_CARD_INSET))
                 .opacity(ease)
                 .occlude()
-                .on_mouse_down_out(
-                    cx.listener(|this, _, _, cx| this.close_session_info_overlay(cx)),
-                )
+                // The performance submenu floats beside the card: a press on
+                // it is not outside.
+                .on_mouse_down_out(cx.listener(|this, event: &gpui::MouseDownEvent, _, cx| {
+                    if !this.cloud_menu.contains(event.position) {
+                        this.close_session_info_overlay(cx);
+                    }
+                }))
                 .child(crate::frost::frosted(
                     SUMMARY_CARD_RADIUS,
                     crate::frost::MENU_BLUR,
