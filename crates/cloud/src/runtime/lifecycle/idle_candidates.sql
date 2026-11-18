@@ -26,9 +26,11 @@ WHERE ($1::text[] IS NULL OR w.account_id=ANY($1))
   AND (w.request_config#>>'{rustRecreation,operationId}' IS NULL OR w.request_config#>>'{rustRecreation,phase}' IN ('ready','cancelled'))
   AND COALESCE(w.request_config#>>'{rustLifecycleOperation,phase}','ready')='ready'
   AND NOT EXISTS(SELECT 1 FROM api_cloud_workspace_launch_intents i WHERE i.workspace_id=w.workspace_id)
+  -- outcome-unknown is terminal (no runtime report can change it), so like
+  -- any finished turn it holds the computer only for one idle window.
   AND NOT EXISTS(
     SELECT 1 FROM zuse_rust_task_command_execution e WHERE e.workspace_id=w.workspace_id
-      AND (e.state IN('queued','starting','running','waiting-input','outcome-unknown') OR e.updated_at>$2)
+      AND (e.state IN('queued','starting','running','waiting-input') OR e.updated_at>$2)
   )
 ORDER BY w.next_action_at,w.workspace_id
 LIMIT 1
