@@ -1,5 +1,5 @@
 //! Provider operations acknowledge intent; the durable controller reconciles completion.
-use super::{ExecResult, Machine, ProviderError};
+use super::{ExecResult, ListedMachine, Machine, MachineUsage, ProviderError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use zuse_protocol::cloud_computers::ProviderId;
@@ -178,6 +178,22 @@ pub trait Provider: Send + Sync {
     /// computers whose provider can end them mid-task.
     fn has_running_limit(&self) -> bool {
         false
+    }
+    /// Every machine this provider account can see, asleep ones included, for
+    /// the reconciliation pass. `Ok(None)`: this adapter cannot list machines.
+    /// The account may be shared with another environment; callers decide
+    /// ownership from their own database, never from this listing.
+    async fn list_machines(&self) -> Result<Option<Vec<ListedMachine>>, ProviderError> {
+        Ok(None)
+    }
+    /// Per-machine running time and cost over `[start_ms, end_ms)`.
+    /// `Ok(None)`: this adapter has no usage report.
+    async fn usage_report(
+        &self,
+        _start_ms: i64,
+        _end_ms: i64,
+    ) -> Result<Option<Vec<MachineUsage>>, ProviderError> {
+        Ok(None)
     }
 }
 

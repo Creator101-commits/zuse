@@ -40,6 +40,8 @@ pub struct Usage {
     pub memory_bytes: u64,
     pub cost_micros: i64,
     pub complete: bool,
+    /// Seconds spent running (not standby, hibernated or stopped).
+    pub running_seconds: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -568,6 +570,52 @@ impl Boxd {
         }
     }
 
+    /// Every machine visible to this key in its organization: the configured
+    /// cluster and, under a cluster override, the default cluster too (where
+    /// machines created before the override live). Either cluster failing
+    /// fails the listing, so callers never act on a partial view.
+    pub async fn list_machines(&self) -> Result<Vec<super::ListedMachine>, ProviderError> {
+        let mut endpoints = vec![self.endpoint.clone()];
+        if self.default_endpoint != self.endpoint {
+            endpoints.push(self.default_endpoint.clone());
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut machines = Vec::new();
+        for endpoint in endpoints {
+            let listing: wire::ListMachinesResponse = self
+                .unary_at(
+                    &endpoint,
+                    "ListVms",
+                    wire::ListMachinesRequest {
+                        org: self.organization.clone(),
+                        all_contexts: false,
+                    },
+                    false,
+                )
+                .await?;
+            for machine in listing.vms {
+                if machine.vm_id.is_empty() || machine_id(&machine.vm_id).is_err() {
+                    return Err(ProviderError::InvalidResponse);
+                }
+                if !seen.insert(machine.vm_id.clone()) {
+                    continue;
+                }
+                if endpoint != self.endpoint
+                    && let Ok(mut regions) = self.regions.lock()
+                {
+                    regions.insert(machine.vm_id.clone(), endpoint.clone());
+                }
+                machines.push(super::ListedMachine {
+                    created_at_ms: created_at_ms(machine.created_at),
+                    id: machine.vm_id,
+                    name: machine.name,
+                    state: machine_state(machine.status),
+                });
+            }
+        }
+        Ok(machines)
+    }
+
     /// A deterministic name lets the reconciler inspect an ambiguous create response.
     /// Snapshot sizing is retained; explicit resize is a separate provider operation.
     pub async fn create_from_snapshot(
@@ -737,6 +785,15 @@ fn machine_id(id: &str) -> Result<wire::MachineId, ProviderError> {
     }
     Ok(wire::MachineId { vm_id: id.into() })
 }
+/// `createdAt` in seconds or milliseconds since the epoch; zero or negative is absent.
+fn created_at_ms(raw: i64) -> Option<i64> {
+    match raw {
+        ..=0 => None,
+        // Before 2286 in seconds; after 1970-04 in milliseconds.
+        1..10_000_000_000 => raw.checked_mul(1000),
+        _ => Some(raw),
+    }
+}
 fn machine_state(status: String) -> MachineState {
     match status.as_str() {
         "running" => MachineState::Running,
@@ -854,6 +911,7 @@ fn usage(report: wire::VmUsage) -> Result<Usage, ProviderError> {
         memory_bytes: report.memory_bytes,
         cost_micros: report.cost_micro,
         complete: report.complete,
+        running_seconds: report.seconds.map_or(0, |seconds| seconds.running),
     })
 }
 
