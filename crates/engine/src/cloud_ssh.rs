@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Prepared {
     pub host: String,
+    /// The account on the computer (also in the host entry).
+    pub user: String,
     pub path: String,
 }
 
@@ -51,7 +53,8 @@ pub fn pin_host_key(workspace: &str, host_key: &str) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
-fn quote(value: &str) -> String {
+/// Single-quote `value` for a POSIX shell.
+pub fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
@@ -156,11 +159,60 @@ pub fn terminal_command(prepared: &Prepared) -> String {
     format!(
         "ssh -t {} {}",
         prepared.host,
-        quote(&format!(
-            "cd {} && exec \"$SHELL\" -l",
-            quote(&prepared.path)
-        ))
+        quote(&remote_shell_command(prepared))
     )
+}
+
+/// What ssh runs on the computer: a login shell in the repository. Needs a
+/// TTY (`ssh -t`).
+pub fn remote_shell_command(prepared: &Prepared) -> String {
+    format!("cd {} && exec \"$SHELL\" -l", quote(&prepared.path))
+}
+
+/// A script that runs [`terminal_command`], for terminals that take a program
+/// rather than a shell line. Rewritten on every open: written executable to
+/// a staging file of its own, then renamed into place, so a terminal never
+/// sees a partial or non-executable script and concurrent opens don't
+/// collide. Blocking.
+pub fn write_launcher(prepared: &Prepared) -> Result<PathBuf, String> {
+    write_launcher_in(&root().join("open"), prepared)
+}
+
+fn write_launcher_in(dir: &Path, prepared: &Prepared) -> Result<PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    use std::hash::{Hash, Hasher};
+    private_dir(dir).map_err(|e| e.to_string())?;
+    let contents = format!("#!/bin/sh\nexec {}\n", terminal_command(prepared));
+    // Named by its contents: a later open with a different command never
+    // replaces a script an earlier terminal may still be about to read.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    contents.hash(&mut hasher);
+    let script = dir.join(format!(
+        "{}-{:016x}.command",
+        prepared.host,
+        hasher.finish()
+    ));
+    let staging = dir.join(format!(
+        ".{}.{}-{}.tmp",
+        prepared.host,
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| {
+        std::fs::write(&staging, &contents)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700))?;
+        }
+        std::fs::rename(&staging, &script)
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&staging);
+        return Err(error.to_string());
+    }
+    Ok(script)
 }
 
 /// Open the system terminal running `command`. Blocking.
@@ -212,6 +264,48 @@ mod tests {
     }
 
     #[test]
+    fn launchers_are_executable_in_place_and_leave_no_staging_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let prepared = Prepared {
+            host: "zuse-w".into(),
+            user: "zuse".into(),
+            path: "/home/zuse/my repo".into(),
+        };
+        let first = write_launcher_in(dir.path(), &prepared).unwrap();
+        let again = write_launcher_in(dir.path(), &prepared).unwrap();
+        assert_eq!(first, again);
+        let name = first.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("zuse-w-") && name.ends_with(".command"),
+            "{name}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            format!("#!/bin/sh\nexec {}\n", terminal_command(&prepared))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&first).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [first.file_name().unwrap()]);
+        // Another command for the same host gets its own script; the first
+        // stays for a terminal that hasn't read it yet.
+        let moved = Prepared {
+            path: "/home/zuse".into(),
+            ..prepared
+        };
+        let other = write_launcher_in(dir.path(), &moved).unwrap();
+        assert_ne!(other, first);
+        assert!(first.is_file() && other.is_file());
+    }
+
+    #[test]
     fn pinned_host_keys_reject_anything_but_one_key() {
         assert!(pin_host_key("w", "ssh-ed25519 AAAA\nzuse-other ssh-ed25519 BBBB").is_err());
         assert!(pin_host_key("w", "not-a-key AAAA").is_err());
@@ -222,6 +316,7 @@ mod tests {
     fn terminal_commands_open_the_repository_with_quoting_intact() {
         let command = terminal_command(&Prepared {
             host: "zuse-w".into(),
+            user: "zuse".into(),
             path: "/home/zuse/my repo".into(),
         });
         assert_eq!(
