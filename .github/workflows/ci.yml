@@ -17,17 +17,16 @@ concurrency:
 #
 # Where the time used to go: ~30 separate `cargo test` invocations, each with a
 # different package set, so Cargo re-unified features and rebuilt the engine
-# several times; rust-cache never caches workspace crates, so every run
-# recompiled all of them; and the browser job built two optimized wasm bundles
-# nothing downloaded. Now each job builds once (nextest runs every test binary
-# from that one build in parallel), sccache keeps unchanged workspace crates,
-# and the optimized web bundle is built on main only.
+# several times, and the browser job built two optimized wasm bundles nothing
+# downloaded. Now each job builds once (nextest runs every test binary from
+# that one build in parallel) and the optimized web bundle is built on main
+# only. sccache's GitHub cache backend was tried and dropped: the repository's
+# 10 GB Actions cache is already filled by rust-cache, so its per-crate entries
+# were evicted as fast as they were written.
 env:
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  RUSTC_WRAPPER: sccache
-  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   # macOS is the slowest job, so a pull request runs it only when it touches
@@ -60,8 +59,6 @@ jobs:
   # Everything that needs no Rust build: formatting, scripts, JS tests.
   checks:
     runs-on: ubuntu-24.04
-    env:
-      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -93,7 +90,6 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -119,14 +115,12 @@ jobs:
       - name: SDK against the engine
         working-directory: packages/sdk
         run: npm ci && npm run test:engine
-      - run: sccache --show-stats
 
   harness-evaluation:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -156,7 +150,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 scripts/cargo_dev.py --github-env
       - uses: dtolnay/rust-toolchain@stable
-      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -223,7 +216,6 @@ jobs:
         with:
           components: rust-src
           targets: wasm32-unknown-unknown
-      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
