@@ -149,7 +149,8 @@ Zuse-owned launch/desktop links. Package directories and profiles are preserved.
 Stop running instances and any daemon you enabled before removing old package
 directories manually. No daemon is enabled automatically.
 
-You can also run `./bin/zuse` directly from any extracted location; `zuse serve`
+You can also run `./bin/zuse app` directly from any extracted location (a bare
+`zuse` in a terminal prints help; desktop launchers pass `app`); `zuse serve`
 finds `libexec/web` beside the executable. `bin/zuse-server` and `bin/zuse-relay`
 locate their packaged browser assets regardless of the current directory;
 `--assets` overrides that default. Native Browser Access settings also

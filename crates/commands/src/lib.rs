@@ -17,7 +17,7 @@ mod update;
 
 pub use cli::{
     Command, DEFAULT_IPC_PORT, DaemonCommand, DaemonInstall, Global, ServeArgs, default_ipc_port,
-    is_language, language_from, localize, localizer, parse,
+    help, is_language, language_from, localize, localizer, parse, zuse_link,
 };
 pub use logging::{Logging, init_logging};
 use zuse_i18n::{Localizer, messages::cli as m};

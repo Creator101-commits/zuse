@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Typing `zuse` in a terminal, or an agent running it, now prints help instead of opening a second window. Open the app with `zuse app`; the dock, Start menu, `zuse:` links and GNOME-style Linux launchers work as before. Mistyped commands such as `zuse commands` report an unknown command. On Linux launchers that do not record the started process (KDE, for example), the first launcher click after updating from 0.26.1 can do nothing: the previous version's installer writes the old desktop entry. That start repairs the entry, so the next click opens Zuse, or run `zuse app`.
 - Name the chat's agent in the composer's empty `/` menu, so a command that only exists in another agent reads as that agent's catalog instead of a missing feature.
 - Settings shows Cloud based on your Zuse account instead of the build. Signed-in accounts see Billing to subscribe. Accounts with an active Cloud subscription also see the Cloud computer group, the Cloud compute usage tab, cloud destinations in the pickers and new cloud chats. These appear or disappear as soon as the subscription changes, with no restart. Cloud computers now work against production.
 - Render Markdown tables with compact rows, rounded borders, clearer headers, and better wrapping.

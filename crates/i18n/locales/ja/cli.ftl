@@ -167,6 +167,8 @@ cli-update = 新しいリリースを確認してインストールする
 cli-update_check = 更新があるかどうかだけを表示する
 
 cli-appshot = 実行中のアプリで Appshot を撮る
+cli-open_app = デスクトップアプリを開く
+cli-zuse_link_expected = Zuse リンク（zuse://…）を指定してください
 
 cli-open_url = 開く Zuse リンク
 
