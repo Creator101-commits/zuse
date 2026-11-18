@@ -114,6 +114,7 @@ async fn rpc(
                 status: "running".into(),
                 vcpu: 1,
                 memory_bytes: 1024 * 1024 * 1024,
+                created_at: 0,
                 source_info: Some(wire::VmSource {
                     kind: "snapshot".into(),
                     name: request.snapshot.clone(),
@@ -976,6 +977,7 @@ pub(in crate::project_caches) async fn exercise_staging_pilot(pool: &PgPool) {
             status: "running".into(),
             vcpu: 1,
             memory_bytes: 1024 * 1024 * 1024,
+            created_at: 0,
             source_info: None,
         },
     );

@@ -40,6 +40,7 @@ mod object_writes;
 pub mod preparation;
 mod project_preparation;
 pub mod provider;
+pub mod provider_reconciliation;
 pub mod recovery;
 pub mod recreation;
 pub mod repair;
@@ -155,6 +156,9 @@ pub struct RuntimeControl {
     mailbox_push: std::sync::atomic::AtomicBool,
     runtime_releases: runtime_updates::RuntimeReleaseConfig,
     harness_bundles: harness_updates::HarnessBundleConfig,
+    /// Whether this worker runs the provider reconciliation pass (its due time
+    /// joins the worker schedule only then).
+    provider_reconciliation: std::sync::atomic::AtomicBool,
 }
 
 pub use zuse_protocol::cloud::{
@@ -315,6 +319,7 @@ impl RuntimeControl {
             mailbox_push: std::sync::atomic::AtomicBool::new(false),
             runtime_releases: runtime_updates::RuntimeReleaseConfig::default(),
             harness_bundles: harness_updates::HarnessBundleConfig::default(),
+            provider_reconciliation: std::sync::atomic::AtomicBool::new(false),
         }
     }
     pub async fn ready(&self) -> Result<(), ApiError> {

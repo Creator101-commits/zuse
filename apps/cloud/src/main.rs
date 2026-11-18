@@ -1131,6 +1131,48 @@ async fn main() -> Result<()> {
                     }
                 }))
             };
+            // Compare what providers say is running with what the database
+            // expects (and check daily compute cost). Kicked by the worker loop
+            // when the schedule row is due; it never polls the provider.
+            let reconciliation = zuse_cloud::runtime::provider_reconciliation::Config::from_env()?;
+            tracing::info!(
+                mode = reconciliation.mode.as_str(),
+                interval_ms = reconciliation.interval_ms,
+                "Provider reconciliation"
+            );
+            let reconciliation_kick = Arc::new(tokio::sync::Notify::new());
+            let reconciliation_task = if once
+                || reconciliation.mode == zuse_cloud::runtime::provider_reconciliation::Mode::Off
+            {
+                None
+            } else {
+                runtime.enable_provider_reconciliation(true);
+                let runtime = runtime.clone();
+                let registry = registry.clone();
+                let kick = reconciliation_kick.clone();
+                Some(tokio::spawn(async move {
+                    loop {
+                        if let Err(error) = runtime
+                            .provider_reconciliation_once(&registry, &reconciliation, now_ms())
+                            .await
+                        {
+                            tracing::warn!(code = error.code, "Provider reconciliation deferred");
+                        }
+                        if let Err(error) = runtime
+                            .cost_anomalies_once(&registry, &reconciliation, now_ms())
+                            .await
+                        {
+                            tracing::warn!(code = error.code, "Compute cost check deferred");
+                        }
+                        // The worker's due-time query kicks this when the next
+                        // pass is due; the idle timer is only a safety net.
+                        tokio::select! {
+                            _ = kick.notified() => {},
+                            _ = tokio::time::sleep(cadence.idle) => {},
+                        }
+                    }
+                }))
+            };
             // Provider running limits (E2B: one hour) must not pause a busy computer.
             let keep_running_task = if once {
                 None
@@ -1366,6 +1408,9 @@ async fn main() -> Result<()> {
                 if run(|d| d.recovery) || run(|d| d.restore) || run(|d| d.archive_retention) {
                     recovery_kick.notify_one();
                 }
+                if reconciliation_task.is_some() && run(|d| d.provider_reconciliation) {
+                    reconciliation_kick.notify_one();
+                }
                 if run(|d| d.repair) {
                     let repair = runtime
                         .runtime_repair_registry_once(&registry, now_ms())
@@ -1548,6 +1593,9 @@ async fn main() -> Result<()> {
                 task.abort();
             }
             if let Some(task) = keep_running_task {
+                task.abort();
+            }
+            if let Some(task) = reconciliation_task {
                 task.abort();
             }
             if let Some(task) = recovery_task {

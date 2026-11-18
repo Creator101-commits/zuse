@@ -1,4 +1,7 @@
-use super::{ExecResult, Machine, MachineState, ProviderError, boxd::Boxd, contract::*};
+use super::{
+    ExecResult, ListedMachine, Machine, MachineState, MachineUsage, ProviderError, boxd::Boxd,
+    contract::*,
+};
 use async_trait::async_trait;
 use zuse_protocol::cloud_computers::ProviderId;
 
@@ -111,5 +114,25 @@ impl Provider for Boxd {
     }
     async fn upload(&self, id: &str, path: &str, contents: &[u8]) -> Result<(), ProviderError> {
         Boxd::upload(self, id, path, contents).await
+    }
+    async fn list_machines(&self) -> Result<Option<Vec<ListedMachine>>, ProviderError> {
+        Boxd::list_machines(self).await.map(Some)
+    }
+    async fn usage_report(
+        &self,
+        start_ms: i64,
+        end_ms: i64,
+    ) -> Result<Option<Vec<MachineUsage>>, ProviderError> {
+        let usage = self.organization_usage(start_ms, end_ms).await?;
+        Ok(Some(
+            usage
+                .into_iter()
+                .map(|usage| MachineUsage {
+                    machine_id: usage.machine_id,
+                    running_seconds: usage.running_seconds,
+                    cost_micros: usage.cost_micros,
+                })
+                .collect(),
+        ))
     }
 }

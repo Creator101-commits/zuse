@@ -1,6 +1,6 @@
 //! Boat v1 control plane. Stops are reconciled by their original operation ID.
 use super::{
-    ExecResult, Machine, MachineState, ProviderError,
+    ExecResult, ListedMachine, Machine, MachineState, ProviderError,
     contract::*,
     transport::{Rest, text},
 };
@@ -504,5 +504,49 @@ impl Provider for Boat {
         )
         .await?;
         Ok(())
+    }
+    /// Live sandboxes (every state the allocation lookup scans). An exhausted
+    /// page budget fails the listing rather than returning part of it.
+    async fn list_machines(&self) -> Result<Option<Vec<ListedMachine>>, ProviderError> {
+        let mut cursor = None::<String>;
+        let mut seen = std::collections::HashSet::new();
+        let mut ids = std::collections::HashSet::new();
+        let mut machines = Vec::new();
+        for _ in 0..100 {
+            let mut url = self.rest.route(&["sandboxes"])?;
+            url.query_pairs_mut().append_pair("limit", "100").append_pair("state", "init,provisioning,provisioned,cloning,ready,idle,running,archiving,archived,stopped,resuming");
+            if let Some(cursor) = &cursor {
+                url.query_pairs_mut().append_pair("cursor", cursor);
+            }
+            let value = self
+                .rest
+                .request(Method::GET, url, None, None, None)
+                .await?;
+            for item in value["sandboxes"]
+                .as_array()
+                .ok_or(ProviderError::InvalidResponse)?
+            {
+                let machine = Self::machine(item)?;
+                if ids.insert(machine.id.clone()) {
+                    machines.push(ListedMachine {
+                        id: machine.id,
+                        name: machine.name,
+                        state: machine.state,
+                        created_at_ms: item["createdAt"]
+                            .as_str()
+                            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                            .map(|at| at.timestamp_millis()),
+                    });
+                }
+            }
+            match value["pageInfo"]["nextCursor"].as_str() {
+                None => return Ok(Some(machines)),
+                Some(next) if next.is_empty() || !seen.insert(next.to_owned()) => {
+                    return Err(ProviderError::InvalidResponse);
+                }
+                Some(next) => cursor = Some(next.into()),
+            }
+        }
+        Err(ProviderError::Unavailable)
     }
 }
