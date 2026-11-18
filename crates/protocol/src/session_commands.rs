@@ -41,7 +41,9 @@ pub enum SessionCommandPayload {
     },
     /// A slash command Zuse answers itself (`/mcp`): the host writes `text`
     /// as the user's message and a card as the reply, without involving the
-    /// agent. Hosts that don't know `name` reject it.
+    /// agent. Hosts that don't know `name` reject it; hosts older than
+    /// `capabilities::CHAT_COMMANDS_V1` can't read the entry at all, so
+    /// clients check that capability first.
     #[serde(rename_all = "camelCase")]
     ChatCommand {
         name: String,

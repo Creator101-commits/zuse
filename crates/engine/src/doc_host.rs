@@ -920,8 +920,9 @@ impl ChatDocHandle {
         self.doc.push_message(&SessionMessageEntry {
             id: message_id.to_string(),
             role: MessageRole::Assistant,
+            // Unique per card: hosts key block views by part id.
             parts: vec![MessagePart::UiBlock {
-                id: "card".into(),
+                id: format!("ui:{message_id}"),
                 spec: spec.to_string(),
             }],
             created_at,
@@ -5833,6 +5834,19 @@ impl DocHost {
             ));
         }
         let chat_id = &handle.chat_id;
+        // Written mid-turn, the card would become the chat's latest entry and
+        // turn a Stop aimed at the running reply into a superseded no-op.
+        if sessions.session_status(chat_id).is_some_and(|session| {
+            matches!(
+                session.status,
+                zuse_protocol::SessionStatus::Working | zuse_protocol::SessionStatus::AwaitingInput
+            )
+        }) {
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some(format!("Run /{name} once the agent finishes this turn")),
+            ));
+        }
         let harness = self.harness_for(chat_id);
         let servers = match sessions.harness_mcp_servers(chat_id) {
             Some((reported_by, servers)) if reported_by == harness => {
@@ -5841,20 +5855,25 @@ impl DocHost {
             _ => {
                 let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
                 let configured = match (home, config_source(harness)) {
-                    (Some(home), Some(source)) => {
-                        tokio::task::spawn_blocking(move || crate::local_mcp::discover(&home))
-                            .await
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|server| server.source == source)
-                            .collect()
-                    }
+                    (Some(home), Some(source)) => tokio::task::spawn_blocking(move || {
+                        crate::local_mcp::discover_for(&home, source)
+                    })
+                    .await
+                    .unwrap_or_default(),
                     _ => Vec::new(),
                 };
                 AgentServers::Configured(configured)
             }
         };
         let spec = mcp_spec(harness, servers);
+        // Never store a card readers can't render.
+        if let Err(error) = zuse_ui_block::parse(&spec) {
+            tracing::warn!(chat = %chat_id, %error, "the /mcp card failed validation");
+            return Ok((
+                SessionCommandStatus::Rejected,
+                Some("Couldn't build the /mcp card".into()),
+            ));
+        }
         let at = issued_at.min(now_ms());
         handle.write_user_message(message_id, text, at)?;
         handle.write_card_reply(&format!("{message_id}:card"), &spec, at.saturating_add(1))?;

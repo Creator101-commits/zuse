@@ -8074,7 +8074,17 @@ impl Transcript {
         &mut self,
         cx: &mut Context<Self>,
     ) -> std::rc::Rc<zuse_viewport::ui_block::PluginDirectory> {
-        let plugins = crate::settings::plugins::PluginsCard::shared(self.state.clone(), cx);
+        use crate::settings::plugins::PluginsCard;
+        // The app's one plugins entity follows the state it was made with,
+        // so only a state with an engine may make it (an archive preview's
+        // transcript has none). Until then cards show "Checking…".
+        let plugins = match PluginsCard::existing(cx) {
+            Some(plugins) => plugins,
+            None if self.state.read(cx).engine().is_some() => {
+                PluginsCard::shared(self.state.clone(), cx)
+            }
+            None => return std::rc::Rc::new(Default::default()),
+        };
         if self.plugin_watch.is_none() {
             self.plugin_watch = Some(cx.observe(&plugins, |this, plugins, cx| {
                 let directory = std::rc::Rc::new(plugins.read(cx).directory());

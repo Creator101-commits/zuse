@@ -35,6 +35,12 @@ pub fn harness_name(harness: HarnessId) -> &'static str {
     }
 }
 
+/// Whether the harness reports its servers' status when a session starts
+/// (`AgentEvent::McpServers`).
+pub fn reports_status(harness: HarnessId) -> bool {
+    harness == HarnessId::ClaudeCode
+}
+
 /// The config `local_mcp::discover` labels a harness's servers with.
 pub fn config_source(harness: HarnessId) -> Option<&'static str> {
     match harness {
@@ -110,7 +116,53 @@ fn reported_row(server: &HarnessMcpServer, harness: HarnessId) -> String {
     row(&server.name, status, &detail.join(" · "))
 }
 
+/// Where a configured server runs, without anything that could carry a
+/// secret: the program's file name for a command (never its arguments,
+/// which can hold keys), or the host for a URL (never its path or query).
+fn configured_detail(server: &DetectedServer) -> String {
+    if let Some(url) = &server.url {
+        // `scheme://user:pass@host:port/path?query` → `host:port`.
+        let rest = url
+            .trim()
+            .split_once("://")
+            .map_or(url.trim(), |(_, rest)| rest);
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority.rsplit('@').next().unwrap_or_default();
+        return if host.is_empty() {
+            "Remote".into()
+        } else {
+            format!("Remote · {host}")
+        };
+    }
+    server
+        .command
+        .as_deref()
+        .and_then(|command| {
+            std::path::Path::new(command.trim())
+                .file_name()?
+                .to_str()
+                .map(str::to_owned)
+        })
+        .filter(|program| !program.is_empty())
+        .map(|program| format!("Runs {program}"))
+        .unwrap_or_default()
+}
+
+/// At most `max` characters, with an ellipsis when cut. The component
+/// limits count UTF-16 units; these caps stay well inside them.
+fn clip(text: &str, max: usize) -> String {
+    let text = text.trim();
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut clipped: String = text.chars().take(max - 1).collect();
+    clipped.push('…');
+    clipped
+}
+
 fn row(name: &str, status: &str, detail: &str) -> String {
+    let (name, detail) = (clip(name, 80), clip(detail, 140));
+    let (name, detail) = (name.as_str(), detail.as_str());
     if detail.is_empty() {
         format!("McpServer({}, {})", quote(name), quote(status))
     } else {
@@ -142,17 +194,23 @@ pub fn mcp_spec(harness: HarnessId, servers: AgentServers) -> String {
             )
         }
         AgentServers::Configured(servers) => {
-            let note = if servers.is_empty() {
-                format!("No MCP servers are configured for {name} on this computer.")
-            } else {
-                format!(
+            let reports = reports_status(harness);
+            let note = match (servers.is_empty(), config_source(harness).is_some()) {
+                (_, false) => format!("Zuse can't read {name}'s MCP settings yet."),
+                (true, true) => {
+                    format!("No MCP servers are configured for {name} on this computer.")
+                }
+                (false, true) if reports => format!(
                     "Configured for {name}. Each server's status shows here once the agent has started in this chat."
-                )
+                ),
+                (false, true) => format!(
+                    "Configured for {name}. {name} doesn't report whether each one connected."
+                ),
             };
             (
                 servers
                     .iter()
-                    .map(|server| row(&server.name, "configured", &server.summary()))
+                    .map(|server| row(&server.name, "configured", &configured_detail(server)))
                     .collect(),
                 Some(note),
             )
@@ -244,16 +302,61 @@ mod tests {
         }];
         let spec = mcp_spec(HarnessId::Codex, AgentServers::Configured(configured));
         zuse_ui_block::parse(&spec).unwrap_or_else(|e| panic!("{e}\n{spec}"));
-        assert!(spec.contains(r#"McpServer("linear", "configured", "npx -y linear-mcp")"#));
+        assert!(spec.contains(r#"McpServer("linear", "configured", "Runs npx")"#));
         assert!(!spec.contains("secret"), "env values never reach the card");
-        assert!(spec.contains("once the agent has started"));
 
+        assert!(spec.contains("Codex doesn't report whether each one connected"));
         let empty = mcp_spec(HarnessId::Cursor, AgentServers::Configured(vec![]));
         zuse_ui_block::parse(&empty).unwrap();
         assert!(empty.contains("No MCP servers are configured for Cursor"));
+        let unreadable = mcp_spec(HarnessId::Gemini, AgentServers::Configured(vec![]));
+        assert!(unreadable.contains("Zuse can't read Gemini's MCP settings yet."));
         let none = mcp_spec(HarnessId::ClaudeCode, AgentServers::Reported(vec![]));
         zuse_ui_block::parse(&none).unwrap();
         assert!(none.contains("reported no MCP servers"));
+    }
+
+    #[test]
+    fn configured_rows_never_show_arguments_urls_paths_or_queries() {
+        let stdio = DetectedServer {
+            source: "Claude".into(),
+            name: "github".into(),
+            command: Some("/usr/local/bin/gh-mcp".into()),
+            args: vec!["--api-key".into(), "sk-live-secret".into()],
+            env: Default::default(),
+            url: None,
+            headers: Default::default(),
+            transport: None,
+        };
+        let remote = DetectedServer {
+            name: "docs".into(),
+            command: None,
+            args: vec![],
+            url: Some("https://user:pw@docs.example.com:8443/mcp?token=abc#x".into()),
+            ..stdio.clone()
+        };
+        assert_eq!(configured_detail(&stdio), "Runs gh-mcp");
+        assert_eq!(configured_detail(&remote), "Remote · docs.example.com:8443");
+        let spec = mcp_spec(
+            HarnessId::ClaudeCode,
+            AgentServers::Configured(vec![stdio, remote]),
+        );
+        zuse_ui_block::parse(&spec).unwrap_or_else(|e| panic!("{e}\n{spec}"));
+        assert!(spec.contains("status shows here once the agent has started"));
+        for secret in ["sk-live-secret", "token=abc", "pw@", "/mcp?"] {
+            assert!(!spec.contains(secret), "{secret} leaked: {spec}");
+        }
+    }
+
+    #[test]
+    fn oversized_names_and_details_still_make_a_valid_card() {
+        let long = "x".repeat(500);
+        let spec = mcp_spec(
+            HarnessId::ClaudeCode,
+            AgentServers::Reported(vec![server(&long, "connected", Some(&long), 3)]),
+        );
+        zuse_ui_block::parse(&spec).unwrap_or_else(|e| panic!("{e}"));
+        assert!(spec.contains('…'));
     }
 
     #[test]

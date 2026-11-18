@@ -10139,6 +10139,22 @@ impl Composer {
         let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
             return false;
         };
+        // A host that can answer: never an unsaved side chat (no host row
+        // yet) or an older build, which would leave the command pending.
+        if !self
+            .state
+            .read(cx)
+            .chat_host_supports(&chat_id, zuse_protocol::capabilities::CHAT_COMMANDS_V1)
+        {
+            return false;
+        }
+        // The card would land after the running reply and move the chat's
+        // "current turn", so it waits for the turn to end.
+        if self.run_live(cx) {
+            self.failure = Some(format!("Run /{name} once the agent finishes this turn.").into());
+            self.failure_key = Some(chat_id);
+            return true;
+        }
         let command = SessionCommandPayload::ChatCommand {
             name: name.to_owned(),
             message_id: uuid::Uuid::new_v4().to_string(),

@@ -662,7 +662,10 @@ impl Normalizer {
                 }
                 self.saw_init = true;
                 self.session_id = Some(f.session_id.clone());
-                let servers = mcp_servers(&f.mcp_servers, &f.tools);
+                let servers = f
+                    .mcp_servers
+                    .as_deref()
+                    .map(|servers| mcp_servers(servers, &f.tools));
                 let mut events = vec![AgentEvent::SessionStarted {
                     harness: HarnessId::ClaudeCode,
                     model: f.model,
@@ -671,7 +674,8 @@ impl Normalizer {
                     session_id: f.session_id,
                     assistant_message_id: self.assistant_message_id.clone(),
                 }];
-                if !servers.is_empty() {
+                // An empty list is a report too: it clears an older one.
+                if let Some(servers) = servers {
                     events.push(AgentEvent::McpServers { servers });
                 }
                 events
@@ -1859,7 +1863,12 @@ mod tests {
                 ("vidiq", "failed", None, 0),
             ]
         );
-        // An init without servers adds nothing beyond SessionStarted.
+        // An empty list is reported, so it replaces an older one…
+        let none = r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s3","mcp_servers":[]}"#;
+        let mut norm = Normalizer::new();
+        let events = norm.normalize(crate::claude::wire::parse_frame(none).unwrap(), false);
+        assert!(matches!(&events[1], AgentEvent::McpServers { servers } if servers.is_empty()));
+        // …while an init that doesn't say adds nothing beyond SessionStarted.
         let bare = r#"{"type":"system","subtype":"init","model":"m","cwd":"/x","session_id":"s2"}"#;
         let mut norm = Normalizer::new();
         assert_eq!(

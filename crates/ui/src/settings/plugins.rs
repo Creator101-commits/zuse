@@ -187,6 +187,11 @@ impl PluginsCard {
         cx.set_global(SharedPlugins(card.clone()));
         card
     }
+    /// The app's plugins entity, if something already made it.
+    pub fn existing(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<SharedPlugins>()
+            .map(|shared| shared.0.clone())
+    }
     pub fn account(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut card = Self::new(state, cx);
         card.account_only = true;
@@ -600,7 +605,8 @@ impl PluginsCard {
     /// here (the provider's page opens in the browser) and the card follows
     /// along. Signed out, it starts the Zuse sign-in first. Returns `true`
     /// when the plugin needs its own page instead: it takes an API key in a
-    /// form, or the catalog doesn't list it.
+    /// form, the catalog doesn't list it, or signing in can't start right
+    /// now (another sign-in is pending, or a request is in flight).
     pub fn connect_from_chat(&mut self, plugin_id: &str, cx: &mut Context<Self>) -> bool {
         if !self.signed_in() {
             self.sign_in(cx);
@@ -613,11 +619,21 @@ impl PluginsCard {
         else {
             return true;
         };
-        if definition.api_key_header.is_some() || self.plugins.snapshot["canManage"] == false {
+        if definition.api_key_header.is_some()
+            || self.plugins.snapshot["canManage"] == false
+            || self.busy
+            || self.plugins.active_attempt()
+        {
             self.show_plugin(plugin_id, cx);
             return true;
         }
         self.start_oauth(&definition, cx);
+        // Refused before it started (say the account connection is down):
+        // the plugins page shows why.
+        if !self.busy {
+            self.show_plugin(plugin_id, cx);
+            return true;
+        }
         false
     }
 

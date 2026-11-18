@@ -147,6 +147,23 @@ fn codex_servers(text: &str, var: impl Fn(&str) -> Option<String>) -> Vec<Detect
 /// Every user-level MCP server under `home`, deduplicated across apps by
 /// name and target so the same server configured twice appears once.
 pub fn discover(home: &Path) -> Vec<DetectedServer> {
+    let mut found = discover_each(home);
+    let mut seen = std::collections::BTreeSet::new();
+    found.retain(|s| seen.insert((s.name.clone(), s.summary())));
+    found.truncate(MAX_SERVERS);
+    found
+}
+
+/// The MCP servers one app (`source`, as [`DetectedServer::source`] names
+/// it) has configured under `home`, whether or not another app has the same.
+pub fn discover_for(home: &Path, source: &str) -> Vec<DetectedServer> {
+    let mut found = discover_each(home);
+    found.retain(|server| server.source == source);
+    found.truncate(MAX_SERVERS);
+    found
+}
+
+fn discover_each(home: &Path) -> Vec<DetectedServer> {
     let mut found = Vec::new();
     if let Some(text) = read(&home.join(".claude.json")) {
         found.extend(json_servers("Claude", &text));
@@ -157,9 +174,6 @@ pub fn discover(home: &Path) -> Vec<DetectedServer> {
     if let Some(text) = read(&home.join(".cursor/mcp.json")) {
         found.extend(json_servers("Cursor", &text));
     }
-    let mut seen = std::collections::BTreeSet::new();
-    found.retain(|s| seen.insert((s.name.clone(), s.summary())));
-    found.truncate(MAX_SERVERS);
     found
 }
 
