@@ -939,3 +939,128 @@ async fn memory_suspend_requires_bound_park_and_reconciles_the_original_operatio
     }
     admin.close().await;
 }
+
+/// A guest that never answers the quiescence directive (gone, fenced or
+/// wedged) must not keep its machine awake: after the bound the pause
+/// proceeds without the receipt. A recreation's full shutdown keeps failing
+/// into its own attention state instead.
+#[tokio::test]
+#[ignore = "requires explicit isolated localhost PostgreSQL"]
+async fn unanswered_quiescence_still_sleeps_the_machine() {
+    let url = std::env::var("ZUSE_CLOUD_TEST_DATABASE_URL").expect("isolated PostgreSQL required");
+    assert!(matches!(
+        reqwest::Url::parse(&url).unwrap().host_str(),
+        Some("localhost" | "127.0.0.1" | "::1")
+    ));
+    let admin = PgPool::connect(&url).await.unwrap();
+    for full_shutdown in [false, true] {
+        let unique = uuid::Uuid::new_v4().simple().to_string();
+        let schema = format!("quiesce_{unique}");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let scope = schema.clone();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(4)
+            .after_connect(move |c, _| {
+                let scope = scope.clone();
+                Box::pin(async move {
+                    sqlx::query(&format!("SET search_path={scope}"))
+                        .execute(c)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&url)
+            .await
+            .unwrap();
+        for sql in [
+            include_str!("../../../../tests/fixtures/legacy-catalog.sql"),
+            jobs::MIGRATION,
+            MIGRATION,
+            include_str!("../../../../migrations/0012_provider_receipts.sql"),
+        ] {
+            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        }
+        let workspace = "ws-bob";
+        let operation = format!("op-{unique}");
+        let config = json!({"runtimeGeneration":2,"gatewayEpoch":2,"runtimeRpcProtocol":zuse_protocol::cloud_gateway::RUST_RPC,"rustRuntimeStorage":{"storageIncarnationId":"original-disk"},"rustLifecycleOperation":{"id":operation,"action":"pause","phase":"quiescing"}});
+        sqlx::query("UPDATE api_cloud_workspaces SET provider='boat',provider_sandbox_id='machine-original',state='pausing',desired_state='paused',runtime_state='online',request_config=$1 WHERE workspace_id=$2").bind(config).bind(workspace).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO zuse_rust_control_owners VALUES('workspace',$1,'rust',2,0)")
+            .bind(workspace)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let started = clock_ms() - QUIESCE_TIMEOUT_MS - 1_000;
+        sqlx::query("INSERT INTO zuse_rust_lifecycle_operations(operation_id,workspace_id,command_id,generation,source_machine_id,storage_incarnation_id,action,phase,provider_effects,created_at,updated_at) VALUES($1,$2,'command',2,'machine-original','original-disk','pause','quiescing',$3,$4,$4)")
+            .bind(&operation).bind(workspace).bind(json!({"recreationFullShutdown":full_shutdown})).bind(started).execute(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        jobs::enqueue(
+            &mut tx,
+            &operation,
+            JOB_KIND,
+            workspace,
+            2,
+            &json!({"operationId":operation}),
+            started,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let remote = Remote {
+            pool: pool.clone(),
+            workspace: workspace.into(),
+            machine: Mutex::new(MachineState::Running),
+            calls: AtomicUsize::new(0),
+            observations: Mutex::new(vec![]),
+            complete: AtomicBool::new(true),
+            deleted: AtomicBool::new(false),
+            expire: false,
+            uncertain: false,
+        };
+        let control = control(pool.clone());
+        let first = control.lifecycle_once(&remote, clock_ms()).await;
+        let (phase, status, runtime): (String, String, String) = sqlx::query_as("SELECT o.phase,w.status_code,w.runtime_state FROM zuse_rust_lifecycle_operations o JOIN api_cloud_workspaces w USING(workspace_id)").fetch_one(&pool).await.unwrap();
+        if full_shutdown {
+            assert_eq!(
+                first.unwrap_err().code,
+                "cloud_runtime_quiesce_failed",
+                "recreation keeps its own failure path"
+            );
+            assert_eq!(phase, "quiescing");
+            assert_eq!(remote.calls.load(Ordering::SeqCst), 0);
+        } else {
+            first.unwrap();
+            assert_eq!(phase, "quiesced");
+            assert_eq!(status, "runtime-quiesce-timed-out");
+            assert_eq!(runtime, "offline");
+            for _ in 0..4 {
+                sqlx::query("UPDATE zuse_rust_jobs SET due_at=0,lease_expires_at=NULL WHERE resource_id=$1 AND state<>'completed'")
+                    .bind(workspace)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let _ = control.lifecycle_once(&remote, clock_ms()).await;
+            }
+            assert_eq!(
+                remote.calls.load(Ordering::SeqCst),
+                1,
+                "the provider sleep ran"
+            );
+            let state: String =
+                sqlx::query_scalar("SELECT state FROM api_cloud_workspaces WHERE workspace_id=$1")
+                    .bind(workspace)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(state, "paused");
+        }
+        pool.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&admin)
+            .await
+            .unwrap();
+    }
+    admin.close().await;
+}

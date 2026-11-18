@@ -39,6 +39,15 @@ pub fn next_check(now: i64, due: Option<i64>, sweep_ms: i64) -> i64 {
     }
 }
 
+/// Locked recheck of idle_candidates.sql's busy predicate. A live command or
+/// any command write inside the idle window keeps the computer awake.
+/// `outcome-unknown` is not live: it is terminal (a runtime report can never
+/// move it, see task_commands::progress), so it holds the computer for one
+/// idle window from when it was recorded, like a completed turn. Counting it
+/// as live kept computers whose turn was cut off awake until someone paused
+/// them by hand.
+const BUSY: &str = "SELECT EXISTS(SELECT 1 FROM api_cloud_workspace_launch_intents WHERE workspace_id=$1) OR EXISTS(SELECT 1 FROM zuse_rust_task_command_execution WHERE workspace_id=$1 AND (state IN('queued','starting','running','waiting-input') OR updated_at>$2))";
+
 /// Longest idle-sleep sweep interval.
 pub const MAX_SWEEP_MS: i64 = 300_000;
 
@@ -77,7 +86,8 @@ impl RuntimeControl {
         } else {
             None
         };
-        Ok(crate::db::wake::earliest([idle, credit]))
+        let backstop = self.backstop_due(now).await?;
+        Ok(crate::db::wake::earliest([idle, credit, backstop]))
     }
     /// Admit at most one due computer per worker round. Empty scans are paced
     /// by the worker; an open event subscription is not user activity.
@@ -102,7 +112,9 @@ impl RuntimeControl {
             .fetch_optional(&self.pool)
             .await?;
         let Some(id) = candidate else {
-            return Ok(false);
+            // Nothing passed the normal eligibility: let the independent
+            // max-quiet-awake backstop look for computers it missed.
+            return self.backstop_sleep_once(now).await;
         };
         let mut tx = self.pool.begin().await?;
         let (row, generation, _) = locking::workspace(&mut tx, &id, true).await?;
@@ -117,8 +129,11 @@ impl RuntimeControl {
         {
             return Ok(false);
         }
-        let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_cloud_workspace_launch_intents WHERE workspace_id=$1) OR EXISTS(SELECT 1 FROM zuse_rust_task_command_execution WHERE workspace_id=$1 AND (state IN('queued','starting','running','waiting-input','outcome-unknown') OR updated_at>$2))")
-            .bind(&id).bind(cutoff).fetch_one(&mut *tx).await?;
+        let busy: bool = sqlx::query_scalar(BUSY)
+            .bind(&id)
+            .bind(cutoff)
+            .fetch_one(&mut *tx)
+            .await?;
         if busy {
             return Ok(false);
         }
