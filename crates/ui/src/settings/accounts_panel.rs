@@ -589,20 +589,7 @@ impl HarnessesPage {
                             .text_color(theme.text_muted)
                             .child(SharedString::from(short)),
                     )
-                    .child(
-                        div()
-                            .w(px(48.))
-                            .h(px(4.))
-                            .rounded_full()
-                            .bg(theme.settings_frame_bg())
-                            .child(
-                                div()
-                                    .h_full()
-                                    .rounded_full()
-                                    .bg(color)
-                                    .w(gpui::relative(used.max(0.03))),
-                            ),
-                    )
+                    .child(crate::dither_bar::dither_bar(used, color, &theme).w(px(48.)))
                     .child(
                         div()
                             .w(px(28.))

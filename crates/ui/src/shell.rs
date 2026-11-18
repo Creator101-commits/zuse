@@ -2512,6 +2512,9 @@ pub struct Shell {
     session_info_overlay: bool,
     /// The card's sections the user toggled away from their default (by key).
     session_info_folded: std::collections::HashSet<&'static str>,
+    /// The cloud card's Performance submenu, keyboard highlight and hover
+    /// intent.
+    cloud_menu: popover::Submenus,
     /// The session card's pull request: details, menu and updates.
     summary_pr: summary_pull_request::SummaryPullRequest,
     /// Background tasks with a stop request on its way (by task id); their
@@ -3117,6 +3120,7 @@ impl Shell {
             session_info_shown: false,
             session_info_overlay: false,
             session_info_folded: Default::default(),
+            cloud_menu: Default::default(),
             background_stops: Default::default(),
             summary_pr: Default::default(),
             session_info_pressed_open: None,
@@ -12568,6 +12572,10 @@ impl Shell {
             return;
         }
         if matches!(self.route, Route::Settings(_)) {
+            return;
+        }
+        if self.cloud_menu_key(event, cx) {
+            cx.stop_propagation();
             return;
         }
         if self.open_in_key(event, cx) {
