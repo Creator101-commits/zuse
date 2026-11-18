@@ -13,7 +13,12 @@ pub struct ZotSender {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub activity: bool,
 }
-pub const EXECUTION_CONTEXT: &str = "\n\n[Zot execution context]\n";
+/// Opens a Zapper-attributed message. Models read this, so it names the
+/// product; [`LEGACY_PREFIX`] still parses in transcripts saved before.
+pub const PREFIX: &str = "[Message from Zapper ";
+const LEGACY_PREFIX: &str = "[Message from Zot ";
+pub const EXECUTION_CONTEXT: &str = "\n\n[Zapper execution context]\n";
+const LEGACY_EXECUTION_CONTEXT: &str = "\n\n[Zot execution context]\n";
 
 pub fn envelope(zot: &Zot, body: &str) -> String {
     attributed(zot, &zot.config.name, body, false)
@@ -48,7 +53,7 @@ fn attributed(zot: &Zot, name: &str, body: &str, activity: bool) -> String {
         activity,
     };
     format!(
-        "[Message from Zot {}]\n\n{body}",
+        "{PREFIX}{}]\n\n{body}",
         serde_json::to_string(&sender).expect("sender serializes")
     )
 }
@@ -82,19 +87,26 @@ pub fn parse_display(text: &str) -> Option<(ZotSender, &str)> {
     parse(text)
 }
 
+/// The message up to the first execution-context marker, current or legacy,
+/// so private host context never shows as message text whichever comes first.
+fn visible_body(body: &str) -> &str {
+    [EXECUTION_CONTEXT, LEGACY_EXECUTION_CONTEXT]
+        .iter()
+        .filter_map(|marker| body.find(marker))
+        .min()
+        .map_or(body, |at| &body[..at])
+}
+
 pub fn parse(text: &str) -> Option<(ZotSender, &str)> {
-    let rest = text.strip_prefix("[Message from Zot ")?;
+    let rest = text
+        .strip_prefix(PREFIX)
+        .or_else(|| text.strip_prefix(LEGACY_PREFIX))?;
     let (json, body) = rest.split_once("]\n\n")?;
     let sender: ZotSender = serde_json::from_str(json).ok()?;
     if sender.name.trim().is_empty() || sender.zot_id.is_empty() || sender.chat_id.is_empty() {
         return None;
     }
-    Some((
-        sender,
-        body.split_once(EXECUTION_CONTEXT)
-            .map(|(visible, _)| visible)
-            .unwrap_or(body),
-    ))
+    Some((sender, visible_body(body)))
 }
 #[cfg(test)]
 mod tests {
@@ -137,5 +149,28 @@ mod tests {
         assert!(parse("ordinary user message").is_none());
         let enriched = format!("{input}{EXECUTION_CONTEXT}Private engine instructions");
         assert_eq!(parse(&enriched).unwrap().1, "Body\n\nReply");
+        let legacy = format!("{input}{LEGACY_EXECUTION_CONTEXT}Private engine instructions");
+        assert_eq!(parse(&legacy).unwrap().1, "Body\n\nReply");
+        // A legacy marker ahead of a current one still ends the visible text.
+        let both =
+            format!("{input}{LEGACY_EXECUTION_CONTEXT}Private{EXECUTION_CONTEXT}More private");
+        assert_eq!(parse(&both).unwrap().1, "Body\n\nReply");
+    }
+    #[test]
+    fn new_messages_name_the_zapper() {
+        let sender = ZotSender {
+            zot_id: "z".into(),
+            chat_id: "chat".into(),
+            name: "Release".into(),
+            avatar: None,
+            activity: false,
+        };
+        let text = format!(
+            "{PREFIX}{}]\n\nShip it",
+            serde_json::to_string(&sender).unwrap()
+        );
+        assert!(text.starts_with("[Message from Zapper "));
+        assert!(!text.contains("Zot"));
+        assert_eq!(parse(&text).unwrap().1, "Ship it");
     }
 }

@@ -90,6 +90,14 @@ pub fn zot_owns_chat(zots: &[crate::zots::Zot], chat_id: &str) -> bool {
     })
 }
 
+/// Whether `chat_id` has the shape the engine gives Zapper conversations:
+/// `zot-<zapper>-<n>` for coordinators and `zot-worker-<command>` for the
+/// threads they start. Lets clients keep a brand-new thread out of project
+/// lists before the Zapper's own list catches up.
+pub fn zapper_chat_id(chat_id: &str) -> bool {
+    chat_id.starts_with("zot-")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
