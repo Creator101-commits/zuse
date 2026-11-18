@@ -634,21 +634,19 @@ impl Shell {
                     .role(gpui::Role::RadioButton)
                     .aria_label(mascot.name)
                     .tip(mascot.name)
-                    .size(px(46.0))
+                    .size(px(40.0))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(9.0))
-                    .border_1()
+                    .rounded_full()
+                    .border_2()
                     .cursor_pointer()
-                    .when(active, |d| {
-                        d.border_color(theme.accent).bg(theme.element_active)
-                    })
+                    .when(active, |d| d.border_color(theme.text_strong))
                     .when(!active, |d| {
-                        d.border_color(theme.border)
-                            .hover(|d| d.bg(theme.element_hover).border_color(theme.border_strong))
+                        d.border_color(gpui::transparent_black())
+                            .hover(|d| d.border_color(theme.border_strong))
                     })
-                    .child(zot_mascot(&avatar, 2.0))
+                    .child(zot_mascot(&avatar, 32.0))
                     .on_click(set(avatar.clone())),
             );
         }
@@ -662,15 +660,15 @@ impl Shell {
                     .aria_label(color.id)
                     .size(px(22.0))
                     .p(px(3.0))
-                    .rounded(px(5.0))
+                    .rounded_full()
                     .border_1()
                     .cursor_pointer()
                     .border_color(if active {
-                        theme.accent
+                        theme.text_strong
                     } else {
                         gpui::transparent_black()
                     })
-                    .child(div().size_full().rounded(px(2.0)).bg(gpui::rgb(color.body)))
+                    .child(div().size_full().rounded_full().bg(gpui::rgb(color.body)))
                     .on_click(set(ZotAvatar {
                         mascot: current.mascot.clone(),
                         color: color.id.into(),
@@ -886,17 +884,7 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(14.0))
-            .child(
-                div()
-                    .size(px(if compact { 60.0 } else { 80.0 }))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(14.0))
-                    .bg(theme.element_hover)
-                    .child(zot_mascot(&avatar, if compact { 3.0 } else { 4.0 })),
-            )
+            .child(zot_mascot(&avatar, if compact { 48.0 } else { 64.0 }))
             .child(
                 div()
                     .flex_1()

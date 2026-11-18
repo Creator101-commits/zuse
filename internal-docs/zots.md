@@ -150,6 +150,34 @@ A settled worker turn never automatically marks an issue done. The coordinator
 must inspect verification, link the PR when applicable, and explicitly advance
 review/completion. Terminal issues are not reopened by delayed worker reports.
 
+### Ownership and lifecycle
+
+Every issue has at most one owner: the Zapper, one of its threads, or the user
+(`details.owner`). Issues saved before owners existed read `assigned: true` as
+the Zapper; `assigned` stays in step with the owner for older clients. Issues
+also carry `doneCriteria`, `outOfScope` and an optional `parent` (one request
+issue with a child per shippable change).
+
+The engine keeps owner and status consistent. The user owning an open issue
+means `needsYou`; anything else moving off `needsYou` returns to `inProgress`
+when a thread is linked, else `todo`. `delegate` makes the new thread the owner.
+`askUser` (`issueId`, `question`, optional `recommendation`) hands an issue to
+the user with a question entry; a person's comment on a `needsYou` issue hands it
+back to the newest linked thread still in the Zapper, else to the Zapper, and
+wakes it. `closeIssue` (`issueId`, `outcome` merged or dropped, `note`) is the
+only way the coordinator closes work; merged requires a linked PR.
+
+Coordinator-authored changes need their evidence: new issues start in backlog
+or todo, and todo needs `doneCriteria`; `inProgress` needs a linked thread,
+`inReview` a linked PR; `needsYou` only through `askUser`; done and canceled only
+through `closeIssue`; `doneCriteria` cannot be cleared. People editing in the UI
+are not restricted. A thread report whose first lines say `Status: blocked` (or
+`needs…`) marks the issue blocked and hands it back to the Zapper.
+
+The coordinator prompt lists closed issues as one line each. Pending events reach
+an idle coordinator as one message per supervision pass, with each event's id
+and a shared ~48 KB budget; `zapper_events` keeps every report in full.
+
 Local and paired workers receive their linked issue IDs in their host context.
 Their live, engine-issued credentials allow only comments and PR links on issues
 linked to their own thread. The Zot home rechecks membership and issue scope;

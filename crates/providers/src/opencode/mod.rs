@@ -90,6 +90,14 @@ const HEALTH_POLL: Duration = Duration::from_millis(150);
 /// to the generation that launched it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 2.x fills the command catalog from config/plugins only after the health
+/// gate opens: a read shadowing boot sees an empty array (observed live,
+/// 2.3.0, up to ~9s on a plugin-heavy cold start). Wait for the catalog
+/// instead of reporting "no commands", like `provider_catalog` does for
+/// `/api/model`.
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const COMMAND_POLL_ATTEMPTS: u32 = 6;
+
 /// Bus reconnect: the server is our own child on loopback, so a dropped
 /// stream with a live process is transient — retry briefly, then treat the
 /// run as dead (transcript integrity is gone once frames are missed).
@@ -318,8 +326,13 @@ impl OpencodeHarness {
                         .into(),
                 ));
             }
-            if let Ok(commands) = server.commands_wire(None).await {
-                let _ = self.commands_cache.set(commands_from_wire(&commands));
+            if let Ok(commands) = server.commands_wire(None, false).await {
+                // An empty read is the pre-config window, not a fact: never
+                // poison the shared catalog with it.
+                let parsed = commands_from_wire(&commands);
+                if !parsed.is_empty() {
+                    let _ = self.commands_cache.set(parsed);
+                }
             }
             Ok(models)
         }
@@ -335,7 +348,7 @@ impl OpencodeHarness {
         }
         let mut server = self.server(None, None).await?;
         let result = server
-            .commands_wire(None)
+            .commands_wire(None, true)
             .await
             .map(|v| commands_from_wire(&v));
         server.shutdown(self.kill_grace).await;
@@ -432,7 +445,7 @@ impl Harness for OpencodeHarness {
             .to_str()
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
         let mut server = self.server(Some(directory), None).await?;
-        let result = server.commands_wire(Some(directory)).await;
+        let result = server.commands_wire(Some(directory), true).await;
         server.shutdown(self.kill_grace).await;
         let commands = result?;
         merge_skill_commands(&mut skills, &commands);
@@ -453,7 +466,7 @@ impl Harness for OpencodeHarness {
             .ok_or_else(|| HarnessError::Protocol("Project path is not UTF-8".into()))?;
         let mut server = self.server(Some(directory), None).await?;
         let result = server
-            .commands_wire(Some(directory))
+            .commands_wire(Some(directory), true)
             .await
             .map(|v| commands_from_wire(&v));
         server.shutdown(self.kill_grace).await;
@@ -987,14 +1000,34 @@ impl Server {
     }
 
     /// Slash commands; both wires carry `{name, description}` entries (2.x
-    /// wrapped in `{data}`).
-    async fn commands_wire(&self, directory: Option<&str>) -> Result<Value, HarnessError> {
+    /// wrapped in `{data}`). `wait_ready` retries the 2.x empty answer that
+    /// precedes its config load; callers on a latency-critical path pass
+    /// `false` and take the (possibly empty) snapshot.
+    ///
+    /// shortcut: returns the first non-empty snapshot. 2.x fills built-ins
+    /// first and plugin commands later, so a very slow plugin load can leave
+    /// the tail out of one discovery; upgrade to stability polling only if
+    /// users report lagging plugin commands.
+    async fn commands_wire(
+        &self,
+        directory: Option<&str>,
+        wait_ready: bool,
+    ) -> Result<Value, HarnessError> {
         let path = match self.protocol().await {
             Protocol::V1 => "/command",
             Protocol::V2 => "/api/command",
         };
-        let raw = self.get_json(path, directory).await?;
-        Ok(unwrap_data(raw))
+        let mut attempt = 1;
+        loop {
+            let raw = unwrap_data(self.get_json(path, directory).await?);
+            let pending =
+                wait_ready && path == "/api/command" && raw.as_array().is_some_and(Vec::is_empty);
+            if !pending || attempt == COMMAND_POLL_ATTEMPTS {
+                return Ok(raw);
+            }
+            tokio::time::sleep(COMMAND_POLL_INTERVAL).await;
+            attempt += 1;
+        }
     }
 
     /// Is the session mid-turn? V1 keeps a status map on `/session/status`;
@@ -1737,10 +1770,13 @@ async fn run_session(session: Session) {
     }
 
     // Advertise slash commands (composer popup); a warm cache skips the call.
-    let commands = match known_commands {
+    // A selected native command needs the complete catalog: on a cold 2.x
+    // start the first read is empty, and `native_command_request` would
+    // reject the selection. Ordinary prompts keep the single snapshot.
+    let mut commands = match known_commands {
         Some(commands) => commands,
         None => server
-            .commands_wire(dir)
+            .commands_wire(dir, initial_native_command_selected)
             .await
             .map(|v| commands_from_wire(&v))
             .unwrap_or_default(),
@@ -1796,7 +1832,7 @@ async fn run_session(session: Session) {
         &bus_tx,
         &session_id,
         dir,
-        &commands,
+        &mut commands,
         &request.prompt,
         initial_native_command_selected,
         turn_generation,
@@ -1935,7 +1971,7 @@ async fn run_session(session: Session) {
                         &bus_tx,
                         &session_id,
                         dir,
-                        &commands,
+                        &mut commands,
                         &steer,
                         native_command_selected,
                         turn_generation,
@@ -2191,7 +2227,7 @@ async fn run_session(session: Session) {
                                     &bus_tx,
                                     &session_id,
                                     dir,
-                                    &commands,
+                                    &mut commands,
                                     &prompt,
                                     native_command_selected,
                                     turn_generation,
@@ -2779,7 +2815,7 @@ async fn post_prompt(
     bus_tx: &mpsc::Sender<BusMsg>,
     session_id: &str,
     dir: Option<&str>,
-    commands: &[SlashCommand],
+    commands: &mut Vec<SlashCommand>,
     prompt: &str,
     native_command_selected: bool,
     turn_generation: u64,
@@ -2792,6 +2828,7 @@ async fn post_prompt(
         attachments,
     } = spec;
     let protocol = server.protocol().await;
+    refresh_missing_command(server, dir, commands, prompt, native_command_selected).await;
     if let Some((name, arguments)) =
         native_command_request(prompt, commands, native_command_selected)?
     {
@@ -2887,6 +2924,35 @@ async fn post_prompt(
         }
     });
     Ok(())
+}
+
+/// The run's catalog is a snapshot. A selected command missing from it may
+/// only mean the snapshot predates the 2.x catalog load (the run began on a
+/// plain prompt during boot) or the project gained the command since, so
+/// re-read once before `native_command_request` reports it gone. Raw slash
+/// text and commands already in the snapshot cost no request.
+async fn refresh_missing_command(
+    server: &Server,
+    dir: Option<&str>,
+    commands: &mut Vec<SlashCommand>,
+    prompt: &str,
+    selected: bool,
+) {
+    if !selected {
+        return;
+    }
+    let Some((name, _)) = zuse_protocol::invocation::leading_command(prompt) else {
+        return;
+    };
+    if commands.iter().any(|command| command.name == name) {
+        return;
+    }
+    if let Ok(live) = server.commands_wire(dir, true).await {
+        let live = commands_from_wire(&live);
+        if !live.is_empty() {
+            *commands = live;
+        }
+    }
 }
 
 /// Resolve a delivered leading slash command against the run's live,

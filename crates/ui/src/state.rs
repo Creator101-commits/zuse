@@ -88,8 +88,10 @@ use history_window::{HistoryFrame, NativeHistory, WatchSeed};
 
 mod account_connection;
 mod cloud_connection;
+mod cloud_plan;
 mod cloud_sidebar;
 pub use cloud_connection::CloudTarget;
+pub use cloud_plan::CloudAccess;
 mod remote_connection;
 pub use account_connection::{AccountTarget, RemoteTarget};
 
@@ -922,6 +924,11 @@ struct PendingChatArchive {
 pub struct AppState {
     pub zots: Vec<zuse_protocol::zots::Zot>,
     zot_watches: HashMap<String, Task<()>>,
+    /// Devices whose Zapper list has arrived since the runtime started.
+    zots_loaded: HashSet<String>,
+    /// When the Zapper watches started, bounding how long unloaded lists
+    /// may hide `zot-` conversations.
+    zots_watching_since: Option<std::time::Instant>,
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
     /// in place, but changing this scope requires assembling a new runtime.
@@ -931,6 +938,8 @@ pub struct AppState {
     /// Account identity for cloud features, independent of device/workspace auth.
     pub cloud_account: Option<serde_json::Value>,
     cloud_sidebar: cloud_sidebar::Catalog,
+    /// The signed-in account's Cloud subscription; see [`Self::cloud_access`].
+    cloud_plan: cloud_plan::Plan,
     pub devices: Vec<Device>,
     pub project_creations: HashMap<String, Vec<zuse_protocol::project_creation::ProjectCreation>>,
     project_creation_watches: HashMap<String, Task<()>>,
@@ -1143,11 +1152,14 @@ impl AppState {
         Self {
             zots: Vec::new(),
             zot_watches: HashMap::new(),
+            zots_loaded: HashSet::new(),
+            zots_watching_since: None,
             connection: ConnectionStatus::Connecting,
             workspace_scope: None,
             auth: None,
             cloud_account: None,
             cloud_sidebar: Default::default(),
+            cloud_plan: Default::default(),
             devices: Vec::new(),
             project_creations: HashMap::new(),
             project_creation_watches: HashMap::new(),
@@ -1689,6 +1701,37 @@ impl AppState {
         })
     }
 
+    /// Whether a chat belongs under the Zappers section rather than its
+    /// project: a Zapper's coordinator or thread, a side chat of one, or a
+    /// conversation with a Zapper id the Zapper list hasn't reported yet
+    /// (just delegated, or the list still loading after a reconnect).
+    pub fn zot_hides_chat(&self, chat: &Chat) -> bool {
+        use zuse_protocol::presentation::zot_panel::{zapper_chat_id, zot_owns_chat};
+        let owned = |id: &str| zot_owns_chat(&self.zots, id);
+        if owned(&chat.id)
+            || chat.parent_chat_id.as_deref().is_some_and(owned)
+            || chat.thread_id.as_deref().is_some_and(owned)
+        {
+            return true;
+        }
+        if !zapper_chat_id(&chat.id) {
+            return false;
+        }
+        // A released thread keeps its id but rejoins its project once every
+        // watched device's Zapper list is in (any of them may own it) and the
+        // delegation race has long passed. Lists that never arrive (no Zapper
+        // support, failing watches) stop hiding anything after a short grace.
+        let fresh = (Utc::now() - chat.created_at).num_minutes() < 5;
+        let loading = !self
+            .zot_watches
+            .keys()
+            .all(|device| self.zots_loaded.contains(device))
+            && self
+                .zots_watching_since
+                .is_some_and(|since| since.elapsed() < std::time::Duration::from_secs(30));
+        fresh || loading
+    }
+
     pub fn apply_zots(&mut self, zots: Vec<zuse_protocol::zots::Zot>) -> bool {
         if self.zots == zots {
             return false;
@@ -1747,6 +1790,7 @@ impl AppState {
                             .update(cx, |state, cx| {
                                 state.zots.retain(|z| z.config.home_device_id != target);
                                 state.zots.extend(zots);
+                                state.zots_loaded.insert(target.clone());
                                 state.zots.sort_by(|a, b| a.config.name.cmp(&b.config.name));
                                 cx.notify();
                             })
@@ -1763,6 +1807,8 @@ impl AppState {
                         .await;
                 }
             });
+            self.zots_watching_since
+                .get_or_insert_with(std::time::Instant::now);
             self.zot_watches.insert(device, task);
         }
     }
@@ -2673,7 +2719,7 @@ impl AppState {
         let mut chats: Vec<&Chat> = self
             .visible_chats()
             .filter(|c| c.space_id.as_deref() == Some(space_id))
-            .filter(|c| !zuse_protocol::presentation::zot_panel::zot_owns_chat(&self.zots, &c.id))
+            .filter(|c| !self.zot_hides_chat(c))
             .collect();
         sort_tabs(&mut chats);
         chats
@@ -2768,9 +2814,7 @@ impl AppState {
         rows.into_iter()
             .filter(|(_, chat)| chat.thread_id.is_none() && in_filter(chat))
             // Zots list their own threads; projects don't repeat them.
-            .filter(|(_, chat)| {
-                !zuse_protocol::presentation::zot_panel::zot_owns_chat(&self.zots, &chat.id)
-            })
+            .filter(|(_, chat)| !self.zot_hides_chat(chat))
             .map(|(status, chat)| {
                 (
                     thread_status
@@ -3295,6 +3339,8 @@ impl AppState {
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
         self.zots.clear();
         self.zot_watches.clear();
+        self.zots_loaded.clear();
+        self.zots_watching_since = None;
         self.engine = None;
         *self.desktop_epoch.lock().unwrap() = None;
         self.desktop_events = None;
@@ -3664,6 +3710,7 @@ impl AppState {
             ),
             spawn_local_device_probe(cx, handle.clone()),
             cloud_sidebar::spawn(cx, handle.controller()),
+            cloud_plan::spawn(cx, handle.controller()),
         ]);
         if supports_harness_updates {
             watch_tasks.push(spawn_watch(

@@ -12,6 +12,7 @@ pub fn session_command_kind(kind: crate::session_commands::SessionCommandKind) -
         Interrupt => "zuse.session.interrupt",
         RespondInput => "zuse.session.respond-input",
         StopBackgroundTask => "zuse.session.stop-background-task",
+        ChatCommand => "zuse.session.chat-command",
     }
 }
 pub fn is_session_command_kind(kind: &str) -> bool {

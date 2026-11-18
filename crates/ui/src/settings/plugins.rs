@@ -187,6 +187,11 @@ impl PluginsCard {
         cx.set_global(SharedPlugins(card.clone()));
         card
     }
+    /// The app's plugins entity, if something already made it.
+    pub fn existing(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<SharedPlugins>()
+            .map(|shared| shared.0.clone())
+    }
     pub fn account(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut card = Self::new(state, cx);
         card.account_only = true;
@@ -574,6 +579,88 @@ impl PluginsCard {
     }
 }
 
+/// Plugin cards in chat (`Connect`, `ConnectedPlugins`) read and drive the
+/// same entity as Settings, so a connection made from a card shows up
+/// everywhere at once.
+impl PluginsCard {
+    /// What chat plugin cards show.
+    pub fn directory(&self) -> zuse_viewport::ui_block::PluginDirectory {
+        let connecting = self
+            .plugins
+            .active_attempt()
+            .then(|| self.plugins.attempt["pluginId"].as_str().map(str::to_owned))
+            .flatten();
+        zuse_viewport::ui_block::PluginDirectory {
+            snapshot: self.plugins.snapshot.clone(),
+            signed_in: self.signed_in(),
+            ready: self.account_loaded,
+            connecting,
+            busy: self.busy,
+            unavailable: !zuse_viewport::cloud_gate::enabled()
+                || self.plugins.snapshot["canManage"] == false,
+        }
+    }
+
+    /// A card's Connect or Add account. OAuth plugins start signing in right
+    /// here (the provider's page opens in the browser) and the card follows
+    /// along. Signed out, it starts the Zuse sign-in first. Returns `true`
+    /// when the plugin needs its own page instead: it takes an API key in a
+    /// form, the catalog doesn't list it, or signing in can't start right
+    /// now (another sign-in is pending, or a request is in flight).
+    pub fn connect_from_chat(&mut self, plugin_id: &str, cx: &mut Context<Self>) -> bool {
+        if !self.signed_in() {
+            self.sign_in(cx);
+            return false;
+        }
+        let Some(definition) =
+            zuse_viewport::plugin_catalog::catalog(&self.plugins.snapshot, "", false)
+                .into_iter()
+                .find(|plugin| plugin.id == plugin_id)
+        else {
+            return true;
+        };
+        if definition.api_key_header.is_some()
+            || self.plugins.snapshot["canManage"] == false
+            || self.busy
+            || self.plugins.active_attempt()
+        {
+            self.show_plugin(plugin_id, cx);
+            return true;
+        }
+        self.start_oauth(&definition, cx);
+        // Refused before it started (say the account connection is down):
+        // the plugins page shows why.
+        if !self.busy {
+            self.show_plugin(plugin_id, cx);
+            return true;
+        }
+        false
+    }
+
+    /// Select `plugin_id` on the plugins page (its detail view).
+    pub fn show_plugin(&mut self, plugin_id: &str, cx: &mut Context<Self>) {
+        self.connected_only = false;
+        self.browse_selected = Some(plugin_id.to_owned());
+        self.detail_menu = Default::default();
+        cx.notify();
+    }
+
+    /// Show the catalog, searching for `query`.
+    pub fn browse_for(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.connected_only = false;
+        self.browse_selected = None;
+        self.browse_page = 0;
+        self.search
+            .update(cx, |search, cx| search.set_text(query, cx));
+        cx.notify();
+    }
+
+    /// Sign in to the Zuse account from a chat card.
+    pub fn sign_in_from_chat(&mut self, cx: &mut Context<Self>) {
+        self.sign_in(cx);
+    }
+}
+
 impl PluginsCard {
     fn signed_in(&self) -> bool {
         self.account.user.is_some()
@@ -622,20 +709,34 @@ impl PluginsCard {
                 });
             }
         } else {
-            let tenant = self.plugins.snapshot["tenantId"].clone();
-            self.request(
-                methods::PLUGINS,
-                json!({
-                    "action": "connect",
-                    "tenantId": tenant,
-                    "pluginId": definition.id,
-                    "label": label,
-                    "requestId": uuid::Uuid::new_v4().to_string(),
-                    "returnTo": {"kind": "desktop", "port": 0},
-                }),
-                cx,
-            );
+            self.start_oauth(&definition, cx);
         }
+    }
+
+    /// Start hosted OAuth for a catalog plugin under the next free label;
+    /// the provider's page opens once the attempt comes back.
+    fn start_oauth(
+        &mut self,
+        definition: &zuse_protocol::plugins::PluginDefinition,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy || self.plugins.snapshot["canManage"] == false {
+            return;
+        }
+        let label = zuse_viewport::plugin_catalog::next_label(&self.plugins.snapshot, definition);
+        let tenant = self.plugins.snapshot["tenantId"].clone();
+        self.request(
+            methods::PLUGINS,
+            json!({
+                "action": "connect",
+                "tenantId": tenant,
+                "pluginId": definition.id,
+                "label": label,
+                "requestId": uuid::Uuid::new_v4().to_string(),
+                "returnTo": {"kind": "desktop", "port": 0},
+            }),
+            cx,
+        );
     }
 
     fn add_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1868,6 +1969,7 @@ pub fn fixture_seed(state: Entity<AppState>, variant: &str, cx: &mut App) {
     card.update(cx, |card, cx| {
         card.fixture = true;
         card.watch = None;
+        card.account_loaded = true;
         card.account = if variant == "signedout" {
             AccountStatus::default()
         } else {

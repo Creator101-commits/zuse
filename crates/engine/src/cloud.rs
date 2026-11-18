@@ -160,35 +160,21 @@ fn canonical_origin(origin: &str) -> String {
         .unwrap_or_else(|_| origin.to_owned())
 }
 
-/// Production cloud origins. Cloud computers stay off against these unless
-/// explicitly enabled.
-const PRODUCTION_ORIGINS: &[&str] = &["https://api.zuse.sh", "https://api-rust.zuse.sh"];
+/// What a request for a cloud computer gets while the kill switch is on.
+pub const BETA_MESSAGE: &str = "Cloud computers are turned off in this app.";
 
-/// What a request for a cloud computer gets while the beta is off.
-pub const BETA_MESSAGE: &str = "Cloud computers are in beta and not available here yet.";
-
-/// Cloud computers are a beta. `ZUSE_CLOUD_BETA=1` turns them on and `=0`
-/// off; otherwise they are on for every cloud except production (staging,
-/// local development), so production builds never offer them.
+/// Cloud computers are on against every cloud, production included. Who may
+/// use them is the cloud's call: it requires an active Cloud subscription.
+/// `ZUSE_CLOUD_BETA=0` turns them off in this process as a kill switch.
 pub fn beta_enabled() -> bool {
-    // Unit tests exercise cloud code against the default (production) origin.
-    if cfg!(test) && std::env::var_os("ZUSE_CLOUD_BETA").is_none() {
-        return true;
-    }
-    beta_enabled_for(
-        std::env::var("ZUSE_CLOUD_BETA").ok().as_deref(),
-        &crate::api_origins::from_env().cloud,
-    )
+    beta_enabled_for(std::env::var("ZUSE_CLOUD_BETA").ok().as_deref())
 }
 
-fn beta_enabled_for(flag: Option<&str>, cloud_origin: &str) -> bool {
-    match flag.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
-        Some("1" | "true" | "on" | "yes") => return true,
-        Some("0" | "false" | "off" | "no") => return false,
-        _ => {}
-    }
-    let origin = cloud_origin.trim().trim_end_matches('/');
-    !PRODUCTION_ORIGINS.contains(&origin)
+fn beta_enabled_for(flag: Option<&str>) -> bool {
+    !matches!(
+        flag.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("0" | "false" | "off" | "no")
+    )
 }
 
 /// Methods the beta switch covers: cloud computers, their projects, sync and
@@ -1954,17 +1940,16 @@ mod beta_tests {
         ));
     }
     #[test]
-    fn cloud_computers_are_off_in_production_unless_enabled() {
-        assert!(!beta_enabled_for(None, "https://api.zuse.sh"));
-        assert!(!beta_enabled_for(None, "https://api.zuse.sh/"));
-        assert!(!beta_enabled_for(None, "https://api-rust.zuse.sh"));
-        assert!(beta_enabled_for(None, "https://api-rust-stag.zuse.sh"));
-        assert!(beta_enabled_for(None, "http://127.0.0.1:27655"));
-        assert!(beta_enabled_for(Some("1"), "https://api.zuse.sh"));
-        assert!(!beta_enabled_for(
-            Some("0"),
-            "https://api-rust-stag.zuse.sh"
-        ));
+    fn cloud_computers_are_on_in_production_unless_switched_off() {
+        // Production is launched: the subscription, checked by the cloud,
+        // decides who gets a computer. Only the explicit kill switch turns
+        // the methods off here.
+        for flag in [None, Some(""), Some("1"), Some("yes")] {
+            assert!(beta_enabled_for(flag), "{flag:?}");
+        }
+        for flag in ["0", " Off ", "false", "no"] {
+            assert!(!beta_enabled_for(Some(flag)), "{flag}");
+        }
     }
     #[test]
     fn the_account_and_billing_stay_outside_the_beta() {

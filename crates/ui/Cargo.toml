@@ -37,6 +37,10 @@ name = "browser-fixture"
 required-features = ["browser-fixture"]
 
 [[example]]
+name = "zapper-fixture"
+required-features = ["browser-fixture"]
+
+[[example]]
 name = "windows-render-fixture"
 required-features = ["windows-render-fixture"]
 
@@ -89,6 +93,7 @@ name = "compact-picker-fixture"
 required-features = ["compact-picker-fixture"]
 
 [dependencies]
+hayro = "0.9"
 zuse-analytics.workspace = true
 zuse-i18n.workspace = true
 zuse-model.workspace = true

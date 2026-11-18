@@ -13,6 +13,7 @@ use crate::tooltip::TooltipExt as _;
 use zuse_i18n::messages as msg;
 mod add_menu;
 mod archive;
+pub(crate) mod file_preview;
 mod permission_inspector;
 mod permission_prompt;
 mod permissions;
@@ -442,6 +443,8 @@ pub enum SendButtonMode {
 struct AttachmentDraft {
     /// The highest number handed out so far.
     next: u32,
+    /// References observed in the editor, for undo and deletion tracking.
+    referenced: HashSet<u32>,
     /// Attachments whose last chip or tile was removed. Undo that brings their
     /// chip back restages the attachment from here.
     unstaged: Vec<StagedAttachment>,
@@ -6260,6 +6263,53 @@ fn completion_trigger(
     (token, skill, include_skills, commands_allowed)
 }
 
+/// Whether this token may fetch the agent's own `/` commands. Zuse's commands
+/// do not depend on it: the switch only hides the provider catalog.
+fn provider_commands_requested(
+    preferences: crate::settings::SkillCompletionSettings,
+    skill: bool,
+    commands_allowed: bool,
+) -> bool {
+    commands_allowed && !skill && preferences.provider_commands
+}
+
+/// Empty text for the `/` menu. Naming the chat's agent keeps an unmatched
+/// provider catalog from reading as a Zuse bug.
+fn empty_slash_message(
+    skill: bool,
+    supported: bool,
+    preferences: crate::settings::SkillCompletionSettings,
+    agent: Option<&'static str>,
+    catalog_empty: bool,
+) -> String {
+    if skill {
+        return if !catalog_empty {
+            "No matching skills".to_string()
+        } else if supported {
+            "No skills available for this project".to_string()
+        } else {
+            "This agent does not advertise skills".to_string()
+        };
+    }
+    if !preferences.separate_from_slash {
+        return if catalog_empty {
+            "No commands or skills available".to_string()
+        } else {
+            "No matching commands or skills".to_string()
+        };
+    }
+    if !preferences.provider_commands {
+        // A missing row is the switch, not an empty catalog.
+        return "No matching commands. Provider commands are off for this agent.".to_string();
+    }
+    match (agent, catalog_empty) {
+        (Some(agent), true) => format!("{agent} exposes no slash commands"),
+        (Some(agent), false) => format!("No matching commands. This chat runs {agent}."),
+        (None, true) => "No slash commands available in this integration".to_string(),
+        (None, false) => "No matching commands".to_string(),
+    }
+}
+
 /// Commands implemented by Zuse, independently of the provider protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkspaceCommand {
@@ -6272,6 +6322,9 @@ pub enum WorkspaceCommand {
     Terminal,
     Rename,
     Stop,
+    /// `/mcp`: the agent's MCP servers and the user's plugins, as a card in
+    /// the chat. Answered by Zuse, never sent to the agent.
+    Mcp,
     /// The toolbar's plugins button; not offered as a slash command.
     Plugins,
     /// Provider accounts (the tray's Switch account); not a slash command.
@@ -6279,6 +6332,9 @@ pub enum WorkspaceCommand {
 }
 
 impl WorkspaceCommand {
+    /// Provider command names Zuse's own commands replace.
+    const OVERRIDES: &'static [&'static str] = &["mcp"];
+
     fn catalog() -> &'static [(Self, &'static str, &'static str, bool)] {
         &[
             (
@@ -6295,6 +6351,12 @@ impl WorkspaceCommand {
                 false,
             ),
             (Self::Settings, "settings", "Zuse: open settings", false),
+            (
+                Self::Mcp,
+                "mcp",
+                "Zuse: MCP servers and plugins, with connect and manage",
+                false,
+            ),
             (Self::Diff, "diff", "Zuse: open changes", true),
             (Self::Files, "files", "Zuse: open project files", true),
             (Self::Terminal, "terminal", "Zuse: open a terminal", true),
@@ -6314,6 +6376,10 @@ fn with_workspace_commands(
     in_chat: bool,
 ) -> Vec<InvocationCandidate> {
     rows.retain(|row| row.workspace_command.is_none());
+    // Zuse answers these better than providers do in a non-interactive
+    // session (Claude Code's `/mcp` prints one summary line there), so
+    // Zuse's take the plain name.
+    rows.retain(|row| !WorkspaceCommand::OVERRIDES.contains(&row.name.as_str()));
     for &(command, name, description, needs_chat) in WorkspaceCommand::catalog() {
         if needs_chat && !in_chat {
             continue;
@@ -6469,10 +6535,15 @@ fn invocation_candidates(
         .iter()
         .filter_map(|skill| skill.command.as_ref().map(|command| command.name.as_str()))
         .collect();
+    let mut seen = std::collections::HashSet::new();
     let commands: Vec<_> = commands
         .into_iter()
         .filter(|command| {
-            valid_invocation_name(&command.name) && !skill_commands.contains(command.name.as_str())
+            valid_invocation_name(&command.name)
+                && !skill_commands.contains(command.name.as_str())
+                // A provider that lists the same command twice must not show
+                // two identical rows; the first description wins.
+                && seen.insert(command.name.clone())
         })
         .collect();
     commands
@@ -6590,6 +6661,8 @@ pub struct Composer {
     /// The file name each staged image arrived with, by attachment id: the
     /// upload is renamed `Image N`, but its chip shows the original.
     attachment_original_names: HashMap<String, SharedString>,
+    /// First-page PDF thumbnails, scoped to the currently visible draft.
+    document_thumbnails: HashMap<String, Option<std::sync::Arc<gpui::Image>>>,
     /// Rich window captures keyed exactly like drafts and ordinary staged
     /// attachments. Each owns one screenshot that joins the existing upload
     /// path only at send time.
@@ -6597,6 +6670,9 @@ pub struct Composer {
     appshot_entrances: HashMap<String, Instant>,
     /// The staged attachment being viewed full-size (click a thumbnail).
     preview: Option<attachments::PreviewImage>,
+    file_preview: Option<file_preview::FilePreview>,
+    pdf_preview: Option<file_preview::PdfPreview>,
+    file_preview_generation: u64,
     /// Focused while the lightbox is open so Escape reaches it; the input
     /// gets focus back on close.
     preview_focus: FocusHandle,
@@ -7396,9 +7472,13 @@ impl Composer {
             attachments: HashMap::new(),
             attachment_drafts: HashMap::new(),
             attachment_original_names: HashMap::new(),
+            document_thumbnails: HashMap::new(),
             appshots: HashMap::new(),
             appshot_entrances: HashMap::new(),
             preview: None,
+            file_preview: None,
+            pdf_preview: None,
+            file_preview_generation: 0,
             preview_focus: cx.focus_handle(),
             preview_focus_pending: false,
             picker_task: None,
@@ -7561,22 +7641,10 @@ impl Composer {
             .unwrap_or(&[])
     }
 
-    /// Staged attachments that get a tile above the input. One the draft
-    /// mentions as a chip is already on screen there (hover previews it,
-    /// deleting it unstages it), so only attachments without a chip are tiled.
-    fn tiled_attachments<'a>(&'a self, cx: &App) -> Vec<&'a StagedAttachment> {
-        let chipped: Vec<u32> = self
-            .input
-            .read(cx)
-            .projection
-            .mentions
-            .iter()
-            .filter_map(|(link, _)| link.attachment)
-            .collect();
-        self.staged()
-            .iter()
-            .filter(|att| att.mention.is_none_or(|index| !chipped.contains(&index)))
-            .collect()
+    /// Staged attachments shown in the attachment tray.
+    #[cfg(test)]
+    fn tiled_attachments<'a>(&'a self, _cx: &App) -> Vec<&'a StagedAttachment> {
+        self.staged().iter().collect()
     }
 
     pub(crate) fn queue_preview_limit(&self) -> usize {
@@ -7892,10 +7960,8 @@ impl Composer {
         draft.next
     }
 
-    /// Add newly staged files to a draft. Each is numbered and mentioned at the
-    /// caret as one edit: images read "Image 1", "Image 2", ...; other files
-    /// keep their name. A file the editor cannot take a chip for, or that was
-    /// staged for a draft the user has since left, stays a plain attachment.
+    /// Stage files without inserting an automatic reference into the prompt.
+    /// The assigned numbers still allow the user to mention them with `@`.
     fn adopt_staged_attachments(
         &mut self,
         key: String,
@@ -7910,38 +7976,17 @@ impl Composer {
             return;
         }
         let text = self.input.read(cx).text().to_string();
-        let mut links = Vec::with_capacity(staged.len());
-        let mut indices = Vec::with_capacity(staged.len());
         for att in &mut staged {
             let index = self.next_attachment_index(&key, &text);
-            let file_name = match att.image() {
-                Some(image) => {
-                    // The chip keeps showing the name it arrived with.
-                    self.attachment_original_names
-                        .insert(att.id.clone(), SharedString::from(att.name.clone()));
-                    att.name = attachments::ensure_extension(
-                        &zuse_protocol::attachment_mentions::image_label(index),
-                        image.format,
-                    );
-                    None
-                }
-                None => Some(att.name.as_str()),
-            };
-            links.push(zuse_protocol::attachment_mentions::attachment_mention_link(
-                index, file_name,
-            ));
-            indices.push(index);
-        }
-        // Chips are inserted before the attachments join the draft, so a
-        // draft that cannot take them (read-only, composing) keeps the files
-        // and their original names.
-        let mentioned = self
-            .input
-            .update(cx, |input, cx| input.insert_reference(&links.join(" "), cx));
-        if mentioned {
-            for (att, index) in staged.iter_mut().zip(indices) {
-                att.mention = Some(index);
+            if let Some(image) = att.image() {
+                self.attachment_original_names
+                    .insert(att.id.clone(), SharedString::from(att.name.clone()));
+                att.name = attachments::ensure_extension(
+                    &zuse_protocol::attachment_mentions::image_label(index),
+                    image.format,
+                );
             }
+            att.mention = Some(index);
         }
         self.attachments.entry(key).or_default().extend(staged);
         self.sync_attachment_chips(cx);
@@ -7976,13 +8021,17 @@ impl Composer {
             let mentioned = zuse_protocol::attachment_mentions::attachment_mention_indices(
                 self.input.read(cx).text(),
             );
-            let is_mentioned =
-                |att: &StagedAttachment| att.mention.is_none_or(|index| mentioned.contains(&index));
             let key = self.current_key.clone();
             let draft = self.attachment_drafts.entry(key.clone()).or_default();
+            draft.referenced.extend(mentioned.iter().copied());
+            let is_mentioned = |att: &StagedAttachment| {
+                att.mention.is_none_or(|index| {
+                    !draft.referenced.contains(&index) || mentioned.contains(&index)
+                })
+            };
             let (restored, mut stash): (Vec<_>, Vec<_>) = std::mem::take(&mut draft.unstaged)
                 .into_iter()
-                .partition(is_mentioned);
+                .partition(|att| att.mention.is_some_and(|index| mentioned.contains(&index)));
             let (mut kept, dropped): (Vec<_>, Vec<_>) = self
                 .attachments
                 .remove(&key)
@@ -9213,6 +9262,8 @@ impl Composer {
             crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::Codex));
         let (token, skill, include_skills, commands_allowed) =
             completion_trigger(text, cursor, preferences);
+        // Zuse's own commands always answer `/`; the agent's are opt-out.
+        let provider_commands = provider_commands_requested(preferences, skill, commands_allowed);
         if token.is_none() {
             // Leaving a token must not replace the catalog identity with the
             // idle (commands_allowed=false) context and evict the warm cache.
@@ -9309,7 +9360,7 @@ impl Composer {
         self.slash_task = Some(cx.spawn(async move |this, cx| {
             let result = async {
                 let commands = async {
-                    if skill || !commands_allowed {
+                    if skill || !provider_commands {
                         return Ok(Vec::new());
                     }
                     let value = engine
@@ -9584,39 +9635,21 @@ impl Composer {
                 cx,
             ));
         } else if self.slash.filtered.is_empty() && self.slash.error.is_none() {
+            let preferences = crate::settings::current(cx)
+                .skill_completion(self.slash.harness.unwrap_or(HarnessId::Codex));
             card = card.child(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
                     .text_size(crate::typography::text_xs())
                     .text_color(theme.text_muted)
-                    .child(if commands.is_empty() {
-                        if self.slash.skill {
-                            if self.slash.supported {
-                                "No skills available for this project"
-                            } else {
-                                "This agent does not advertise skills"
-                            }
-                        } else if !crate::settings::current(cx)
-                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::Codex))
-                            .separate_from_slash
-                        {
-                            "No commands or skills available"
-                        } else {
-                            "No slash commands available in this integration"
-                        }
-                    } else {
-                        if self.slash.skill {
-                            "No matching skills"
-                        } else if !crate::settings::current(cx)
-                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::Codex))
-                            .separate_from_slash
-                        {
-                            "No matching commands or skills"
-                        } else {
-                            "No matching commands"
-                        }
-                    }),
+                    .child(empty_slash_message(
+                        self.slash.skill,
+                        self.slash.supported,
+                        preferences,
+                        self.slash.harness.map(crate::pickers::harness_display_name),
+                        commands.is_empty(),
+                    )),
             );
         } else {
             let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(self.slash.filtered.len() + 2);
@@ -10097,8 +10130,69 @@ impl Composer {
         self.reset_slash(None, cx);
         self.failure = None;
         self.failure_key = None;
+        if command == WorkspaceCommand::Mcp && self.queue_chat_command("mcp", cx) {
+            cx.notify();
+            return;
+        }
+        // Without a local chat to answer in, `/mcp` opens Plugins.
+        let command = match command {
+            WorkspaceCommand::Mcp => WorkspaceCommand::Plugins,
+            command => command,
+        };
         cx.emit(ComposerEvent::WorkspaceCommand(command));
         cx.notify();
+    }
+
+    /// Ask the selected chat's host to answer `/name` with a card in the
+    /// transcript. False when there is no local chat to answer in (a new
+    /// conversation, or a cloud task, whose runtime doesn't answer these).
+    fn queue_chat_command(&mut self, name: &str, cx: &mut Context<Self>) -> bool {
+        if self.is_native_cloud() || self.cached_cloud() {
+            return false;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return false;
+        };
+        let Some(chat_id) = self.state.read(cx).selected_chat.clone() else {
+            return false;
+        };
+        // A host that can answer: never an unsaved side chat (no host row
+        // yet) or an older build, which would leave the command pending.
+        if !self
+            .state
+            .read(cx)
+            .chat_host_supports(&chat_id, zuse_protocol::capabilities::CHAT_COMMANDS_V1)
+        {
+            return false;
+        }
+        // The card would land after the running reply and move the chat's
+        // "current turn", so it waits for the turn to end.
+        if self.run_live(cx) {
+            self.failure = Some(format!("Run /{name} once the agent finishes this turn.").into());
+            self.failure_key = Some(chat_id);
+            return true;
+        }
+        let command = SessionCommandPayload::ChatCommand {
+            name: name.to_owned(),
+            message_id: uuid::Uuid::new_v4().to_string(),
+            text: format!("/{name}"),
+        };
+        let Ok(command) = serde_json::to_value(&command) else {
+            return false;
+        };
+        let params = serde_json::json!({ "chatId": chat_id, "command": command });
+        let failure_chat = chat_id.clone();
+        self.action_task = Some(cx.spawn(async move |this, cx| {
+            if let Err(err) = engine.client().call(methods::QUEUE_COMMAND, params).await {
+                this.update(cx, |composer, cx| {
+                    composer.failure = Some(format!("Couldn't run /mcp: {err}").into());
+                    composer.failure_key = Some(failure_chat);
+                    cx.notify();
+                })
+                .ok();
+            }
+        }));
+        true
     }
 
     /// Send `text` for a control outside the editor (a pull request card's
@@ -10554,6 +10648,16 @@ impl Composer {
             &appshots::with_appshots(&text, &staged_appshots, &echo_appshot_paths),
             &echo_paths,
         );
+        // Reuse the staged PDF page while the upload is being sent.
+        let sent_document_thumbnails: HashMap<_, _> = staged
+            .iter()
+            .filter_map(|att| {
+                self.document_thumbnails
+                    .get(&att.id)
+                    .and_then(|image| image.clone())
+                    .map(|image| (att.id.clone(), image))
+            })
+            .collect();
         // Queued flow also seeds the UPLOAD ALIAS: the host rewrites the
         // persisted ref to `{its uploads dir}/{id8}-{name}` — an absolute
         // path the sender can't predict, but whose id8 it minted. The alias
@@ -10561,20 +10665,22 @@ impl Composer {
         // rewrite instead of blanking into a reload skeleton.
         if queued_flow {
             for (upload_id, att) in upload_ids.iter().zip(&staged) {
-                attachments::seed_staged_alias(&device_id, upload_id, att);
+                let thumbnail = sent_document_thumbnails.get(&att.id);
+                attachments::seed_staged_alias(&device_id, upload_id, att, thumbnail);
                 if let Some(local) = local_device_id.as_deref()
                     && local != device_id
                 {
-                    attachments::seed_staged_alias(local, upload_id, att);
+                    attachments::seed_staged_alias(local, upload_id, att, thumbnail);
                 }
             }
         }
         for (path, att) in echo_paths.iter().zip(&staged) {
-            attachments::seed_staged(&device_id, path, att);
+            let thumbnail = sent_document_thumbnails.get(&att.id);
+            attachments::seed_staged_with_thumbnail(&device_id, path, att, thumbnail);
             if let Some(local) = local_device_id.as_deref()
                 && local != device_id
             {
-                attachments::seed_staged(local, path, att);
+                attachments::seed_staged_with_thumbnail(local, path, att, thumbnail);
             }
         }
 
@@ -10731,9 +10837,10 @@ impl Composer {
                     // Attachment in the original send path).
                     let seed_device = host_device_id.clone().unwrap_or_else(|| device_id.clone());
                     for (path, att) in attachment_paths.iter().zip(&staged) {
-                        attachments::seed_staged(&seed_device, path, att);
+                        let thumbnail = sent_document_thumbnails.get(&att.id);
+                        attachments::seed_staged_with_thumbnail(&seed_device, path, att, thumbnail);
                         if seed_device != device_id {
-                            attachments::seed_staged(&device_id, path, att);
+                            attachments::seed_staged_with_thumbnail(&device_id, path, att, thumbnail);
                         }
                     }
                     let appshot_paths: HashMap<String, String> = staged
@@ -13530,11 +13637,7 @@ impl Render for Composer {
             - 2.0 * COMPOSER_OUTER_PAD
             - 2.0;
         let appshot_count = self.staged_appshots().len();
-        let image_count = self
-            .staged()
-            .iter()
-            .filter(|att| att.image().is_some())
-            .count();
+        let image_count = self.staged().len();
         let image_strip_height = attachment_strip_height(image_count, strip_width_hint);
         let base_height = if self.dock_frame.is_some() {
             dock_layout.height(dock_amount)
@@ -13878,6 +13981,7 @@ impl Render for Composer {
         let permission = self
             .render_permission_control(&theme, narrow, cx)
             .opacity(beneath_voice);
+        let zapper_coordinator = self.state.read(cx).selected_chat_is_zot_coordinator();
         let plan_chip = self
             .render_plan_chip(&theme, cx)
             .map(|chip| chip.opacity(beneath_voice));
@@ -14016,7 +14120,9 @@ impl Render for Composer {
                             .items_center()
                             .gap(px(ACTION_UTILITY_GAP))
                             .child(attach)
-                            .child(permission)
+                            // A Zapper's coordinator always runs at the access
+                            // level the engine pins, so there's nothing to pick.
+                            .when(!zapper_coordinator, |el| el.child(permission))
                             .children(plan_chip)
                             .when(
                                 !self.side_chat && zuse_viewport::cloud_gate::enabled(),
@@ -14183,21 +14289,34 @@ impl Render for Composer {
                 .children(dictation_status),
         );
 
+        if let Some(preview) = self.file_preview.clone() {
+            if std::mem::take(&mut self.preview_focus_pending) {
+                window.focus(&self.preview_focus, cx);
+            }
+            return container.child(self.render_file_preview(preview, window, cx));
+        }
+
         // Full-size preview of a staged thumbnail (AttachmentPreviewDialog).
         if let Some(preview) = self.preview.clone() {
             if std::mem::take(&mut self.preview_focus_pending) {
                 window.focus(&self.preview_focus, cx);
             }
             let weak = cx.weak_entity();
-            return container.child(attachments::lightbox(
+            let nav = self.pdf_gallery(cx);
+            return container.child(attachments::lightbox_gallery(
                 window,
                 &preview,
                 &self.preview_focus,
+                None,
+                nav,
+                self.pdf_preview.is_some(),
                 move |window, cx| {
                     // Hand focus back to the input so typing (and the next
                     // Escape) lands where it did before the lightbox opened.
                     if let Ok(input_focus) = weak.update(cx, |this, cx| {
                         this.preview = None;
+                        this.pdf_preview = None;
+                        this.file_preview_generation = this.file_preview_generation.wrapping_add(1);
                         cx.notify();
                         this.input.read(cx).focus_handle.clone()
                     }) {
@@ -14389,9 +14508,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn staged_images_live_in_the_tray_so_a_rewrap_never_moves_the_card(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn staged_images_keep_clearance_during_dock_reflow(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
         let png = base64::Engine::decode(&base64::engine::general_purpose::STANDARD,
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF1cAAAAASUVORK5CYII=").unwrap();
@@ -14425,8 +14542,8 @@ mod tests {
         let before = handle
             .read_with(cx, |composer, _| composer.last_rendered_height)
             .unwrap();
-        // Staged images sit in the tray above the card, so a width that
-        // would have rewrapped the old in-card strip leaves the card alone.
+        // A width change during a dock transition keeps the card continuous
+        // and reserves room for the attachment strip.
         cx.update(|cx| {
             handle
                 .update(cx, |composer, _, cx| {
@@ -14450,12 +14567,15 @@ mod tests {
                     assert!(composer.height_morph.is_none());
                     let thread =
                         thread_composer_height(composer.input.read(cx).measured_content_height());
+                    let strip_width = 697.0 - 2.0 * COMPOSER_OUTER_PAD - 2.0;
+                    let strip = attachment_strip_height(composer.staged().len(), strip_width);
                     assert!(
                         (composer.last_rendered_height + composer.dock_clearance_correction
-                            - thread)
+                            - thread
+                            - strip)
                             .abs()
                             < 0.1,
-                        "transcript clearance reserves only the card"
+                        "transcript clearance includes the attachment strip"
                     );
                     assert_eq!(composer.input.read(cx).text(), "Hi");
                 })
@@ -14670,15 +14790,8 @@ mod tests {
             cx.update_window(handle.into(), |_, window, cx| {
                 window.draw(cx).clear();
                 assert!(input.read(cx).focus_handle.is_focused(window));
-                // An attached image is mentioned at the caret.
-                assert_eq!(
-                    input.read(cx).text(),
-                    if accepted {
-                        "Keep this draft [Image 1](zuse-image:1) "
-                    } else {
-                        "Keep this draft"
-                    }
-                );
+                // Attaching an image leaves the draft text untouched.
+                assert_eq!(input.read(cx).text(), "Keep this draft");
             })
             .unwrap();
             assert_eq!(
@@ -15434,7 +15547,7 @@ mod tests {
             vec![],
         );
         let rows = with_workspace_commands(native, true);
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 12);
         assert!(rows[0].workspace_command.is_none());
         assert_eq!(rows[0].input_hint.as_deref(), Some("model id"));
         assert_eq!(workspace_command_for_text("/model", &rows), None);
@@ -15443,9 +15556,9 @@ mod tests {
             workspace_command_for_text("/zuse:zuse:model", &rows),
             Some(WorkspaceCommand::Model)
         );
-        assert_eq!(with_workspace_commands(rows, true).len(), 11);
+        assert_eq!(with_workspace_commands(rows, true).len(), 12);
         let draft_rows = with_workspace_commands(vec![], false);
-        assert_eq!(draft_rows.len(), 4);
+        assert_eq!(draft_rows.len(), 5);
         assert_eq!(workspace_command_for_text("/diff", &draft_rows), None);
         assert_eq!(
             workspace_command_for_text("/model  ", &draft_rows),
@@ -15465,6 +15578,59 @@ mod tests {
                 "{literal:?}"
             );
         }
+    }
+
+    #[test]
+    fn zuse_mcp_replaces_the_provider_command_of_the_same_name() {
+        let native = invocation_candidates(
+            vec![
+                SlashCommand {
+                    name: "mcp".into(),
+                    description: "Manage MCP servers".into(),
+                    input_hint: None,
+                },
+                SlashCommand {
+                    name: "compact".into(),
+                    description: "Compact the conversation".into(),
+                    input_hint: None,
+                },
+            ],
+            vec![],
+        );
+        let rows = with_workspace_commands(native, true);
+        let mcp: Vec<_> = rows.iter().filter(|row| row.name.contains("mcp")).collect();
+        assert_eq!(mcp.len(), 1, "one /mcp, and no zuse:mcp alias");
+        assert_eq!(mcp[0].workspace_command, Some(WorkspaceCommand::Mcp));
+        assert_eq!(
+            workspace_command_for_text("/mcp", &rows),
+            Some(WorkspaceCommand::Mcp)
+        );
+        assert!(rows.iter().any(|row| row.name == "compact"));
+    }
+
+    #[gpui::test]
+    fn mcp_without_a_chat_to_answer_in_opens_plugins(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        let actions = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = actions.clone();
+        let _subscription = cx.update(|cx| {
+            cx.subscribe(&composer, move |_, event: &ComposerEvent, _| {
+                if let ComposerEvent::WorkspaceCommand(command) = event {
+                    captured.borrow_mut().push(*command);
+                }
+            })
+        });
+        composer.update(cx, |composer, cx| {
+            composer
+                .input
+                .update(cx, |input, cx| input.set_text("/mcp", cx));
+            composer.update_slash("/mcp", 4, cx);
+            composer.on_submit(cx);
+            assert!(composer.input.read(cx).text().is_empty());
+            assert!(composer.failure.is_none());
+        });
+        assert_eq!(&*actions.borrow(), &[WorkspaceCommand::Plugins]);
     }
 
     #[gpui::test]
@@ -17217,6 +17383,7 @@ mod tests {
                     crate::settings::SkillCompletionSettings {
                         dollar: true,
                         separate_from_slash: true,
+                        provider_commands: true,
                     },
                 );
             });
@@ -17849,6 +18016,7 @@ mod tests {
                     let preferences = SkillCompletionSettings {
                         dollar,
                         separate_from_slash,
+                        provider_commands: true,
                     };
                     let (token, skill, include, _) = completion_trigger("$review", 7, preferences);
                     assert_eq!(token.is_some(), dollar, "{harness:?}");
@@ -17864,6 +18032,124 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn provider_command_switch_only_gates_the_agent_catalog() {
+        use crate::settings::SkillCompletionSettings;
+        for (harness, _) in crate::settings::SKILL_COMPLETION_HARNESSES {
+            for provider_commands in [false, true] {
+                let preferences = SkillCompletionSettings {
+                    dollar: true,
+                    separate_from_slash: true,
+                    provider_commands,
+                };
+                // Zuse's own rows answer `/` either way.
+                let (token, skill, _, commands) = completion_trigger("/model", 6, preferences);
+                assert!(token.is_some() && !skill && commands, "{harness:?}");
+                assert_eq!(
+                    provider_commands_requested(preferences, skill, commands),
+                    provider_commands,
+                    "{harness:?}"
+                );
+                // A `$` skill token never asks for the agent's commands.
+                let (_, skill, _, commands) = completion_trigger("$review", 7, preferences);
+                assert!(skill && !commands);
+                assert!(!provider_commands_requested(preferences, skill, commands));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_slash_menu_names_the_chat_agent() {
+        use crate::settings::SkillCompletionSettings;
+        let on = SkillCompletionSettings {
+            dollar: true,
+            separate_from_slash: true,
+            provider_commands: true,
+        };
+        // The reported codex case: a matched-nothing `/goal` must say whose
+        // catalog was searched instead of looking like a Zuse bug.
+        assert_eq!(
+            empty_slash_message(false, true, on, Some("Codex"), false),
+            "No matching commands. This chat runs Codex."
+        );
+        assert_eq!(
+            empty_slash_message(false, true, on, Some("Codex"), true),
+            "Codex exposes no slash commands"
+        );
+        assert_eq!(
+            empty_slash_message(
+                false,
+                true,
+                SkillCompletionSettings {
+                    provider_commands: false,
+                    ..on
+                },
+                Some("Codex"),
+                false
+            ),
+            "No matching commands. Provider commands are off for this agent."
+        );
+        // Combined menu: naming the agent would misattribute a missing skill.
+        assert_eq!(
+            empty_slash_message(
+                false,
+                true,
+                SkillCompletionSettings {
+                    separate_from_slash: false,
+                    ..on
+                },
+                Some("Codex"),
+                false
+            ),
+            "No matching commands or skills"
+        );
+        assert_eq!(
+            empty_slash_message(false, true, on, None, true),
+            "No slash commands available in this integration"
+        );
+        assert_eq!(
+            empty_slash_message(false, true, on, None, false),
+            "No matching commands"
+        );
+        assert_eq!(
+            empty_slash_message(true, false, on, Some("Codex"), true),
+            "This agent does not advertise skills"
+        );
+        assert_eq!(
+            empty_slash_message(true, true, on, Some("Codex"), false),
+            "No matching skills"
+        );
+    }
+
+    #[test]
+    fn provider_duplicate_commands_collapse_to_one_row() {
+        use zuse_protocol::SlashCommand;
+        let rows = invocation_candidates(
+            vec![
+                SlashCommand {
+                    name: "goal".into(),
+                    description: "first".into(),
+                    input_hint: None,
+                },
+                SlashCommand {
+                    name: "goal".into(),
+                    description: "second".into(),
+                    input_hint: None,
+                },
+                SlashCommand {
+                    name: "init".into(),
+                    description: "init".into(),
+                    input_hint: None,
+                },
+            ],
+            vec![],
+        );
+        let goals: Vec<_> = rows.iter().filter(|row| row.name == "goal").collect();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].description, "first");
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]

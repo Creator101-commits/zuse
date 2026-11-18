@@ -535,6 +535,14 @@ async fn personal_computer_discovery_is_account_scoped_and_excludes_host_secrets
 
         let active:i64=sqlx::query_scalar("SELECT count(*) FROM api_environment_credentials WHERE environment_id='linked-host' AND revoked_at IS NULL").fetch_one(&pool).await.unwrap();
         assert_eq!(active, 1);
+        // Relinking replaces the row instead of piling up revoked ones.
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM api_environment_credentials WHERE environment_id='linked-host'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows, 1);
         let stored_plain:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_environment_credentials WHERE credential_hash=$1 OR credential_hash=$2)").bind(&credential).bind(&next).fetch_one(&pool).await.unwrap();
         assert!(!stored_plain);
         let mint_jwk = json!({"kty":"OKP","crv":"Ed25519","d":URL_SAFE_NO_PAD.encode(seed),"x":URL_SAFE_NO_PAD.encode(mint_key.verifying_key().as_bytes())});

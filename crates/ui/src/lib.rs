@@ -168,8 +168,10 @@ pub fn fixture_http_client(
 /// Run the headed app: tokio bridge up, engine bootstrap kicked off (probe →
 /// connect-or-embed), 1320×880 window (min 900×600) with [`shell::Shell`] as the
 /// root view, boot splash overlaid until the engine reports ready.
-/// Whether cloud computers are offered here: a beta, off in production
-/// (see `zuse_engine::cloud::beta_enabled`). Tests exercise the cloud UI.
+/// Whether this process offers cloud computers at all: on unless the
+/// `ZUSE_CLOUD_BETA=0` kill switch is set (see
+/// `zuse_engine::cloud::beta_enabled`). Which accounts see them is
+/// [`state::CloudAccess`]. Tests exercise the cloud UI.
 pub(crate) fn cloud_beta() -> bool {
     if cfg!(test) {
         return true;

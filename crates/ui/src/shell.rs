@@ -61,8 +61,8 @@ use crate::settings::{
     platform_combo, sidebar_pin_profile_key,
 };
 use crate::state::{
-    AppState, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator, OrgRow,
-    format_time_ago, org_name_valid, parse_orgs, sort_memberships,
+    AppState, CloudAccess, ConnectionStatus, EngineBootConfig, EngineMode, GatePhase, Indicator,
+    OrgRow, format_time_ago, org_name_valid, parse_orgs, sort_memberships,
 };
 use crate::terminal::panel::{TerminalPanel, ToggleTerminal, clamp_terminal_height};
 use crate::theme::Theme;
@@ -576,7 +576,7 @@ impl SettingsSection {
     fn heading(self) -> Option<&'static str> {
         match self {
             SettingsSection::Harnesses => Some("Local agents"),
-            SettingsSection::Cloud => Some("Cloud computer · Beta"),
+            SettingsSection::Cloud => Some("Cloud computer"),
             SettingsSection::Usage => Some("Plan & usage"),
             SettingsSection::Appearance => Some("App"),
             _ => None,
@@ -620,19 +620,37 @@ impl SettingsSection {
         }
     }
 
-    fn visible_in_nav(self) -> bool {
+    /// Whether the Settings menu lists this section for `access`. The Cloud
+    /// computer group needs an active Cloud subscription; Billing needs a
+    /// signed-in account (so it can sell one). Local agents, Usage (model
+    /// usage) and App sections are always listed.
+    fn visible_in_nav(self, access: CloudAccess) -> bool {
+        self.offered_by_build()
+            && (!self.cloud_computer() || access.subscribed())
+            && (self != Self::Billing || access.signed_in())
+    }
+
+    /// The build-level filter, independent of the account: Appshots only
+    /// where supported; local-only builds (see `zuse_viewport::cloud_gate`)
+    /// drop what needs the Zuse account or another device.
+    fn offered_by_build(self) -> bool {
         self != Self::Agents
             && (self != Self::Appshots || crate::appshots::is_desktop())
-            && (!self.cloud_computer() || crate::cloud_beta())
-            // Local-only builds (see `zuse_viewport::cloud_gate`) drop
-            // everything that needs the Zuse account or another device.
             && (!(self.cloud_computer() || matches!(self, Self::Billing | Self::Plugins))
                 || zuse_viewport::cloud_gate::enabled())
             && (self != Self::Devices || zuse_viewport::cloud_gate::remote_enabled())
     }
 
-    /// The Cloud computer group, shown only while cloud computers are in beta
-    /// here.
+    /// Whether this section may be open for `access`. Until the account and
+    /// subscription are known, account sections stay reachable so a
+    /// remembered page or link survives start-up; once they are known, a
+    /// section the menu hides is not reachable.
+    fn reachable(self, access: CloudAccess) -> bool {
+        self.visible_in_nav(access) || (!access.settled() && self.offered_by_build())
+    }
+
+    /// The Cloud computer group: cloud computers, their repositories,
+    /// environments, machine and agent accounts. Subscribers only.
     fn cloud_computer(self) -> bool {
         matches!(
             self,
@@ -645,13 +663,17 @@ impl SettingsSection {
     }
 
     /// Where a generic "open Settings" lands for a remembered section: legacy
-    /// aliases resolve to their page, and a section this build does not show
-    /// (Appshots off macOS/Linux; Cloud, Plugins and Remote access in a
-    /// local-only build) falls back to General.
-    pub(crate) fn reopenable(self) -> Self {
+    /// aliases resolve to their page, and a section this build or account
+    /// does not offer (Appshots off macOS/Linux; Cloud, Plugins and Remote
+    /// access in a local-only build; the Cloud computer group without a
+    /// subscription) falls back: a Cloud page to Billing when Billing is
+    /// offered, anything else to General.
+    pub(crate) fn reopenable(self, access: CloudAccess) -> Self {
         let section = self.canonical();
-        if section.visible_in_nav() {
+        if section.reachable(access) {
             section
+        } else if section.cloud_computer() && Self::Billing.reachable(access) {
+            Self::Billing
         } else {
             Self::General
         }
@@ -757,9 +779,13 @@ impl<'de> serde::Deserialize<'de> for SettingsSection {
 /// The section a `ZUSE_OPEN_ROUTE` value opens: bare `settings` reopens the
 /// remembered section, `settings/<slug>` names one (and so becomes the
 /// remembered one). `None` for anything else, including unknown slugs.
-fn settings_open_route(route: &str, remembered: SettingsSection) -> Option<SettingsSection> {
+fn settings_open_route(
+    route: &str,
+    remembered: SettingsSection,
+    access: CloudAccess,
+) -> Option<SettingsSection> {
     if route == "settings" {
-        return Some(remembered.reopenable());
+        return Some(remembered.reopenable(access));
     }
     route
         .strip_prefix("settings/")
@@ -2805,7 +2831,11 @@ impl Shell {
             Some("plugins") => Route::Plugins,
             Some("zots/new") => Route::Zot,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
-                match settings_open_route(route, settings.settings_section) {
+                match settings_open_route(
+                    route,
+                    settings.settings_section,
+                    state.read(cx).cloud_access(),
+                ) {
                     Some(section) => {
                         if settings.settings_section != section {
                             settings.settings_section = section;
@@ -3310,6 +3340,7 @@ impl Shell {
         self.prune_file_explorers(cx);
         self.refresh_harness_update_watch(cx);
         self.sync_search_warm(cx);
+        self.follow_cloud_access(cx);
         if state.read(cx).engine().is_none() {
             self.side_chats.clear();
             self.side_chat_creating = false;
@@ -5017,6 +5048,37 @@ impl Shell {
                     transcript.ui_block_reply_sent(row_id, sent, cx)
                 });
             }
+            TranscriptEvent::UiBlockPlugin(action) => {
+                self.run_ui_block_plugin_action(action.clone(), cx)
+            }
+        }
+    }
+
+    /// A chat plugin card's button. Connecting an OAuth plugin happens in
+    /// place (its sign-in page opens in the browser and the card follows);
+    /// managing, browsing and key-based plugins open the plugins page on it.
+    fn run_ui_block_plugin_action(
+        &mut self,
+        action: zuse_viewport::ui_block::PluginAction,
+        cx: &mut Context<Self>,
+    ) {
+        use zuse_viewport::ui_block::PluginAction;
+        let plugins = settings::plugins::PluginsCard::shared(self.state.clone(), cx);
+        match action {
+            PluginAction::SignIn => plugins.update(cx, |plugins, cx| plugins.sign_in_from_chat(cx)),
+            PluginAction::Connect { plugin_id } | PluginAction::AddAccount { plugin_id } => {
+                if plugins.update(cx, |plugins, cx| plugins.connect_from_chat(&plugin_id, cx)) {
+                    self.open_plugins_page(cx);
+                }
+            }
+            PluginAction::Manage { plugin_id } => {
+                plugins.update(cx, |plugins, cx| plugins.show_plugin(&plugin_id, cx));
+                self.open_plugins_page(cx);
+            }
+            PluginAction::Browse { query } => {
+                plugins.update(cx, |plugins, cx| plugins.browse_for(&query, cx));
+                self.open_plugins_page(cx);
+            }
         }
     }
 
@@ -6328,10 +6390,11 @@ impl Shell {
     }
 
     pub(crate) fn open_settings(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
-        // A link to a section this build hides (Cloud, Plugins or Remote
-        // access in a local-only build) lands on General instead of an
-        // unreachable tab.
-        let section = section.reopenable();
+        // A link to a section this build or account does not offer (Cloud,
+        // Plugins or Remote access in a local-only build; the Cloud computer
+        // group without a subscription) lands on Billing or General instead
+        // of an unreachable tab.
+        let section = section.reopenable(self.state.read(cx).cloud_access());
         self.command_palette = None;
         // Re-probe installed providers on each visit while preserving active sign-ins.
         if section == SettingsSection::Harnesses {
@@ -6354,7 +6417,11 @@ impl Shell {
     /// `/settings`) reopen the section last viewed. Links that name a
     /// section go through [`Self::open_settings`] instead.
     fn open_last_settings(&mut self, cx: &mut Context<Self>) {
-        self.open_settings(self.settings.settings_section.reopenable(), cx);
+        let section = self
+            .settings
+            .settings_section
+            .reopenable(self.state.read(cx).cloud_access());
+        self.open_settings(section, cx);
     }
 
     /// Every section shown is the one to reopen. Written through the shell's
@@ -9139,6 +9206,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let access = self.state.read(cx).cloud_access();
         let compact = window.viewport_size().width < px(800.);
         let section_icon = |item: SettingsSection| match item {
             SettingsSection::Cloud => icons::DITHER_CLOUD_FILLED,
@@ -9185,7 +9253,7 @@ impl Shell {
                         .children(
                             SettingsSection::ALL
                                 .into_iter()
-                                .filter(|item| item.visible_in_nav())
+                                .filter(|item| item.visible_in_nav(access))
                                 .flat_map(|item| {
                                     let heading = item.heading().map(|heading| {
                                         if compact {
@@ -9246,9 +9314,10 @@ impl Shell {
                                     .tab_stop(selected)
                                     .on_key_down(cx.listener(
                                         move |this, event: &gpui::KeyDownEvent, window, cx| {
+                                            let access = this.state.read(cx).cloud_access();
                                             let items: Vec<_> = SettingsSection::ALL
                                                 .into_iter()
-                                                .filter(|s| s.visible_in_nav())
+                                                .filter(|s| s.visible_in_nav(access))
                                                 .collect();
                                             let current =
                                                 items.iter().position(|s| *s == item).unwrap_or(0);
@@ -13055,6 +13124,8 @@ impl Shell {
         let theme_owned = Theme::of(cx).clone();
         let theme = &theme_owned;
         let (border, text, faint) = (theme.border, theme.text, theme.text_faint);
+        // Cloud setup is offered to Cloud subscribers.
+        let cloud_subscribed = self.state.read(cx).cloud_access().subscribed();
 
         if matches!(self.route, Route::Zot) {
             return self.render_zot_page(window, cx);
@@ -13363,7 +13434,7 @@ impl Shell {
                                         .id("onboarding-add-space")
                                         .on_click(cx.listener(|this, _, _, cx| this.open_add_space(cx))),
                                 )
-                                .when(crate::cloud_beta(), |row| row.child(
+                                .when(cloud_subscribed, |row| row.child(
                                     popover::btn_ghost(&theme_owned, "Set up Cloud", "onboarding-cloud")
                                         .id("onboarding-cloud")
                                         .on_click(cx.listener(|this, _, _, cx| {
@@ -18284,6 +18355,7 @@ mod exit_regressions {
                             settings::SkillCompletionSettings {
                                 dollar: open_links_in_zuse,
                                 separate_from_slash: true,
+                                provider_commands: true,
                             },
                         );
                     });
@@ -22344,14 +22416,20 @@ mod settings_modal_regressions {
                 let selected = shell.state.read(cx).selected_chat.clone();
                 for section in SettingsSection::ALL {
                     shell.open_settings(section, cx);
-                    assert_eq!(shell.route, Route::Settings(section.reopenable()));
+                    assert_eq!(
+                        shell.route,
+                        Route::Settings(section.reopenable(shell.state.read(cx).cloud_access()))
+                    );
                     assert_eq!(shell.nav.current().clone(), history);
                     assert_eq!(shell.state.read(cx).selected_chat, selected);
                     shell.toggle_settings(cx);
                     assert_eq!(shell.route, Route::Chat);
                     assert!(!shell.settings_focus_pending);
                     shell.toggle_settings(cx);
-                    assert_eq!(shell.route, Route::Settings(section.reopenable()));
+                    assert_eq!(
+                        shell.route,
+                        Route::Settings(section.reopenable(shell.state.read(cx).cloud_access()))
+                    );
                 }
                 shell.open_settings(SettingsSection::Agents, cx);
                 assert_eq!(shell.route, Route::Settings(SettingsSection::Harnesses));
@@ -22454,17 +22532,17 @@ mod settings_modal_regressions {
     #[test]
     fn remembered_sections_reopen_only_where_the_nav_can_show_them() {
         assert_eq!(
-            SettingsSection::Shortcuts.reopenable(),
+            SettingsSection::Shortcuts.reopenable(CloudAccess::Subscribed),
             SettingsSection::Shortcuts
         );
         // The legacy Accounts alias lands on the page that absorbed it.
         assert_eq!(
-            SettingsSection::Agents.reopenable(),
+            SettingsSection::Agents.reopenable(CloudAccess::Subscribed),
             SettingsSection::Harnesses
         );
         // Appshots is hidden off-desktop, so it cannot be reopened there.
         assert_eq!(
-            SettingsSection::Appshots.reopenable(),
+            SettingsSection::Appshots.reopenable(CloudAccess::Subscribed),
             if crate::appshots::is_desktop() {
                 SettingsSection::Appshots
             } else {
@@ -22472,20 +22550,174 @@ mod settings_modal_regressions {
             }
         );
         for section in SettingsSection::ALL {
-            assert!(section.reopenable().visible_in_nav(), "{section:?}");
+            assert!(
+                section
+                    .reopenable(CloudAccess::Subscribed)
+                    .visible_in_nav(CloudAccess::Subscribed),
+                "{section:?}"
+            );
             assert_eq!(SettingsSection::from_slug(section.slug()), Some(section));
         }
+    }
+
+    fn listed(access: CloudAccess) -> Vec<SettingsSection> {
+        SettingsSection::ALL
+            .into_iter()
+            .filter(|section| section.visible_in_nav(access))
+            .collect()
+    }
+
+    const CLOUD_GROUP: [SettingsSection; 5] = [
+        SettingsSection::Cloud,
+        SettingsSection::CloudRepositories,
+        SettingsSection::CloudEnvironments,
+        SettingsSection::CloudMachine,
+        SettingsSection::CloudAgents,
+    ];
+
+    #[test]
+    fn cloud_settings_follow_the_account_and_its_subscription() {
+        // Every group heading but Cloud computer's is listed for everyone.
+        let always = [
+            SettingsSection::General,
+            SettingsSection::Harnesses,
+            SettingsSection::Usage,
+            SettingsSection::Appearance,
+        ];
+        for access in [
+            CloudAccess::Unknown,
+            CloudAccess::SignedOut,
+            CloudAccess::Checking,
+            CloudAccess::SignedIn,
+            CloudAccess::Subscribed,
+        ] {
+            let sections = listed(access);
+            for section in always {
+                assert!(sections.contains(&section), "{access:?} {section:?}");
+            }
+            let cloud = CLOUD_GROUP.iter().filter(|s| sections.contains(s)).count();
+            assert_eq!(cloud, if access.subscribed() { 5 } else { 0 }, "{access:?}");
+            assert_eq!(
+                sections.contains(&SettingsSection::Billing),
+                access.signed_in(),
+                "{access:?}"
+            );
+        }
+        let headings: Vec<_> = listed(CloudAccess::Subscribed)
+            .into_iter()
+            .filter_map(SettingsSection::heading)
+            .collect();
+        assert_eq!(
+            headings,
+            ["Local agents", "Cloud computer", "Plan & usage", "App"]
+        );
+        let headings: Vec<_> = listed(CloudAccess::SignedIn)
+            .into_iter()
+            .filter_map(SettingsSection::heading)
+            .collect();
+        assert_eq!(headings, ["Local agents", "Plan & usage", "App"]);
+    }
+
+    #[test]
+    fn hidden_cloud_pages_reopen_billing_or_general_once_access_is_known() {
+        for section in CLOUD_GROUP {
+            assert_eq!(section.reopenable(CloudAccess::Subscribed), section);
+            // Not subscribed: Billing sells the subscription.
+            assert_eq!(
+                section.reopenable(CloudAccess::SignedIn),
+                SettingsSection::Billing
+            );
+            assert_eq!(
+                section.reopenable(CloudAccess::SignedOut),
+                SettingsSection::General
+            );
+            // Start-up keeps a remembered Cloud page until access is known.
+            assert_eq!(section.reopenable(CloudAccess::Unknown), section);
+            assert_eq!(section.reopenable(CloudAccess::Checking), section);
+        }
+        assert_eq!(
+            SettingsSection::Billing.reopenable(CloudAccess::SignedIn),
+            SettingsSection::Billing
+        );
+        assert_eq!(
+            SettingsSection::Billing.reopenable(CloudAccess::SignedOut),
+            SettingsSection::General
+        );
+        assert_eq!(
+            SettingsSection::Usage.reopenable(CloudAccess::SignedOut),
+            SettingsSection::Usage
+        );
+    }
+
+    #[gpui::test]
+    fn ending_the_subscription_leaves_cloud_pages_without_a_restart(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        init_settings_test(settings::UiSettings::default(), dir.path(), cx);
+        let window = cx.add_window(|_, cx| test_shell(dir.path(), cx));
+        window
+            .update(cx, |shell, _, cx| {
+                let state = shell.state.clone();
+                state.update(cx, |state, cx| {
+                    state.apply_cloud_account(
+                        serde_json::json!({"user":{"id":"owner"},"orgId":null}),
+                    );
+                    state.set_cloud_subscription_for_test(true);
+                    cx.notify();
+                });
+                shell.open_settings(SettingsSection::CloudMachine, cx);
+                assert_eq!(shell.route, Route::Settings(SettingsSection::CloudMachine));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.route, Route::Settings(SettingsSection::CloudMachine));
+                shell.state.update(cx, |state, cx| {
+                    state.set_cloud_subscription_for_test(false);
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.route, Route::Settings(SettingsSection::Billing));
+                // Subscribing again brings the group back; signing out
+                // leaves Billing for General.
+                shell.state.update(cx, |state, cx| {
+                    state.set_cloud_subscription_for_test(true);
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                shell.open_settings(SettingsSection::Cloud, cx);
+                assert_eq!(shell.route, Route::Settings(SettingsSection::Cloud));
+                shell.state.update(cx, |state, cx| {
+                    state.apply_cloud_account(serde_json::json!({"user":null,"orgId":null}));
+                    cx.notify();
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(shell.route, Route::Settings(SettingsSection::General));
+            })
+            .unwrap();
     }
 
     #[test]
     fn open_route_names_a_section_or_reopens_the_remembered_one() {
         let remembered = SettingsSection::Notifications;
         assert_eq!(
-            settings_open_route("settings", remembered),
+            settings_open_route("settings", remembered, CloudAccess::Subscribed),
             Some(SettingsSection::Notifications)
         );
         assert_eq!(
-            settings_open_route("settings", SettingsSection::Agents),
+            settings_open_route("settings", SettingsSection::Agents, CloudAccess::Subscribed),
             Some(SettingsSection::Harnesses)
         );
         for (route, section) in [
@@ -22509,13 +22741,19 @@ mod settings_modal_regressions {
             ("settings/billing", SettingsSection::Billing),
         ] {
             assert_eq!(
-                settings_open_route(route, remembered),
+                settings_open_route(route, remembered, CloudAccess::Subscribed),
                 Some(section),
                 "{route}"
             );
         }
-        assert_eq!(settings_open_route("settings/invoices", remembered), None);
-        assert_eq!(settings_open_route("new", remembered), None);
+        assert_eq!(
+            settings_open_route("settings/invoices", remembered, CloudAccess::Subscribed),
+            None
+        );
+        assert_eq!(
+            settings_open_route("new", remembered, CloudAccess::Subscribed),
+            None
+        );
     }
 
     /// Session navigation shortcuts are not swallowed by Settings: each one
@@ -22654,7 +22892,7 @@ mod settings_modal_regressions {
                 shell.toggle_settings(cx);
                 assert_eq!(
                     shell.route,
-                    Route::Settings(SettingsSection::Appshots.reopenable())
+                    Route::Settings(SettingsSection::Appshots.reopenable(CloudAccess::Subscribed))
                 );
             })
             .unwrap();

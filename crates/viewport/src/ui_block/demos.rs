@@ -4,7 +4,7 @@
 
 use zuse_ui_block::EXAMPLES;
 
-static DEMOS: [(&str, &str); 14] = [
+static DEMOS: [(&str, &str); 16] = [
     EXAMPLES[0],
     EXAMPLES[1],
     EXAMPLES[2],
@@ -54,6 +54,23 @@ budget = Slider("budget", "Monthly budget (USD)", 0, 500, 120, 10)"#,
         r#"root = Card([stats, health], "Release 0.26 readiness")
 stats = Grid([Stat("Open issues", "14", "3 blockers"), Stat("Merged PRs", "87"), Stat("Crash-free", "99.6%", "Last 7 days"), Stat("Downloads", "12.4K")], 4)
 health = Grid([Badge("Docs ready", "good"), Badge("Perf regressions", "warn"), Badge("Signing broken", "bad"), Badge("Beta"), Progress("Translations", 72), Progress("QA pass", 100)], 3)"#,
+    ),
+    (
+        "plugin connect cards",
+        r#"root = Card([linear, notion, figma])
+linear = Connect("linear")
+notion = Connect("notion", "Connect Notion so I can file this write-up in your team space.")
+figma = Connect("Figma")"#,
+    ),
+    (
+        "mcp servers and plugins",
+        r#"root = Card([agent, plugins])
+agent = Card([zuse, docs, paper, analytics], "Claude Code")
+zuse = McpServer("zuse", "connected", "Built in · 31 tools")
+docs = McpServer("claude.ai Docs", "needs-auth", "claude.ai connector")
+paper = McpServer("paper", "failed", "User config")
+analytics = McpServer("posthog", "pending")
+plugins = Card([ConnectedPlugins()], "Zuse plugins")"#,
     ),
     (
         "invalid spec (fallback)",

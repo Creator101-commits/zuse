@@ -106,7 +106,7 @@ class DistributionTests(unittest.TestCase):
             self.assertTrue(link.issym())
             self.assertEqual((link.uid, link.gid), (0, 0))
             self.assertEqual(link.linkname, '/opt/zuse/bin/zuse')
-            self.assertIn(b'Exec=/opt/zuse/bin/zuse %u', bundle.extractfile('usr/share/applications/sh.zuse.app.desktop').read())
+            self.assertIn(b'Exec=/opt/zuse/bin/zuse app %u', bundle.extractfile('usr/share/applications/sh.zuse.app.desktop').read())
             self.assertEqual(bundle.extractfile('opt/zuse/libexec/web/app.wasm').read(), b'\0asm\1\0\0\0')
 
     def test_terminal_install_and_uninstall_preserve_profiles(self):

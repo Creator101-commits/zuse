@@ -1,0 +1,290 @@
+//! Native visual evidence for Zapper avatars and the shared issue surfaces,
+//! drawn from offline data. Usage: `zapper-fixture <capture directory>`.
+use gpui::{
+    AnyWindowHandle, AppContext, AsyncApp, Bounds, Context, Entity, IntoElement, ParentElement,
+    Render, Styled, Window, WindowBounds, WindowOptions, div, px, rgb, size,
+};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use zuse_protocol::presentation::zot_mascots;
+use zuse_protocol::zots::*;
+use zuse_ui::*;
+use zuse_viewport::zapper_avatar::{person_avatar, unassigned_avatar, zapper_avatar};
+use zuse_viewport::zot_issues::{IssuePanel, ThreadState};
+
+async fn pause(cx: &mut AsyncApp) {
+    cx.background_executor()
+        .timer(Duration::from_millis(450))
+        .await;
+}
+
+async fn capture(window: AnyWindowHandle, cx: &mut AsyncApp, path: &Path) -> anyhow::Result<()> {
+    window.update(cx, |_, w, cx| {
+        w.refresh();
+        w.draw(cx).clear();
+        w.present_if_needed();
+    })?;
+    pause(cx).await;
+    let status = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/private-secrets-fixture/capture.py"
+        ))
+        .arg(std::process::id().to_string())
+        .arg(path)
+        .status()?;
+    anyhow::ensure!(status.success(), "fixture window capture failed");
+    Ok(())
+}
+
+fn issue(number: u32, title: &str, status: ZotIssueStatus, assigned: bool, pr: bool) -> ZotIssue {
+    let now = chrono::Utc::now().timestamp_millis();
+    ZotIssue {
+        id: format!("issue-{number}"),
+        number,
+        details: ZotIssueDetails {
+            title: title.into(),
+            description: "Make the flow work end to end and verify it on staging.".into(),
+            status,
+            priority: if number % 3 == 0 {
+                ZotIssuePriority::High
+            } else {
+                ZotIssuePriority::Normal
+            },
+            assigned,
+            owner: Some(match status {
+                ZotIssueStatus::NeedsYou => ZotIssueOwner::User,
+                ZotIssueStatus::InProgress | ZotIssueStatus::InReview => ZotIssueOwner::Thread {
+                    chat_id: format!("zot-worker-{number}"),
+                },
+                _ => ZotIssueOwner::Zapper,
+            }),
+            done_criteria: "Works end to end on staging with a passing smoke test.".into(),
+            ..Default::default()
+        },
+        created_at: now - 54_000_000,
+        updated_at: now - i64::from(number) * 3_600_000,
+        threads: vec![format!("zot-worker-{number}")],
+        pull_requests: if pr {
+            vec![ZotIssuePullRequest {
+                url: format!("https://github.com/acme/app/pull/{}", 120 + number),
+                title: title.into(),
+            }]
+        } else {
+            vec![]
+        },
+        activity: vec![],
+    }
+}
+
+fn zapper(issues: Vec<ZotIssue>, workers: usize) -> Zot {
+    Zot {
+        id: "release".into(),
+        revision: 4,
+        activity_revision: 0,
+        config: ZotConfig {
+            name: "Release".into(),
+            purpose: "Keep staging healthy and ship the cloud chat work.".into(),
+            home_device_id: "local".into(),
+            repositories: vec![],
+            coordinator_model: ZotModel {
+                harness: "claude-code".into(),
+                model: None,
+            },
+            worker_device_id: "local".into(),
+            max_concurrent_workers: 3,
+            max_followups: 3,
+            avatar: Some(ZotAvatar {
+                mascot: "bolt".into(),
+                color: "violet".into(),
+            }),
+        },
+        status: ZotStatus::Active,
+        coordinator_chat_id: "zot-release-0".into(),
+        previous_coordinator_chats: vec![],
+        workers: (1..=workers as u32)
+            .map(|n| ZotWorker {
+                chat_id: format!("zot-worker-{n}"),
+                device_id: "local".into(),
+                space_id: "project".into(),
+                objective: [
+                    "Test access mode and queued files on a new image",
+                    "Send cloud chat files straight to the computer",
+                    "Queue edits in the history window",
+                ][(n as usize - 1) % 3]
+                    .into(),
+                followups: 0,
+            })
+            .collect(),
+        decisions: vec![],
+        issues,
+    }
+}
+
+struct Board {
+    issues: Entity<IssuePanel>,
+    overview: Entity<IssuePanel>,
+    empty: Entity<IssuePanel>,
+}
+
+impl Render for Board {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let mut faces = div().flex().flex_wrap().gap(px(14.)).items_center();
+        for (index, mascot) in zot_mascots::MASCOTS.iter().enumerate() {
+            let color = &zot_mascots::COLORS[index % zot_mascots::COLORS.len()];
+            let avatar = ZotAvatar {
+                mascot: mascot.id.into(),
+                color: color.id.into(),
+            };
+            faces = faces.child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(px(6.))
+                    .child(zapper_avatar(&avatar, 48.))
+                    .child(zapper_avatar(&avatar, 24.))
+                    .child(zapper_avatar(&avatar, 16.)),
+            );
+        }
+        faces = faces
+            .child(person_avatar("Sam", 24.))
+            .child(unassigned_avatar(16.));
+        let panel = |child: Entity<IssuePanel>| {
+            div()
+                .w(px(520.))
+                .p(px(16.))
+                .bg(rgb(0x101010))
+                .border_1()
+                .border_color(rgb(0x262626))
+                .child(child)
+        };
+        div()
+            .size_full()
+            .bg(rgb(0x0b0b0b))
+            .p(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(20.))
+            .child(faces)
+            .child(
+                div()
+                    .flex()
+                    .gap(px(20.))
+                    .items_start()
+                    .child(panel(self.issues.clone()))
+                    .child(panel(self.overview.clone()))
+                    .child(panel(self.empty.clone())),
+            )
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    let output = PathBuf::from(std::env::args().nth(1).expect("capture directory"));
+    std::fs::create_dir_all(&output)?;
+    let failure = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let result = failure.clone();
+    gpui_platform::application()
+        .with_assets(icons::Assets)
+        .run(move |cx| {
+            gpui_base::init(cx);
+            let issues = vec![
+                issue(
+                    1,
+                    "Staging: test access mode and queued files on a new image",
+                    ZotIssueStatus::InProgress,
+                    true,
+                    false,
+                ),
+                issue(
+                    2,
+                    "Web app sends cloud chat files straight to the computer",
+                    ZotIssueStatus::Blocked,
+                    true,
+                    false,
+                ),
+                issue(
+                    3,
+                    "Pick the staging machine image to test",
+                    ZotIssueStatus::NeedsYou,
+                    false,
+                    false,
+                ),
+                issue(
+                    4,
+                    "Queue edits and the history window send files",
+                    ZotIssueStatus::InReview,
+                    true,
+                    true,
+                ),
+                issue(
+                    5,
+                    "Keep the private key out of computers and workloads",
+                    ZotIssueStatus::InReview,
+                    true,
+                    true,
+                ),
+                issue(
+                    6,
+                    "Remove the old upload path",
+                    ZotIssueStatus::Done,
+                    true,
+                    false,
+                ),
+            ];
+            let board = zapper(issues, 3);
+            let states = [
+                ("zot-worker-1".to_owned(), ThreadState::Working),
+                ("zot-worker-2".to_owned(), ThreadState::NeedsYou),
+            ]
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+            let window = cx
+                .open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            gpui::point(px(12.), px(30.)),
+                            size(px(1660.), px(900.)),
+                        ))),
+                        ..Default::default()
+                    },
+                    |_, cx| {
+                        let make = |zot: Zot, overview: bool, cx: &mut gpui::App| {
+                            let states = states.clone();
+                            cx.new(|cx| {
+                                let mut panel = IssuePanel::new(zot, overview);
+                                panel.thread_states(states, cx);
+                                panel
+                            })
+                        };
+                        let issues = make(board.clone(), false, cx);
+                        let overview = make(board.clone(), true, cx);
+                        let empty = make(zapper(vec![], 0), true, cx);
+                        cx.new(|_| Board {
+                            issues,
+                            overview,
+                            empty,
+                        })
+                    },
+                )
+                .unwrap();
+            cx.activate(true);
+            cx.spawn(async move |cx| {
+                let run: anyhow::Result<()> = async {
+                    pause(cx).await;
+                    capture(window.into(), cx, &output.join("zappers.png")).await
+                }
+                .await;
+                if let Err(error) = run {
+                    *failure.lock().unwrap() = Some(format!("{error:#}"));
+                }
+                cx.update(|cx| cx.quit());
+            })
+            .detach();
+        });
+    if let Some(error) = result.lock().unwrap().take() {
+        anyhow::bail!(error);
+    }
+    Ok(())
+}

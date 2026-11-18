@@ -11,11 +11,14 @@ avatar?: ZotAvatar, };
 export type ZotStatus = "active" | "paused" | "stopped" | "archived";
 export type ZotWorker = { chatId: string, deviceId: string, spaceId: string, objective: string, followups: number, };
 export type ZotDecision = { id: string, workerChatId: string | null, question: string, answer: string | null, };
-export type ZotIssueStatus = "backlog" | "todo" | "inProgress" | "blocked" | "inReview" | "done" | "canceled";
+export type ZotIssueStatus = "backlog" | "todo" | "inProgress" | "needsYou" | "blocked" | "inReview" | "done" | "canceled";
 export type ZotIssuePriority = "urgent" | "high" | "normal" | "low";
+export type ZotIssueOwner = { "type": "zapper" } | { "type": "user" } | { "type": "thread", chatId: string, };
+export type ZotIssueOutcome = "merged" | "dropped";
 export type ZotIssueDetails = { title: string, description: string, status: ZotIssueStatus, priority: ZotIssuePriority,
 /**
- * Assigned to the owning Zot. Unassigned issues remain visible in its backlog.
+ * The Zapper (or one of its threads) is responsible. Kept in step with
+ * [`ZotIssueDetails::owner`] for clients that predate owners.
  */
 assigned: boolean,
 /**
@@ -25,7 +28,24 @@ dueDate: string | null, labels: Array<string>,
 /**
  * Other issue ids in the same Zot.
  */
-relations: Array<string>, };
+relations: Array<string>,
+/**
+ * Who holds the issue now: exactly one owner at a time. Absent on issues
+ * saved before owners, where `assigned` means the Zapper.
+ */
+owner?: ZotIssueOwner,
+/**
+ * What must be true for the issue to be done.
+ */
+doneCriteria: string,
+/**
+ * What this issue deliberately leaves alone.
+ */
+outOfScope: string,
+/**
+ * The request-level issue this one is a shippable part of.
+ */
+parent?: string, };
 export type ZotIssuePullRequest = { url: string, title: string, };
 export type ZotIssueActivity = { actor: string | null, id: string, createdAt: number, kind: string, text: string, replyTo?: string, };
 export type ZotIssue = { id: string, number: number, details: ZotIssueDetails, createdAt: number, updatedAt: number, threads: Array<string>, pullRequests: Array<ZotIssuePullRequest>, activity: Array<ZotIssueActivity>, };
@@ -39,7 +59,7 @@ issueId?: string, worker: ZotWorker, model: ZotModel, base: string, } | { "type"
 /**
  * Activity entry this comment answers; shown nested under it.
  */
-replyTo?: string, } | { "type": "freshConversation" } | { "type": "delete" };
+replyTo?: string, } | { "type": "askUser", issueId: string, question: string, recommendation?: string, } | { "type": "closeIssue", issueId: string, outcome: ZotIssueOutcome, note: string, } | { "type": "freshConversation" } | { "type": "delete" };
 export type ZotCommand = { commandId: string, zotId: string, expectedRevision: number | null, action: ZotAction, };
 export type ZotEvent = { id: string, zotId: string, workerChatId: string, kind: string, summary: string, acknowledged: boolean, };
 export type ControlInfo = { apiVersion: number, appVersion: string, capabilities: Array<string>, methods: Array<string>, schemas: Record<string, unknown>, };

@@ -6,7 +6,8 @@
 use crate::catalogue::{self, ComponentDef, Param, Ty};
 use crate::error::Issue;
 use crate::model::{
-    ChartPoint, Component, FlowNode, FollowUp, KeyValuePair, Step, StepStatus, Tab, Tone,
+    ChartPoint, Component, FlowNode, FollowUp, KeyValuePair, ServerStatus, Step, StepStatus, Tab,
+    Tone,
 };
 use crate::resolve::Program;
 use crate::syntax::{Expr, Node};
@@ -699,6 +700,16 @@ impl<'p> Builder<'p> {
                     step,
                 }
             }
+            "Connect" => Component::Connect {
+                plugin: req_str(self, 0).trim().to_owned(),
+                reason: opt_str(self, 1).filter(|reason| !reason.trim().is_empty()),
+            },
+            "McpServer" => Component::McpServer {
+                name: req_str(self, 0),
+                status: ServerStatus::from_name(&req_str(self, 1)).expect("checked enum"),
+                detail: opt_str(self, 2).filter(|detail| !detail.trim().is_empty()),
+            },
+            "ConnectedPlugins" => Component::ConnectedPlugins {},
             other => unreachable!("catalogue component {other} has no builder"),
         })
     }
