@@ -14529,7 +14529,7 @@ mod tests {
                         })
                         .collect(),
                 );
-                composer.set_available_width(wide, cx);
+                composer.set_available_width(698.0, cx);
                 composer.set_dock_frame(crate::composer_dock::DockFrame::settled(true), cx);
                 composer
                     .input
@@ -14550,7 +14550,7 @@ mod tests {
         cx.update(|cx| {
             handle
                 .update(cx, |composer, _, cx| {
-                    composer.set_available_width(narrow, cx)
+                    composer.set_available_width(697.0, cx)
                 })
                 .unwrap();
             cx.update_window(handle.into(), |_, window, cx| {
