@@ -641,7 +641,6 @@ async fn bound_artifact_is_verified_before_any_boot_credential_is_delivered() {
 }
 
 mod cadence;
-mod fresh_boot;
 
 #[tokio::test]
 async fn prepared_launch_checks_bytes_and_starts_in_one_guest_call() {

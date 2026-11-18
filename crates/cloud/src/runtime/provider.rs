@@ -167,35 +167,36 @@ impl AllocationProvider for RuntimeProvider {
                     .verify_initial_source_with_receipt(machine, artifact, name, receipt),
             )
             .await?;
-        let command = request.command()?;
-        // A fresh Boat machine shows the provider's uid on /usr/local for
-        // several seconds after create (the loader then refuses with
-        // `fresh_boot_loader_path_unsafe`). Waiting out that window with the
-        // generic ~2 s job reschedule, and a fresh source verification each
-        // time, made startup wait a few seconds longer than needed. Here only
-        // the same credential-free helper is retried, quickly and for a
-        // bounded time. The source was verified once above for this exact
-        // machine, and the caller's proof fence rechecks scope, lease, source
-        // and lifecycle before any credential is sent.
-        let window = (self.provider.id() == zuse_protocol::cloud_computers::ProviderId::Boat)
-            .then(|| tokio::time::Instant::now() + BOAT_INITIAL_START_WINDOW);
-        let mut retry = 0;
-        loop {
-            let proof = self
-                .initial_bootstrap_helper(machine, &command, request)
-                .await?;
-            let delay =
-                BOAT_INITIAL_START_BACKOFF_MS[retry.min(BOAT_INITIAL_START_BACKOFF_MS.len() - 1)];
-            let delay = std::time::Duration::from_millis(delay);
-            match (proof, window) {
-                (Some(proof), _) => return Ok(Some(proof)),
-                (None, Some(window)) if tokio::time::Instant::now() + delay < window => {
-                    tokio::time::sleep(delay).await;
-                    retry += 1;
+        let result = self
+            .startup_timings
+            .measure(
+                "initialBootstrapHelper",
+                self.provider.execute(machine, &request.command()?),
+            )
+            .await?;
+        self.startup_timings
+            .measure("initialBootstrapProofValidation", async {
+                if crate::managed_bases::bootstrap::Request::loader_not_ready(
+                    result.exit_code,
+                    &result.stdout,
+                ) {
+                    return Ok(None);
                 }
-                (None, _) => return Ok(None),
-            }
-        }
+                if result.exit_code != 0 || result.stdout.len() > 65536 {
+                    tracing::warn!(
+                        provider = self.provider.id().as_str(),
+                        exit_code = result.exit_code,
+                        code = %helper_rejection_code(&result.stdout),
+                        "Fresh boot helper rejected the start"
+                    );
+                    return Err(ProviderError::Rejected);
+                }
+                request.response(
+                    &serde_json::from_slice(&result.stdout)
+                        .map_err(|_| ProviderError::InvalidResponse)?,
+                )
+            })
+            .await
     }
     async fn launch(&self, machine: &str, launch: &RuntimeLaunch) -> Result<(), ProviderError> {
         let layout = super::machine_layout::Layout::for_provider(self.provider.id());
@@ -274,52 +275,6 @@ impl AllocationProvider for RuntimeProvider {
             return Err(ProviderError::Unavailable);
         }
         Ok(())
-    }
-}
-/// How long one worker attempt keeps retrying the credential-free fresh boot
-/// helper on Boat. Measured November 18, 2026: the image's /usr/local became
-/// root-owned 7–10 s after create returned.
-const BOAT_INITIAL_START_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
-/// Sub-second retry delays; each helper call itself takes ~0.15–0.6 s.
-const BOAT_INITIAL_START_BACKOFF_MS: [u64; 4] = [100, 150, 250, 400];
-impl RuntimeProvider {
-    /// One fresh boot helper call. `None` is a bounded pending observation.
-    async fn initial_bootstrap_helper(
-        &self,
-        machine: &str,
-        command: &str,
-        request: &crate::managed_bases::bootstrap::Request,
-    ) -> Result<Option<Value>, ProviderError> {
-        let result = self
-            .startup_timings
-            .measure(
-                "initialBootstrapHelper",
-                self.provider.execute(machine, command),
-            )
-            .await?;
-        self.startup_timings
-            .measure("initialBootstrapProofValidation", async {
-                if crate::managed_bases::bootstrap::Request::loader_not_ready(
-                    result.exit_code,
-                    &result.stdout,
-                ) {
-                    return Ok(None);
-                }
-                if result.exit_code != 0 || result.stdout.len() > 65536 {
-                    tracing::warn!(
-                        provider = self.provider.id().as_str(),
-                        exit_code = result.exit_code,
-                        code = %helper_rejection_code(&result.stdout),
-                        "Fresh boot helper rejected the start"
-                    );
-                    return Err(ProviderError::Rejected);
-                }
-                request.response(
-                    &serde_json::from_slice(&result.stdout)
-                        .map_err(|_| ProviderError::InvalidResponse)?,
-                )
-            })
-            .await
     }
 }
 /// The fixed rejection code the fresh boot helper prints (`{"status":
