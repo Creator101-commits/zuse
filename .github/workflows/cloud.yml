@@ -170,10 +170,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.10
-      - uses: awalsh128/cache-apt-pkgs-action@v1
+      - uses: actions/cache@v4
         with:
-          packages: cmake libclang-dev libasound2-dev ripgrep
-          version: 1
+          path: ~/apt-debs
+          key: apt-debs-${{ runner.os }}-${{ hashFiles('scripts/ci-ubuntu-dependencies.sh') }}-cmake-libclang-dev-libasound2-dev-ripgrep
+      - run: bash scripts/ci-apt-install.sh ~/apt-debs cmake libclang-dev libasound2-dev ripgrep
       # The guest binary backs the runtime and Postgres recovery tests below.
       - run: cargo build --locked -p zuse-cloud-guest
       - run: cargo check --locked -p zuse-cloud-api -p zuse-client

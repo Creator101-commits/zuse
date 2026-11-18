@@ -106,10 +106,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - uses: awalsh128/cache-apt-pkgs-action@v1
+      - uses: actions/cache@v4
         with:
-          packages: cmake libclang-dev libasound2-dev ripgrep
-          version: 1
+          path: ~/apt-debs
+          key: apt-debs-${{ runner.os }}-${{ hashFiles('scripts/ci-ubuntu-dependencies.sh') }}-cmake-libclang-dev-libasound2-dev-ripgrep
+      - run: bash scripts/ci-apt-install.sh ~/apt-debs cmake libclang-dev libasound2-dev ripgrep
       # One build for every package: a single feature set, so nothing is
       # compiled twice.
       - name: Tests
@@ -149,10 +150,11 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - uses: awalsh128/cache-apt-pkgs-action@v1
+      - uses: actions/cache@v4
         with:
-          packages: ripgrep
-          version: 1
+          path: ~/apt-debs
+          key: apt-debs-${{ runner.os }}-${{ hashFiles('scripts/ci-ubuntu-dependencies.sh') }}-ripgrep
+      - run: bash scripts/ci-apt-install.sh ~/apt-debs ripgrep
       - run: cargo build --locked --release -p zuse-harness --example harness-evaluate
       - run: python3 scripts/test-harness-evaluation.py --binary target/release/examples/harness-evaluate --output .context/native-transport-fixtures
 
@@ -186,16 +188,12 @@ jobs:
         with:
           tool: cargo-nextest
       - if: runner.os == 'Linux'
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: actions/cache@v4
         with:
-          # The image already ships build-essential, cmake, clang, pkg-config
-          # and libssl-dev.
-          packages: >-
-            libclang-dev libfontconfig-dev libfreetype-dev libxcb1-dev
-            libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev
-            libxkbcommon-x11-dev libwayland-dev libvulkan-dev libasound2-dev
-            libwebkit2gtk-4.1-dev libjson-glib-dev
-          version: 1
+          path: ~/apt-debs
+          key: apt-debs-${{ runner.os }}-${{ hashFiles('scripts/ci-ubuntu-dependencies.sh') }}-build-essential-cmake-clang-libclang-dev-pkg-config-libssl-dev-libfontconfig-dev-libfreetype-dev-libxcb1-dev-libxcb-shape0-dev-libxcb-xfixes0-dev-libxkbcommon-dev-libxkbcommon-x11-dev-libwayland-dev-libvulkan-dev-libasound2-dev-libwebkit2gtk-4.1-dev-libjson-glib-dev
+      - if: runner.os == 'Linux'
+        run: bash scripts/ci-apt-install.sh ~/apt-debs build-essential cmake clang libclang-dev pkg-config libssl-dev libfontconfig-dev libfreetype-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libasound2-dev libwebkit2gtk-4.1-dev libjson-glib-dev
       - run: cargo check --locked -p zuse -p zuse-cli -p zuse-relay -p zuse-remote
       - if: runner.os == 'macOS'
         uses: actions/setup-python@v5

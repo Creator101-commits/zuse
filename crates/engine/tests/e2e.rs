@@ -747,13 +747,16 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         SessionCommandPayload::Interrupt {},
     );
 
+    // The aborted stamp and the command's Applied status are separate writes;
+    // wait for both rather than assuming their order.
     wait_for(
         || {
             entries(&core)
                 .iter()
                 .any(|e| e.status == Some(MessageStatus::Aborted))
+                && command_status(&core, "cmd-int-1") == Some((SessionCommandStatus::Applied, None))
         },
-        "aborted stamp",
+        "aborted stamp and applied interrupt",
     )
     .await;
 
@@ -767,10 +770,6 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         MessagePart::Text { text, .. } => assert_eq!(text, "partial output"),
         other => panic!("unexpected part {other:?}"),
     }
-    assert_eq!(
-        command_status(&core, "cmd-int-1"),
-        Some((SessionCommandStatus::Applied, None))
-    );
     // Journal closed with a Done — nothing left to recover.
     let journal = RunJournal::open(dir.path().join("orgs/dev-org/dev-user/journals")).unwrap();
     assert!(journal.stale_sessions().unwrap().is_empty());
