@@ -50,7 +50,7 @@ def desktop_entry(destination):
         executable = executable.replace(character, "\\" + character)
     executable = executable.replace("\\", "\\\\")
     return ("[Desktop Entry]\nType=Application\nName=Zuse\nComment=Local coding agents\n"
-            f'Exec="{executable}" %u\nIcon=sh.zuse.app\nTerminal=false\n'
+            f'Exec="{executable}" app %u\nIcon=sh.zuse.app\nTerminal=false\n'
             "Categories=Development;\nMimeType=x-scheme-handler/zuse;\n")
 
 
@@ -98,7 +98,7 @@ def install(source, data, bin_dir):
             os.replace(pending, link)
         finally:
             pending.unlink(missing_ok=True)
-    print(f"Installed at {destination}\nLaunch: {bin_dir / 'zuse'}")
+    print(f"Installed at {destination}\nLaunch: {bin_dir / 'zuse'} app")
     print("Node.js 22+ and the selected agent's CLI/login are required for provider execution.")
     print("Previous package versions and all user profiles are preserved.")
 

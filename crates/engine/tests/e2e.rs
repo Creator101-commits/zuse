@@ -3645,3 +3645,113 @@ async fn private_secret_submission_never_enters_durable_chat_data() {
     assert_no_secret(dir.path());
     core.sessions.interrupt(CHAT).await.unwrap();
 }
+
+#[tokio::test]
+async fn mcp_command_answers_with_a_card_and_never_reaches_the_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = mock_script();
+    script.insert(
+        1,
+        AgentEvent::McpServers {
+            servers: vec![
+                zuse_protocol::HarnessMcpServer {
+                    name: "zuse".into(),
+                    status: "connected".into(),
+                    source: Some("dynamic".into()),
+                    tools: 31,
+                },
+                zuse_protocol::HarnessMcpServer {
+                    name: "vidiq".into(),
+                    status: "needs-auth".into(),
+                    source: Some("user".into()),
+                    tools: 0,
+                },
+            ],
+        },
+    );
+    let core = assemble(dir.path(), Arc::new(MockHarness { script }));
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-1",
+        SessionCommandPayload::Run {
+            request: run_request("hello"),
+            message_id: "msg-user-1".into(),
+        },
+    );
+    wait_for(
+        || {
+            entries(&core).iter().any(|e| {
+                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
+            })
+        },
+        "first turn",
+    )
+    .await;
+    // McpServers feeds `/mcp`, not the transcript.
+    assert!(
+        !entries(&core)
+            .iter()
+            .flat_map(|e| &e.parts)
+            .any(|part| matches!(part, MessagePart::UiBlock { .. }))
+    );
+
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-mcp-1",
+        SessionCommandPayload::ChatCommand {
+            name: "mcp".into(),
+            message_id: "msg-mcp-1".into(),
+            text: "/mcp".into(),
+        },
+    );
+    wait_for(|| entries(&core).len() == 4, "the /mcp exchange").await;
+    let all = entries(&core);
+    assert_eq!(all[2].id, "msg-mcp-1");
+    assert_eq!(all[2].role, MessageRole::User);
+    assert!(matches!(&all[2].parts[0], MessagePart::Text { text, .. } if text == "/mcp"));
+    assert_eq!(all[3].role, MessageRole::Assistant);
+    assert_eq!(all[3].status, Some(MessageStatus::Complete));
+    let MessagePart::UiBlock { spec, .. } = &all[3].parts[0] else {
+        panic!("expected a card, got {:?}", all[3].parts);
+    };
+    zuse_ui_block::parse(spec).unwrap_or_else(|e| panic!("{e}\n{spec}"));
+    assert!(
+        spec.contains(r#"McpServer("zuse", "connected", "Built in · 31 tools")"#),
+        "{spec}"
+    );
+    assert!(
+        spec.contains(r#"McpServer("vidiq", "needs-auth", "Your config")"#),
+        "{spec}"
+    );
+    assert!(spec.contains("ConnectedPlugins()"));
+    assert_eq!(
+        command_status(&core, "cmd-mcp-1"),
+        Some((SessionCommandStatus::Applied, None))
+    );
+
+    // Unknown commands are refused, with nothing written.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-nope",
+        SessionCommandPayload::ChatCommand {
+            name: "nope".into(),
+            message_id: "msg-nope".into(),
+            text: "/nope".into(),
+        },
+    );
+    wait_for(
+        || {
+            command_status(&core, "cmd-nope")
+                .is_some_and(|(s, _)| s != SessionCommandStatus::Pending)
+        },
+        "refusal",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, "cmd-nope").unwrap().0,
+        SessionCommandStatus::Rejected
+    );
+    assert_eq!(entries(&core).len(), 4);
+    core.shutdown().await;
+}

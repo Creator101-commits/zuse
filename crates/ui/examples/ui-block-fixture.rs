@@ -150,7 +150,12 @@ fn main() -> anyhow::Result<()> {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
     let cwd = workspace.to_string_lossy().into_owned();
-    let runtime = tokio::runtime::Runtime::new()?;
+    // Debug builds of the engine's futures outgrow tokio's default 2 MiB
+    // worker stack.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(16 * 1024 * 1024)
+        .build()?;
     let core = runtime.block_on(async {
         zuse_engine::EngineCore::assemble(
             &temp.path().join("engine"),
@@ -190,6 +195,10 @@ fn main() -> anyhow::Result<()> {
         .nth(1)
         .map(std::path::PathBuf::from);
     let light = std::env::args().any(|arg| arg == "--light");
+    // `--plugins <signedin|empty|signedout>`: seed the plugin state live
+    // plugin cards read. `--only <text>`: just the specs whose title has it.
+    let plugins = std::env::args().skip_while(|arg| arg != "--plugins").nth(1);
+    let only = std::env::args().skip_while(|arg| arg != "--only").nth(1);
     // `--context-chips [--click x,y]`: the context/attachment chips above a
     // user bubble instead of the block gallery; the click opens a pill's card.
     let context_chips = std::env::args().any(|arg| arg == "--context-chips");
@@ -280,6 +289,9 @@ fn main() -> anyhow::Result<()> {
                 )
                 .unwrap();
             cx.on_window_closed(|cx, _| cx.quit()).detach();
+            if let Some(variant) = &plugins {
+                settings::plugins::fixture_seed(state.clone(), variant, cx);
+            }
             state.update(cx, |_, cx| cx.notify());
             cx.activate(true);
             cx.spawn(async move |cx| {
@@ -311,6 +323,12 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
                 for (ix, (title, spec)) in specs.iter().enumerate() {
+                    if only
+                        .as_ref()
+                        .is_some_and(|only| !title.contains(only.as_str()))
+                    {
+                        continue;
+                    }
                     let entries = turn(ix, &device, title, spec);
                     state.update(cx, |s, cx| {
                         s.receive_transcript_frame(

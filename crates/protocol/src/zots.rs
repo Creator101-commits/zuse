@@ -194,6 +194,22 @@ pub enum ZotAction {
         #[ts(optional)]
         reply_to: Option<String>,
     },
+    /// Hand an issue to the user with one question: they own it until they
+    /// answer, and their answer hands it back.
+    AskUser {
+        issue_id: String,
+        question: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        recommendation: Option<String>,
+    },
+    /// Close an issue: merged needs a linked pull request, and either way
+    /// the note says what happened.
+    CloseIssue {
+        issue_id: String,
+        outcome: ZotIssueOutcome,
+        note: String,
+    },
     FreshConversation,
     Delete,
 }
@@ -242,18 +258,33 @@ pub enum ZotIssueStatus {
     Backlog,
     Todo,
     InProgress,
+    /// Waiting on the user: they own the issue until they answer.
+    NeedsYou,
     Blocked,
     InReview,
     Done,
     Canceled,
 }
 impl ZotIssueStatus {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Backlog,
         Self::Todo,
         Self::InProgress,
+        Self::NeedsYou,
         Self::Blocked,
         Self::InReview,
+        Self::Done,
+        Self::Canceled,
+    ];
+    /// Board order: what needs the user first, then live work, then queued,
+    /// then finished.
+    pub const BOARD: [Self; 8] = [
+        Self::NeedsYou,
+        Self::InProgress,
+        Self::InReview,
+        Self::Blocked,
+        Self::Todo,
+        Self::Backlog,
         Self::Done,
         Self::Canceled,
     ];
@@ -262,6 +293,7 @@ impl ZotIssueStatus {
             Self::Backlog => "Backlog",
             Self::Todo => "Todo",
             Self::InProgress => "In progress",
+            Self::NeedsYou => "Needs you",
             Self::Blocked => "Blocked",
             Self::InReview => "In review",
             Self::Done => "Done",
@@ -301,7 +333,8 @@ pub struct ZotIssueDetails {
     pub status: ZotIssueStatus,
     #[serde(default)]
     pub priority: ZotIssuePriority,
-    /// Assigned to the owning Zot. Unassigned issues remain visible in its backlog.
+    /// The Zapper (or one of its threads) is responsible. Kept in step with
+    /// [`ZotIssueDetails::owner`] for clients that predate owners.
     #[serde(default)]
     pub assigned: bool,
     /// ISO calendar date, or absent.
@@ -311,6 +344,77 @@ pub struct ZotIssueDetails {
     /// Other issue ids in the same Zot.
     #[serde(default)]
     pub relations: Vec<String>,
+    /// Who holds the issue now: exactly one owner at a time. Absent on issues
+    /// saved before owners, where `assigned` means the Zapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub owner: Option<ZotIssueOwner>,
+    /// What must be true for the issue to be done.
+    #[serde(default)]
+    pub done_criteria: String,
+    /// What this issue deliberately leaves alone.
+    #[serde(default)]
+    pub out_of_scope: String,
+    /// The request-level issue this one is a shippable part of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub parent: Option<String>,
+}
+impl ZotIssueDetails {
+    /// The current owner, reading issues saved before owners existed.
+    pub fn current_owner(&self) -> Option<ZotIssueOwner> {
+        self.owner
+            .clone()
+            .or_else(|| self.assigned.then_some(ZotIssueOwner::Zapper))
+    }
+    /// Keep `assigned` and the status in step with the owner: the user owning
+    /// an open issue means it needs them, and an issue that no longer needs
+    /// them goes back to work.
+    pub fn normalize(&mut self, has_thread: bool) {
+        let owner = self.current_owner();
+        self.assigned = matches!(
+            owner,
+            Some(ZotIssueOwner::Zapper | ZotIssueOwner::Thread { .. })
+        );
+        if self.status.terminal() {
+            return;
+        }
+        match owner {
+            Some(ZotIssueOwner::User) => self.status = ZotIssueStatus::NeedsYou,
+            _ if self.status == ZotIssueStatus::NeedsYou => {
+                self.status = if has_thread {
+                    ZotIssueStatus::InProgress
+                } else {
+                    ZotIssueStatus::Todo
+                }
+            }
+            _ => {}
+        }
+    }
+}
+/// The single owner of an issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ZotIssueOwner {
+    /// The Zapper itself, while it plans or decides.
+    Zapper,
+    /// The person the Zapper works for.
+    User,
+    /// One of the Zapper's threads, while it builds.
+    Thread { chat_id: String },
+}
+/// How an issue closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ZotIssueOutcome {
+    /// Its pull request merged.
+    Merged,
+    /// Deliberately not done.
+    Dropped,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -348,6 +452,6 @@ pub struct ZotIssue {
 }
 impl ZotIssue {
     pub fn code(&self) -> String {
-        format!("ZOT-{}", self.number)
+        format!("ZAP-{}", self.number)
     }
 }

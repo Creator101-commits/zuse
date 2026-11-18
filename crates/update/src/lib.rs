@@ -646,7 +646,7 @@ impl InstallKind {
             } => {
                 linux::apply(staged, data_home, bin_home)?;
                 if relaunch {
-                    relaunch_after_exit(&bin_home.join("zuse"), Path::new(""));
+                    relaunch_after_exit(&bin_home.join("zuse"), Path::new("app"));
                 }
                 Ok(())
             }
@@ -669,7 +669,7 @@ impl InstallKind {
                 apply_headless(app_root, version)?;
                 if relaunch {
                     let binary = app_root.join("current").join("zuse");
-                    relaunch_after_exit(&binary, Path::new(""));
+                    relaunch_after_exit(&binary, Path::new("app"));
                 }
                 Ok(())
             }

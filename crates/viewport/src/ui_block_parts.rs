@@ -58,7 +58,13 @@ impl WorkspaceView {
             });
             let block = id.clone();
             cx.subscribe(&view, move |this, view, event: &UiBlockEvent, cx| {
-                let UiBlockEvent::Send { text } = event;
+                let text = match event {
+                    UiBlockEvent::Send { text } => text,
+                    UiBlockEvent::Plugin(action) => {
+                        this.ui_block_plugin_action(action.clone(), cx);
+                        return;
+                    }
+                };
                 match this.send_ui_block_reply(text.clone(), cx) {
                     Some(request) => {
                         this.ui_blocks.replies.insert(request, view);
@@ -78,8 +84,64 @@ impl WorkspaceView {
             self.ui_blocks.views.borrow_mut().insert(id, view.clone());
             view
         });
-        view.update(cx, |view, cx| view.set_interactive(interactive, cx));
+        let plugins = view
+            .read(cx)
+            .uses_plugins()
+            .then(|| std::rc::Rc::new(self.ui_block_plugins()));
+        view.update(cx, |view, cx| {
+            view.set_interactive(interactive, cx);
+            if let Some(plugins) = plugins {
+                view.set_plugins(plugins, cx);
+            }
+        });
         view
+    }
+
+    /// The browser's plugin state, for live plugin cards.
+    fn ui_block_plugins(&self) -> crate::ui_block::PluginDirectory {
+        let signed_in = self.cloud_account["user"].is_object();
+        crate::ui_block::PluginDirectory {
+            snapshot: self.plugin_state.snapshot.clone(),
+            signed_in,
+            ready: self.cloud_account.is_object(),
+            connecting: self
+                .plugin_state
+                .active_attempt()
+                .then(|| {
+                    self.plugin_state.attempt["pluginId"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .flatten(),
+            busy: self.plugin_request.is_some(),
+            unavailable: !crate::cloud_gate::enabled(),
+        }
+    }
+
+    /// A plugin card's button. Signing in happens in place; everything else
+    /// opens the plugin's page, which has its own Connect and Manage.
+    fn ui_block_plugin_action(
+        &mut self,
+        action: crate::ui_block::PluginAction,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::ui_block::PluginAction;
+        if !self.connected {
+            return;
+        }
+        match action {
+            PluginAction::SignIn => {
+                self.call(methods::CLOUD_ACCOUNT_SIGN_IN, json!({}));
+            }
+            PluginAction::Browse { .. } => self.open_plugins_browse(cx),
+            PluginAction::Connect { plugin_id }
+            | PluginAction::AddAccount { plugin_id }
+            | PluginAction::Manage { plugin_id } => {
+                self.open_plugins_browse(cx);
+                self.plugin_detail = Some(plugin_id);
+            }
+        }
+        cx.notify();
     }
 
     /// Send a UI block's reply as the selected chat's next message, leaving

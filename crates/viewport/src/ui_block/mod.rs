@@ -8,6 +8,7 @@
 //! [`UiBlockView::mark_sent`] to lock the block.
 
 mod charts;
+mod connect;
 mod demos;
 mod form;
 pub mod layout;
@@ -25,6 +26,7 @@ use std::time::Duration;
 use web_time::Instant;
 use zuse_ui_block::{Component, FieldValue, StepStatus, Tone};
 
+pub use connect::{CardState, PluginAction, PluginDirectory, status_line};
 pub use demos::demo_specs;
 pub use palette::UiBlockPalette;
 
@@ -38,6 +40,8 @@ use layout::{
 pub enum UiBlockEvent {
     /// Send `text` as the user's next message (a Form answer or follow-up).
     Send { text: String },
+    /// A plugin card's button: connect, manage, browse or sign in.
+    Plugin(PluginAction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +85,11 @@ pub struct UiBlockView {
     ticking: bool,
     _ticker: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
+    /// The reader's plugins, for live `Connect` / `ConnectedPlugins`.
+    plugins: Rc<PluginDirectory>,
+    /// Plugin buttons work in every turn (their state is live), unlike
+    /// forms; the host turns them off for read-only views.
+    plugin_actions: bool,
 }
 
 impl EventEmitter<UiBlockEvent> for UiBlockView {}
@@ -135,6 +144,36 @@ impl UiBlockView {
             ticking: false,
             _ticker: None,
             _subscriptions: Vec::new(),
+            plugins: Rc::new(PluginDirectory::default()),
+            plugin_actions: true,
+        }
+    }
+
+    /// Whether the spec shows live plugin state, so the host only feeds
+    /// [`Self::set_plugins`] to blocks that need it.
+    pub fn uses_plugins(&self) -> bool {
+        fn any(node: &Component) -> bool {
+            matches!(
+                node,
+                Component::Connect { .. } | Component::ConnectedPlugins {}
+            ) || node.children().into_iter().any(any)
+        }
+        self.root.as_ref().is_ok_and(|root| any(root))
+    }
+
+    /// The reader's current plugins; re-renders only on change.
+    pub fn set_plugins(&mut self, plugins: Rc<PluginDirectory>, cx: &mut Context<Self>) {
+        if *self.plugins != *plugins {
+            self.plugins = plugins;
+            cx.notify();
+        }
+    }
+
+    /// Enable or disable plugin card buttons (off in read-only views).
+    pub fn set_plugin_actions(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.plugin_actions != enabled {
+            self.plugin_actions = enabled;
+            cx.notify();
         }
     }
 
@@ -283,7 +322,7 @@ impl UiBlockView {
                 .min_w_0()
                 .gap(px(16.))
                 .when_some(title.as_ref(), |d, title| d.child(heading(&p, title)))
-                .children(self.children(children, path, form, window, cx))
+                .children(self.card_children(children, path, form, window, cx))
                 .into_any_element(),
             Component::Text { text } => text_block(&p, text),
             Component::Stat { label, value, hint } => stat(&p, label, value, hint.as_deref()),
@@ -324,7 +363,52 @@ impl UiBlockView {
             | Component::RadioGroup { .. }
             | Component::Checkbox { .. }
             | Component::Slider { .. } => self.field(node, path, form, window, cx),
+            Component::Connect { plugin, reason } => {
+                self.connect_card(plugin, reason.as_deref(), path, cx)
+            }
+            Component::McpServer {
+                name,
+                status,
+                detail,
+            } => connect::server_list(
+                &p,
+                &[&Component::McpServer {
+                    name: name.clone(),
+                    status: *status,
+                    detail: detail.clone(),
+                }],
+            ),
+            Component::ConnectedPlugins {} => self.connected_plugins(path, cx),
         }
+    }
+
+    /// A Card's children, with each run of `McpServer` rows drawn as one
+    /// list instead of separately spaced boxes.
+    fn card_children(
+        &mut self,
+        children: &[Component],
+        path: &str,
+        form: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        let mut run: Vec<&Component> = Vec::new();
+        for (index, child) in children.iter().enumerate() {
+            if matches!(child, Component::McpServer { .. }) {
+                run.push(child);
+                continue;
+            }
+            if !run.is_empty() {
+                out.push(connect::server_list(&self.palette.clone(), &run));
+                run.clear();
+            }
+            out.push(self.node(child, &format!("{path}.{index}"), form, window, cx));
+        }
+        if !run.is_empty() {
+            out.push(connect::server_list(&self.palette.clone(), &run));
+        }
+        out
     }
 
     fn children(

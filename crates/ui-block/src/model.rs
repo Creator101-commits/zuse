@@ -50,6 +50,53 @@ impl StepStatus {
     }
 }
 
+/// An agent MCP server's state as its harness reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ServerStatus {
+    Connected,
+    NeedsAuth,
+    Failed,
+    Pending,
+    Disabled,
+    /// Found in the harness's config; it has not reported a state yet.
+    Configured,
+}
+
+impl ServerStatus {
+    pub const NAMES: &'static [&'static str] = &[
+        "connected",
+        "needs-auth",
+        "failed",
+        "pending",
+        "disabled",
+        "configured",
+    ];
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "connected" => Self::Connected,
+            "needs-auth" => Self::NeedsAuth,
+            "failed" => Self::Failed,
+            "pending" => Self::Pending,
+            "disabled" => Self::Disabled,
+            "configured" => Self::Configured,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::NeedsAuth => "needs-auth",
+            Self::Failed => "failed",
+            Self::Pending => "pending",
+            Self::Disabled => "disabled",
+            Self::Configured => "configured",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyValuePair {
     pub key: String,
@@ -236,6 +283,25 @@ pub enum Component {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<f64>,
     },
+    /// A live connection card for one Zuse plugin: the renderer looks the
+    /// plugin up (id, name or domain) and offers Connect, or Add account and
+    /// Manage once connected. Credentials never pass through the agent.
+    Connect {
+        plugin: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// One of the agent's own MCP servers, as its harness reported it when
+    /// the card was made (`/mcp`). Not advertised.
+    McpServer {
+        name: String,
+        status: ServerStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+    /// The reader's Zuse plugins, listed live by the renderer (`/mcp`).
+    /// Not advertised.
+    ConnectedPlugins {},
 }
 
 impl Component {
@@ -266,6 +332,9 @@ impl Component {
             Component::RadioGroup { .. } => "RadioGroup",
             Component::Checkbox { .. } => "Checkbox",
             Component::Slider { .. } => "Slider",
+            Component::Connect { .. } => "Connect",
+            Component::McpServer { .. } => "McpServer",
+            Component::ConnectedPlugins {} => "ConnectedPlugins",
         }
     }
 

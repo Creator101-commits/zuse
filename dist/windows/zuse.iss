@@ -24,8 +24,8 @@ CloseApplications=yes
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\Zuse"; Filename: "{app}\zuse.exe"
-Name: "{autodesktop}\Zuse"; Filename: "{app}\zuse.exe"; Tasks: desktopicon
+Name: "{autoprograms}\Zuse"; Filename: "{app}\zuse.exe"; Parameters: "app"
+Name: "{autodesktop}\Zuse"; Filename: "{app}\zuse.exe"; Parameters: "app"; Tasks: desktopicon
 
 [Tasks]
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
@@ -33,4 +33,4 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 [Registry]
 Root: HKCU; Subkey: "Software\Classes\zuse"; ValueType: string; ValueData: "URL:Zuse Protocol"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\zuse"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\zuse\shell\open\command"; ValueType: string; ValueData: """{app}\zuse.exe"" ""%1"""
+Root: HKCU; Subkey: "Software\Classes\zuse\shell\open\command"; ValueType: string; ValueData: """{app}\zuse.exe"" app ""%1"""

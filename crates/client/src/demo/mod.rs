@@ -353,8 +353,10 @@ impl DemoHost {
                         self.set_status(&client, chat_id, SessionStatus::Idle, None);
                     }
                 }
-                // The demo runtime holds no background work.
-                SessionCommandPayload::StopBackgroundTask { .. } => {}
+                // The demo runtime holds no background work, and answers no
+                // Zuse slash commands.
+                SessionCommandPayload::StopBackgroundTask { .. }
+                | SessionCommandPayload::ChatCommand { .. } => {}
                 SessionCommandPayload::RespondInput {
                     request_id,
                     answers,
