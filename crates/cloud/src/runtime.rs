@@ -614,6 +614,8 @@ impl RuntimeControl {
             };
             sqlx::query("UPDATE api_cloud_workspaces SET wrapped_transcript_key=$2,runtime_credential_hash=$3,runtime_state='connecting',state='setup',status_code='runtime-authenticating',request_config=$4,next_action_at=$5,revision=revision+1,updated_at=GREATEST(updated_at+1,$6) WHERE workspace_id=$1")
                 .bind(id).bind(envelope).bind(&receipt.runtime_credential_hash).bind(&config).bind(next).bind(now).execute(&mut *tx).await?;
+            allocation::guest_start::wake_guest_started_allocation(&mut tx, id, generation, now)
+                .await?;
             receipt
         };
         // No launch content is committed to a replacement conversation on missing/expired state.

@@ -1,5 +1,7 @@
 //! Connect the runtime controller to a provider selected from the workspace's durable identity.
-use super::allocation::{AllocationProvider, RuntimeLaunch, launch_command};
+use super::allocation::{
+    AllocationProvider, RuntimeLaunch, guest_start::GuestStart, launch_command, launch_lines,
+};
 use super::deletion::DeletionProvider;
 use super::lifecycle::RetainedProvider;
 use crate::providers::contract::Allocation;
@@ -211,19 +213,7 @@ impl AllocationProvider for RuntimeProvider {
                 )
                 .await?;
             if self.fast_start {
-                verification = format!(
-                    "set -eu\nprintf '%s\\n' {} {} | sha256sum -c - >/dev/null || exit 78\n",
-                    quote(&format!(
-                        "{}  {}",
-                        binding.runtime_sha256,
-                        layout.runtime_binary()
-                    )),
-                    quote(&format!(
-                        "{}  {}",
-                        binding.manifest_sha256,
-                        layout.image_manifest()
-                    ))
-                );
+                verification = in_guest_hash_check(binding, layout);
             } else {
                 let check = format!(
                     "sha256sum {} {}",
@@ -276,6 +266,132 @@ impl AllocationProvider for RuntimeProvider {
         }
         Ok(())
     }
+    fn guest_start(&self) -> bool {
+        self.provider.id() == zuse_protocol::cloud_computers::ProviderId::Boat
+    }
+    async fn start_in_guest(&self, start: &GuestStart<'_>) -> Result<(), ProviderError> {
+        use crate::managed_bases::bootstrap::Purpose;
+        let request = start.request;
+        if !self.guest_start()
+            || request.source_machine_id != start.machine
+            || request.provider != self.provider.id()
+            || request.purpose != Purpose::InitialAllocation
+            || !request.valid()
+            || start.launch.operation_id != request.operation_id
+            || start
+                .receipt
+                .is_some_and(|r| !r.matches_request(request, start.artifact, start.name))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.startup_timings
+            .measure(
+                "initialSourceVerification",
+                self.provider.verify_initial_source_with_receipt(
+                    start.machine,
+                    start.artifact,
+                    start.name,
+                    start.receipt,
+                ),
+            )
+            .await?;
+        let layout = super::machine_layout::Layout::for_provider(self.provider.id());
+        // The bound image's runtime and manifest hashes are checked inside the
+        // computer, after the wait, right before launch (exit 78 = mismatch).
+        let mut verification = String::new();
+        if let Some(binding) = &self.artifact_binding {
+            binding.validate(self.provider.id(), &binding.artifact_id)?;
+            self.startup_timings
+                .measure(
+                    "launchArtifactVerification",
+                    self.provider
+                        .verify_artifact(&binding.artifact_id, Some(binding)),
+                )
+                .await?;
+            verification = in_guest_hash_check(binding, layout);
+        }
+        let operation = &request.operation_id;
+        let lines = format!(
+            "{verification}{}",
+            launch_lines(
+                start.launch,
+                layout,
+                &super::allocation::guest_start::credential_path(operation)
+            )
+        );
+        let staged = layout.staged_boot(operation);
+        let command = super::allocation::guest_start::command(request, &lines, &staged)?;
+        self.startup_timings
+            .measure(
+                "bootCredentialUpload",
+                self.provider
+                    .upload(start.machine, &staged, start.launch.boot_token.as_bytes()),
+            )
+            .await?;
+        let result = self
+            .startup_timings
+            .measure(
+                "guestStartDispatch",
+                self.provider.execute(start.machine, &command),
+            )
+            .await?;
+        super::allocation::guest_start::dispatch_reply(result.exit_code, &result.stdout)
+    }
+    async fn guest_start_status(
+        &self,
+        machine: &str,
+        operation: &str,
+    ) -> Result<Value, ProviderError> {
+        if !self.guest_start()
+            || operation.is_empty()
+            || operation.len() > 160
+            || !operation
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        let result = self
+            .startup_timings
+            .measure(
+                "guestStartStatus",
+                self.provider.execute(
+                    machine,
+                    &super::allocation::guest_start::status_command(operation),
+                ),
+            )
+            .await?;
+        if result.exit_code != 0 {
+            return Err(ProviderError::Unavailable);
+        }
+        if result.stdout.iter().all(u8::is_ascii_whitespace) {
+            return Ok(serde_json::json!({}));
+        }
+        if result.stdout.len() > 65536 {
+            return Err(ProviderError::InvalidResponse);
+        }
+        serde_json::from_slice(&result.stdout).map_err(|_| ProviderError::InvalidResponse)
+    }
+}
+/// Shell lines that refuse to launch (exit 78) unless the bound runtime and
+/// manifest hashes match on the computer.
+fn in_guest_hash_check(
+    binding: &crate::providers::artifact::ArtifactBinding,
+    layout: super::machine_layout::Layout,
+) -> String {
+    format!(
+        "set -eu\nprintf '%s\\n' {} {} | sha256sum -c - >/dev/null || exit 78\n",
+        quote(&format!(
+            "{}  {}",
+            binding.runtime_sha256,
+            layout.runtime_binary()
+        )),
+        quote(&format!(
+            "{}  {}",
+            binding.manifest_sha256,
+            layout.image_manifest()
+        ))
+    )
 }
 /// The fixed rejection code the fresh boot helper prints (`{"status":
 /// "rejected","code":"fresh_boot_..."}`); anything else is not logged.

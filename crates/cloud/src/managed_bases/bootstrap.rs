@@ -163,6 +163,8 @@ fn identifier(v: &str, max: usize) -> bool {
         && v.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-:".contains(&b))
 }
+/// The verified fixed-path loader every fresh boot helper call runs through.
+pub const LOADER: &str = include_str!("../../../../infra/cloud/managed-base-fresh-boot-loader.py");
 impl Request {
     pub fn valid(&self) -> bool {
         self.version == 1
@@ -204,18 +206,21 @@ impl Request {
         ))
     }
     pub fn command(&self) -> Result<String, ProviderError> {
-        use base64::Engine;
-        self.digest()?;
-        let body = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(self).map_err(|_| ProviderError::Rejected)?);
-        let loader = include_str!("../../../../infra/cloud/managed-base-fresh-boot-loader.py");
+        let body = self.encoded()?;
         let quote = |v: &str| format!("'{}'", v.replace('\'', "'\\''"));
         Ok(format!(
             "sudo -n /usr/bin/python3 -I -B -c {} {} {}",
-            quote(loader),
+            quote(LOADER),
             quote(&self.image_pins.helper_sha256),
             quote(&body)
         ))
+    }
+    /// The helper's request argument, exactly as [`Self::command`] passes it.
+    pub fn encoded(&self) -> Result<String, ProviderError> {
+        use base64::Engine;
+        self.digest()?;
+        Ok(base64::engine::general_purpose::STANDARD
+            .encode(serde_json::to_vec(self).map_err(|_| ProviderError::Rejected)?))
     }
     /// The loader refused because an ancestor of the helper is not yet
     /// root-owned. A fresh Boat restore shows the provider's ownership on

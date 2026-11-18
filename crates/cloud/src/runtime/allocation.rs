@@ -9,6 +9,7 @@ use crate::{
 use async_trait::async_trait;
 use zeroize::Zeroizing;
 
+pub(crate) mod guest_start;
 pub(super) mod initial_boot;
 mod preparation_hold;
 pub mod rejection;
@@ -93,6 +94,27 @@ pub trait AllocationProvider: Send + Sync {
     }
     /// Must be idempotent for one operation; an uncertain response is not evidence of failure.
     async fn launch(&self, machine: &str, launch: &RuntimeLaunch) -> Result<(), ProviderError>;
+    /// Whether the first start can wait inside the computer (see `guest_start`).
+    fn guest_start(&self) -> bool {
+        false
+    }
+    /// Verify the source, then deliver the credential and ONE command that
+    /// starts the runtime inside the computer as soon as it is safe.
+    /// Idempotent for one operation.
+    async fn start_in_guest(
+        &self,
+        _start: &guest_start::GuestStart<'_>,
+    ) -> Result<(), ProviderError> {
+        Err(ProviderError::Rejected)
+    }
+    /// The in-computer start's status record; empty when there is none.
+    async fn guest_start_status(
+        &self,
+        _machine: &str,
+        _operation: &str,
+    ) -> Result<Value, ProviderError> {
+        Err(ProviderError::Rejected)
+    }
 }
 #[async_trait]
 impl AllocationProvider for Boxd {
@@ -141,10 +163,19 @@ pub(super) fn launch_command(
     layout: super::machine_layout::Layout,
 ) -> (String, String) {
     let staged = layout.staged_boot(&launch.operation_id);
+    let command = launch_lines(launch, layout, &staged);
+    (staged, command)
+}
+/// Install the credential from `staged` for the task user, then launch.
+pub(super) fn launch_lines(
+    launch: &RuntimeLaunch,
+    layout: super::machine_layout::Layout,
+    staged: &str,
+) -> String {
     let boot = layout.boot_file(&launch.operation_id);
     let mut command = format!(
         "set -eu\n{}{}",
-        layout.install_boot(&quote(&staged), &quote(&boot)),
+        layout.install_boot(&quote(staged), &quote(&boot)),
         layout.run_as_task()
     );
     for (key, value) in [
@@ -158,7 +189,7 @@ pub(super) fn launch_command(
         command.push_str(&format!(" {key}={}", quote(&value)));
     }
     command.push_str(&format!(" {}\n", layout.launcher()));
-    (staged, command)
+    command
 }
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -680,6 +711,14 @@ impl RuntimeControl {
                 }));
             }
             Some(id) => {
+                // Boat: the computer itself waits out the unsafe-ownership
+                // window and starts; this worker waits for enrollment.
+                if self
+                    .guest_start_allocation(provider, job, &workspace, &operation, id)
+                    .await?
+                {
+                    return Ok(None);
+                }
                 let machine = provider
                     .inspect_id(id)
                     .await
@@ -723,21 +762,7 @@ impl RuntimeControl {
                 {
                     return self.hold_allocation(job).await.map(|_| None);
                 }
-                let boot = self
-                    .master
-                    .open_api(
-                        &boot_context(
-                            &job.resource_id,
-                            required(&operation, "operation_id")?,
-                            job.generation,
-                        ),
-                        required(&operation, "sealed_boot_token")?,
-                    )
-                    .map_err(|_| ApiError::unavailable("cloud_boot_grant_unavailable"))?;
-                let boot = Zeroizing::new(
-                    String::from_utf8(boot.to_vec())
-                        .map_err(|_| ApiError::unavailable("cloud_boot_grant_unavailable"))?,
-                );
+                let boot = self.open_boot_token(job, &operation)?;
                 // Commit authorization before effects. Retries use exactly this launch and machine.
                 let prepared_fence = workspace["request_config"]["rustFastStartVersion"] == 1
                     && workspace["provider"] == "boxd"
@@ -786,6 +811,26 @@ impl RuntimeControl {
         )
         .await?;
         Ok(None)
+    }
+    fn open_boot_token(
+        &self,
+        job: &jobs::Job,
+        operation: &Value,
+    ) -> Result<Zeroizing<String>, ApiError> {
+        let boot = self
+            .master
+            .open_api(
+                &boot_context(
+                    &job.resource_id,
+                    required(operation, "operation_id")?,
+                    job.generation,
+                ),
+                required(operation, "sealed_boot_token")?,
+            )
+            .map_err(|_| ApiError::unavailable("cloud_boot_grant_unavailable"))?;
+        Ok(Zeroizing::new(String::from_utf8(boot.to_vec()).map_err(
+            |_| ApiError::unavailable("cloud_boot_grant_unavailable"),
+        )?))
     }
     /// Expected readiness is an observation, not a failed provider operation.
     /// Recheck the original receipt after unlocked HTTP and defer only this lease.

@@ -66,6 +66,8 @@ pub(super) fn safe_failure_observations(observations: &Value) -> Value {
         "launchBinaryVerification",
         "bootCredentialUpload",
         "runtimeLaunchCommand",
+        "guestStartDispatch",
+        "guestStartStatus",
     ];
     for name in PHASES {
         let phase = &observations[*name];
