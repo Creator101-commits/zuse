@@ -13,8 +13,13 @@
 
 mod contained;
 mod hover_intent;
+mod submenu;
 pub(crate) use contained::{MenuAlign, contained_menu};
 pub use hover_intent::{HoverAction, HoverIntent};
+pub use submenu::{
+    SUBMENU_GAP, SUBMENU_WINDOW_MARGIN, SubmenuAccess, SubmenuKey, SubmenuLevel, SubmenuOutcome,
+    SubmenuRow, SubmenuSide, Submenus, submenu_chevron, submenu_placement,
+};
 
 use gpui::{
     Anchor, AnyElement, Context, Div, ElementId, IntoElement, MouseButton, MouseDownEvent,
