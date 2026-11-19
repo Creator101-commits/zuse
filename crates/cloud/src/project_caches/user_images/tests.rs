@@ -87,6 +87,25 @@ fn only_the_setup_script_is_in_the_image() {
 }
 
 #[test]
+fn repositories_alone_make_an_image() {
+    let mut recipe = MachineRecipe::default();
+    // No script, no repositories: computers start from the managed base.
+    assert_eq!(image_script(&recipe, false), None);
+    assert_eq!(image_digest_for(&recipe, false), None);
+    // Repositories without a script still get an image that carries them.
+    assert_eq!(image_script(&recipe, true), Some(REPOSITORIES_ONLY_SCRIPT));
+    let repositories_only = image_digest_for(&recipe, true).unwrap();
+    // A real script wins, and changing it changes the image.
+    recipe.setup_script = "npm i -g pnpm".into();
+    assert_eq!(image_script(&recipe, true), Some("npm i -g pnpm"));
+    assert_eq!(image_digest_for(&recipe, true), image_digest(&recipe));
+    assert_ne!(image_digest_for(&recipe, true).unwrap(), repositories_only);
+    // The no-op script passes plan validation like any setup script.
+    assert!(!REPOSITORIES_ONLY_SCRIPT.trim().is_empty());
+    assert!(script_digest(REPOSITORIES_ONLY_SCRIPT, recipe.setup_timeout_seconds).is_some());
+}
+
+#[test]
 fn identity_is_per_account_provider_base_and_script() {
     let original = plan("npm i -g pnpm").identity;
     let key = original.key().unwrap();

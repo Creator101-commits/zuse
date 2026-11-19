@@ -108,11 +108,14 @@ impl ComputerControl {
             .await?;
         // Only the setup script is in the image: an instructions-only edit
         // queues nothing. Removing the script supersedes a waiting build.
-        use crate::project_caches::user_images::{image_digest, worker};
+        // An account with repositories gets an image without a script too:
+        // the first save (no previous version) queues it.
+        use crate::project_caches::user_images::{has_repositories_tx, image_digest_for, worker};
+        let repositories = has_repositories_tx(&mut tx, owner).await?;
         let before = previous
             .and_then(|v| serde_json::from_value::<MachineRecipe>(v).ok())
-            .and_then(|r| image_digest(&r));
-        let after = image_digest(&request.recipe);
+            .and_then(|r| image_digest_for(&r, repositories));
+        let after = image_digest_for(&request.recipe, repositories);
         if before != after && worker::schema_ready_tx(&mut tx).await? {
             worker::enqueue_tx(
                 &mut tx,
@@ -126,9 +129,7 @@ impl ComputerControl {
         tx.commit().await?;
         Ok(MachineVersion {
             revision,
-            image_state: if crate::project_caches::user_images::image_digest(&request.recipe)
-                .is_none()
-            {
+            image_state: if after.is_none() {
                 "none".into()
             } else {
                 "queued".into()
@@ -229,12 +230,16 @@ impl Store {
             last_good_image: None,
         };
         // Only the setup script is built into an image.
-        let Some(current) = crate::project_caches::user_images::image_digest(&version.recipe)
+        let mut tx = self.pool.begin().await?;
+        let repositories =
+            crate::project_caches::user_images::has_repositories_tx(&mut tx, owner).await?;
+        let Some(current) =
+            crate::project_caches::user_images::image_digest_for(&version.recipe, repositories)
         else {
+            tx.commit().await?;
             return Ok(version);
         };
         version.image_state = "queued".into();
-        let mut tx = self.pool.begin().await?;
         if !crate::project_caches::user_images::worker::schema_ready_tx(&mut tx).await? {
             tx.commit().await?;
             return Ok(version);

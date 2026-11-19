@@ -2333,6 +2333,8 @@ pub struct Shell {
         std::rc::Rc<std::cell::RefCell<crate::pull_request_detail::PullRequestCache>>,
     cloud_billing_page: Option<Entity<settings::cloud_billing::CloudBillingPage>>,
     cloud_page_sub: Option<Subscription>,
+    /// The first cloud chat onboarding opened, for its guide.
+    cloud_first_chat: Option<settings_cloud::FirstCloudChat>,
     /// Settings → Usage shows Cloud compute instead of model usage.
     usage_settings_compute: bool,
     /// The account was last seen signed in without a subscription, so the
@@ -3005,6 +3007,7 @@ impl Shell {
             pull_request_cache: Default::default(),
             cloud_billing_page: None,
             cloud_page_sub: None,
+            cloud_first_chat: None,
             usage_settings_compute: false,
             cloud_seen_unsubscribed: false,
             devices_page: None,
@@ -13430,6 +13433,7 @@ impl Shell {
                             |name| format!("What should we build in {name}?"),
                         )),
                 )
+                .children(self.first_cloud_chat_guide(&theme, cx))
                 .when(project.is_some(), |view| {
                     view.child(
                         div()

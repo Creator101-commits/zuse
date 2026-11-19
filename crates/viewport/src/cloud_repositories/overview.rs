@@ -198,6 +198,10 @@ impl RepositoryPanel {
                 .child(kit::spec_chip(DEFAULT_MACHINE))
                 .child(action),
         );
+        // The image builds by itself; its progress sits with the computer.
+        if let Some(image) = self.image_status_row(false, cx) {
+            body = body.child(image);
+        }
         if let Some(plan) = self.plan_glance() {
             body = body.child(
                 s::row(false).child(div().flex_1().min_w_0().child(kit::quantity(

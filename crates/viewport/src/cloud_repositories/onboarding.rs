@@ -75,13 +75,13 @@ impl Step {
                 "Connect GitHub, then pick the repositories agents can check out, commit to and open pull requests on."
             }
             Step::Setup => {
-                "Optional. Install the tools every repository needs once; it runs when your machine image is built."
+                "Optional. Your image builds by itself with your repositories; add the tools every repository needs."
             }
             Step::Agents => {
                 "Cloud chats sign in with your own Codex, Claude or Grok account, so they use your plan."
             }
             Step::Start => {
-                "Everything is in place. Pick a repository in the composer and send your first message."
+                "Pick a repository. Your first chat opens on Cloud with it, ready for your message."
             }
         }
     }
@@ -496,35 +496,52 @@ impl RepositoryPanel {
                         .child(self.github_group(window, cx))
                 }
             }
-            Step::Setup => self.render_machine_setup(cx),
+            Step::Setup => {
+                let image = self.image_status_row(true, cx);
+                self.render_machine_setup(cx).when_some(image, |v, image| {
+                    v.child(kit::section("Your image", "", None, image))
+                })
+            }
             Step::Agents => self.render_agents(window, cx),
-            Step::Start => column()
-                .gap(px(kit::SECTION_GAP))
-                .child(kit::section(
+            Step::Start if !progress.ready() => column().gap(px(kit::SECTION_GAP)).child(
+                kit::section(
                     "Your setup",
-                    if progress.ready() {
-                        "Change any of this later in Settings → Cloud computer."
-                    } else {
-                        "A first chat needs a repository and an agent account."
-                    },
+                    "A first chat needs a repository and an agent account.",
                     None,
                     self.onboarding_checklist(progress, cx),
-                ))
-                .child(kit::section(
-                    "Your cloud computer",
-                    "",
-                    None,
-                    s::row(true)
-                        .flex_nowrap()
-                        .child(
-                            s::description_text(
-                                "Every chat gets a fresh one. It sleeps when it goes quiet and wakes when you reply.",
+                ),
+            ),
+            Step::Start => {
+                let image = self.image_status_row(true, cx);
+                column()
+                    .gap(px(kit::SECTION_GAP))
+                    .child(kit::section(
+                        "Repository",
+                        "",
+                        None,
+                        self.first_chat_repositories(cx),
+                    ))
+                    .child(kit::section(
+                        "Your cloud computer",
+                        "",
+                        Some(
+                            kit::info_tip(
+                                "How a cloud chat starts",
+                                "A fresh computer starts from your image with the repository checked out, and your agent signs in with your connected account. It sleeps when quiet.",
                             )
-                            .flex_1()
-                            .min_w_0(),
-                        )
-                        .child(kit::spec_chip(DEFAULT_MACHINE)),
-                )),
+                            .into_any_element(),
+                        ),
+                        image.unwrap_or_else(|| {
+                            column().child(kit::row_item(
+                                true,
+                                Some(kit::icon_tile("dither-monitor", 28.).into_any_element()),
+                                "Cloud computer",
+                                "",
+                                Some(kit::spec_chip(DEFAULT_MACHINE).into_any_element()),
+                            ))
+                        }),
+                    ))
+            }
         }
     }
 
@@ -537,7 +554,7 @@ impl RepositoryPanel {
         let unsaved = current == Step::Setup && self.machine_dirty(cx) && self.can_manage();
         let (label, enabled): (&'static str, bool) = match current {
             Step::Welcome => ("Get started", true),
-            Step::Start if progress.ready() => ("Start your first cloud chat", true),
+            Step::Start if progress.ready() => ("Start first chat", true),
             Step::Start => ("Finish setup", true),
             Step::Setup if unsaved => ("Save and continue", true),
             _ => ("Continue", done || current.optional()),
@@ -566,7 +583,10 @@ impl RepositoryPanel {
                                 this.onboarding.go(missing);
                             } else {
                                 this.onboarding.finish();
-                                cx.emit(StartChat);
+                                cx.emit(StartChat {
+                                    repository: this.first_chat_repository(),
+                                    image: this.image_readiness(),
+                                });
                             }
                             cx.notify();
                         }
@@ -574,6 +594,12 @@ impl RepositoryPanel {
                             if this.machine_dirty(cx) && this.can_manage() {
                                 this.save_machine(cx);
                             }
+                            this.schedule_image_check(cx);
+                            this.onboarding_update(cx, |o, p| o.advance(p));
+                        }
+                        Step::Repositories => {
+                            // The image starts building now, in the background.
+                            this.schedule_image_check(cx);
                             this.onboarding_update(cx, |o, p| o.advance(p));
                         }
                         _ => this.onboarding_update(cx, |o, p| o.advance(p)),
@@ -640,9 +666,110 @@ impl RepositoryPanel {
     }
 }
 
-/// Asks the host to start a new cloud chat (the last onboarding step).
-#[derive(Clone, Copy, Debug)]
-pub struct StartChat;
+impl RepositoryPanel {
+    /// The repository the first chat opens on: the one picked, else the most
+    /// recently added.
+    fn first_chat_project(&self) -> Option<&CloudProject> {
+        let choices = self.first_chat_choices();
+        self.first_chat_project
+            .as_ref()
+            .and_then(|id| choices.iter().find(|p| &p.project_id == id))
+            .or(choices.first())
+            .copied()
+    }
+    /// The connected repositories, newest first.
+    fn first_chat_choices(&self) -> Vec<&CloudProject> {
+        let mut projects: Vec<&CloudProject> = self.projects.iter().collect();
+        projects.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        projects
+    }
+    fn first_chat_repository(&self) -> Option<FirstChatRepository> {
+        self.first_chat_project().map(|p| FirstChatRepository {
+            project_id: p.project_id.clone(),
+            repository_identity: p.repository_identity.clone(),
+            repository_url: p.repository_url.clone(),
+            display_name: p.display_name.clone(),
+            default_branch: p.default_branch.clone(),
+        })
+    }
+    /// A compact single choice of the connected repositories, newest first.
+    fn first_chat_repositories(&self, cx: &mut Context<Self>) -> Div {
+        let chosen = self.first_chat_project().map(|p| p.project_id.clone());
+        let mut list = column();
+        for (i, project) in self.first_chat_choices().into_iter().take(6).enumerate() {
+            let selected = chosen.as_deref() == Some(project.project_id.as_str());
+            let id = project.project_id.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "first-chat-repo-{}",
+                        project.project_id
+                    )))
+                    .role(Role::RadioButton)
+                    .aria_label(SharedString::from(project.display_name.clone()))
+                    .aria_selected(selected)
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .hover(|v| v.bg(s::frame_bg().opacity(0.4)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.first_chat_project = Some(id.clone());
+                        cx.notify();
+                    }))
+                    .child(kit::row_item(
+                        i == 0,
+                        Some(
+                            icon("folder")
+                                .size(px(14.))
+                                .text_color(palette::rgb(MUTED))
+                                .into_any_element(),
+                        ),
+                        project.display_name.clone(),
+                        "",
+                        Some(radio(selected).into_any_element()),
+                    )),
+            );
+        }
+        list
+    }
+}
+
+/// A small radio mark for single-choice rows.
+fn radio(selected: bool) -> Div {
+    div()
+        .flex_none()
+        .size(px(14.))
+        .rounded_full()
+        .border_1()
+        .border_color(if selected {
+            kit::accent()
+        } else {
+            Hsla::from(palette::rgb(MUTED)).opacity(0.6)
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(selected, |v| {
+            v.child(div().size(px(6.)).rounded_full().bg(kit::accent()))
+        })
+}
+
+/// The repository a first chat opens on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirstChatRepository {
+    pub project_id: String,
+    pub repository_identity: String,
+    pub repository_url: String,
+    pub display_name: String,
+    pub default_branch: String,
+}
+
+/// Asks the host to start a new cloud chat (the last onboarding step) on
+/// `repository`, with what is known about the image.
+#[derive(Clone, Debug)]
+pub struct StartChat {
+    pub repository: Option<FirstChatRepository>,
+    pub image: super::ImageReadiness,
+}
 
 #[cfg(test)]
 mod tests {
@@ -806,7 +933,7 @@ mod tests {
     #[test]
     fn the_last_step_only_promises_a_chat_when_ready() {
         assert_eq!(Step::Start.heading(&NOTHING).0, "Almost there");
-        assert_eq!(Step::Start.heading(&READY).0, "Start your first cloud chat");
+        assert_eq!(Step::Start.heading(&READY).0, Step::Start.title());
         assert_eq!(Step::Agents.heading(&NOTHING).0, Step::Agents.title());
         // Steps passed without finishing read as skipped on the bar.
         let mut flow = Onboarding::default();
@@ -830,8 +957,9 @@ mod tests {
     /// appear. People only ever see "Cloud".
     #[test]
     fn cloud_computer_pages_never_name_a_provider() {
-        const PAGES: [(&str, &str); 12] = [
+        const PAGES: [(&str, &str); 13] = [
             ("onboarding.rs", include_str!("onboarding.rs")),
+            ("image_status.rs", include_str!("image_status.rs")),
             ("overview.rs", include_str!("overview.rs")),
             ("machine.rs", include_str!("machine.rs")),
             ("agents.rs", include_str!("agents.rs")),

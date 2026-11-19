@@ -394,7 +394,12 @@ async fn admission_case_with(
     );
     let before_reads = github.reads.load(std::sync::atomic::Ordering::SeqCst);
     let image = if user_image {
-        // A recipe without a setup script never uses an image, even a ready one.
+        // A recipe without a setup script, on an account without
+        // repositories, never uses an image, even a ready one.
+        sqlx::query("UPDATE api_cloud_projects SET included=false WHERE account_id='user-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO cloud_machine_versions(owner_id,revision,actor_id,recipe,digest,created_at) VALUES('user-test',1,'user-test','{\"instructions\":\"x\"}',$1,$2)").bind("f".repeat(64)).bind(now).execute(&pool).await.unwrap();
         let id = ready_user_image(&pool, &r, "user-image-snapshot", now).await;
         let mut tx = application.begin().await.unwrap();
@@ -410,6 +415,10 @@ async fn admission_case_with(
             .is_none()
         );
         tx.rollback().await.unwrap();
+        sqlx::query("UPDATE api_cloud_projects SET included=true WHERE account_id='user-test'")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO cloud_machine_versions(owner_id,revision,actor_id,recipe,digest,created_at) VALUES('user-test',2,'user-test','{\"setupScript\":\"npm i -g pnpm\"}',$1,$2)").bind("f".repeat(64)).bind(now).execute(&pool).await.unwrap();
         Some(id)
     } else {

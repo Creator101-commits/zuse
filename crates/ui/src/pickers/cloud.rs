@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 mod connections;
 mod providers;
+use crate::cloud_destination::{self as availability, CloudOffer};
 
 #[derive(Clone)]
 pub(crate) struct CloudCanvasChoices {
@@ -22,6 +23,11 @@ use connections::ConnectionChoices;
 pub(super) struct Cloud {
     pub(super) frozen: bool,
     sizes_expanded: bool,
+    /// "Cloud" was picked for a chat without a Cloud repository: the
+    /// connected repositories are listed to choose from.
+    choose_repository: bool,
+    /// The chat's local repository is being connected to Cloud.
+    connecting: bool,
     pub(super) task_binding: Option<TaskBinding>,
     owner: Option<String>,
     organization: Option<String>,
@@ -747,19 +753,192 @@ impl Pickers {
     }
     pub(super) fn cloud_destination(&self, cx: &App) -> Option<Value> {
         let state = self.state.read(cx);
-        if let Some(project) = &state.cloud_project {
-            return Some(project.clone());
+        availability::destination(
+            state.cloud_project.as_ref(),
+            state
+                .selected_space_row()
+                .and_then(|space| space.remote_repository.as_deref()),
+            &self.cloud.rows,
+        )
+    }
+    /// What the workspace menu's Cloud row says it will do.
+    pub(super) fn cloud_workspace_detail(&self, cx: &App) -> &'static str {
+        if self.state.read(cx).cloud_project.is_some()
+            || self
+                .cloud_destination(cx)
+                .is_some_and(|row| availability::launchable(&row))
+        {
+            "Runs on your cloud computer"
+        } else if self.cloud.connecting {
+            "Connecting this repository…"
+        } else if self.local_github_repository(cx).is_some() {
+            "Connect this repository to Cloud"
+        } else {
+            "Choose a repository in Cloud setup"
         }
-        let identity = state.selected_space_row()?.remote_repository.as_ref()?;
-        self.cloud
-            .rows
-            .iter()
-            .find(|p| {
-                p["repositoryIdentity"]
-                    .as_str()
-                    .is_some_and(|v| v.eq_ignore_ascii_case(identity))
-            })
-            .cloned()
+    }
+    /// The chat's local project as `owner/repo`, when it lives on GitHub.
+    fn local_github_repository(&self, cx: &App) -> Option<String> {
+        let remote = self
+            .state
+            .read(cx)
+            .selected_space_row()?
+            .remote_repository
+            .as_deref()?
+            .to_owned();
+        let normalized = availability::normalize(&remote);
+        normalized.strip_prefix("github.com/").map(str::to_owned)
+    }
+    /// "Cloud" in the workspace menu: this chat runs on the cloud computer
+    /// with the Cloud repository its project's remote points at. A
+    /// repository Cloud doesn't have yet is connected first, then picked.
+    pub(super) fn pick_cloud_workspace(&mut self, cx: &mut Context<Self>) {
+        if self.state.read(cx).cloud_project.is_some() || self.cloud.connecting {
+            self.close(cx);
+            return;
+        }
+        self.ensure_cloud(cx);
+        if let Some(row) = self
+            .cloud_destination(cx)
+            .filter(|row| availability::launchable(row))
+        {
+            self.select_cloud(row, cx);
+            return;
+        }
+        match self.local_github_repository(cx) {
+            Some(repository) => self.connect_cloud_repository(repository, cx),
+            None => self.open_cloud_setup(cx),
+        }
+    }
+    fn open_cloud_setup(&mut self, cx: &mut Context<Self>) {
+        let target = {
+            let state = self.state.read(cx);
+            state
+                .engine()
+                .map(|engine| engine.controller())
+                .zip(state.cloud_user_id().map(str::to_owned))
+                .map(|(engine, user)| {
+                    (
+                        engine,
+                        user,
+                        state.cloud_organization_id().map(str::to_owned),
+                    )
+                })
+        };
+        self.cloud.refresh();
+        self.close(cx);
+        if let Some((controller, subject, organization)) = target {
+            crate::cloud_history::open_setup(controller, subject, organization, cx);
+        }
+    }
+    /// Adds `repository` (`owner/repo`) to Cloud through the GitHub
+    /// installation that grants it, then picks it for this chat. Without
+    /// access, Cloud setup opens to grant it.
+    fn connect_cloud_repository(&mut self, repository: String, cx: &mut Context<Self>) {
+        let (engine, owner, organization, scope) = {
+            let state = self.state.read(cx);
+            let Some(engine) = state.engine().map(|engine| engine.controller()) else {
+                return;
+            };
+            let Some(owner) = state.cloud_user_id().map(str::to_owned) else {
+                return;
+            };
+            let organization = state.cloud_organization_id().map(str::to_owned);
+            let scope = organization
+                .as_ref()
+                .map(|org| format!("organization:{org}"))
+                .unwrap_or_else(|| owner.clone());
+            (engine, owner, organization, scope)
+        };
+        self.cloud.connecting = true;
+        self.cloud.error = None;
+        cx.notify();
+        let params = json!({"expectedAccountId":owner,"expectedOrganizationId":organization});
+        let key = uuid::Uuid::new_v4().to_string();
+        let job = gpui_tokio::Tokio::spawn(cx, async move {
+            let github = engine
+                .client()
+                .call_scoped(methods::CLOUD_GITHUB, params.clone())
+                .await
+                .map_err(|e| e.to_string())?;
+            let Some(repo) = github["data"]["repositories"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| {
+                    r["nameWithOwner"]
+                        .as_str()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&repository))
+                })
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let mut request = params;
+            request["repositoryUrl"] = repo["httpsUrl"].clone();
+            request["defaultBranch"] = json!(repo["defaultBranch"].as_str().unwrap_or("main"));
+            request["visibility"] = json!(if repo["isPrivate"] == true {
+                "private"
+            } else {
+                "public"
+            });
+            request["idempotencyKey"] = json!(key);
+            let connected = engine
+                .client()
+                .call_scoped(methods::CLOUD_PROJECT_CONNECT, request)
+                .await
+                .map_err(|e| e.to_string())?;
+            Ok::<_, String>(Some(connected["data"].clone()))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = job.await.unwrap_or_else(|e| Err(e.to_string()));
+            let _ = this.update(cx, |this, cx| {
+                this.cloud.connecting = false;
+                match result {
+                    Ok(Some(project)) if project["projectId"].is_string() => {
+                        let row = json!({
+                            "projectId": project["projectId"],
+                            "repositoryIdentity": project["repositoryIdentity"],
+                            "repositoryUrl": project["repositoryUrl"],
+                            "displayName": project["displayName"],
+                            "defaultBranch": project["defaultBranch"],
+                            "accountId": scope,
+                            "providerId": "boxd",
+                        });
+                        this.cloud.rows.push(row.clone());
+                        this.select_cloud(row, cx);
+                        // Reload destinations so the new repository is listed.
+                        this.cloud.refresh();
+                    }
+                    // GitHub doesn't grant this repository yet: set it up.
+                    Ok(_) => this.open_cloud_setup(cx),
+                    Err(error) => this.cloud.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// Cloud is a row the keyboard can land on.
+    pub(super) fn cloud_offer_selectable(&self, cx: &App) -> bool {
+        matches!(
+            self.cloud_offer(cx),
+            CloudOffer::Repository(_) | CloudOffer::ChooseRepository
+        )
+    }
+    /// How the computer picker offers Cloud for this chat.
+    pub(super) fn cloud_offer(&self, cx: &App) -> CloudOffer {
+        let state = self.state.read(cx);
+        let ready = self.cloud_launch_provider(cx);
+        availability::offer(&availability::Facts {
+            offers_cloud: self.cloud.task_binding.is_some() || state.cloud_access().offers_cloud(),
+            selected: state.cloud_project.as_ref(),
+            local_repository: state
+                .selected_space_row()
+                .and_then(|space| space.remote_repository.as_deref()),
+            rows: &self.cloud.rows,
+            ready: ready.as_ref().map(|_| ()).map_err(String::as_str),
+        })
     }
     pub(super) fn cloud_project_rows(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_cloud(cx);
@@ -803,9 +982,45 @@ impl Pickers {
         }
     }
     pub(super) fn select_cloud_destination(&mut self, cx: &mut Context<Self>) {
-        if let Some(row) = self.cloud_destination(cx) {
-            self.select_cloud(row, cx);
+        match self.cloud_offer(cx) {
+            CloudOffer::Repository(row) => self.select_cloud(row, cx),
+            CloudOffer::ChooseRepository => {
+                self.cloud.choose_repository = !self.cloud.choose_repository;
+                cx.notify();
+            }
+            CloudOffer::Unavailable(_) | CloudOffer::Hidden => {}
         }
+    }
+    /// The connected repositories, for a chat that picked Cloud without one.
+    fn cloud_repository_choices(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let mut view = div().flex().flex_col().pl(px(12.));
+        let rows: Vec<Value> = self
+            .cloud
+            .rows
+            .iter()
+            .filter(|row| availability::launchable(row))
+            .cloned()
+            .collect();
+        for (i, row) in rows.into_iter().enumerate() {
+            let name = row["displayName"]
+                .as_str()
+                .unwrap_or("Repository")
+                .to_owned();
+            view = view.child(
+                zuse_viewport::creation_style::option(
+                    ("cloud-choose-repository", i),
+                    name,
+                    "folder",
+                    false,
+                )
+                .h(px(30.))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.cloud.choose_repository = false;
+                    this.select_cloud(row.clone(), cx);
+                })),
+            );
+        }
+        view.into_any_element()
     }
     pub(super) fn cloud_rows(&mut self, cx: &mut Context<Self>) -> AnyElement {
         self.ensure_cloud(cx);
@@ -816,38 +1031,103 @@ impl Pickers {
             .cloud_project
             .as_ref()
             .map(|p| p["projectId"].clone());
-        let destination = self.cloud_destination(cx);
+        let offer = self.cloud_offer(cx);
         let ready = self.cloud_launch_provider(cx).is_ok();
-        let computer_rows = if (destination.is_some() || self.cloud.task_binding.is_some()) && ready
-        {
+        let on_repository = matches!(offer, CloudOffer::Repository(_));
+        let computer_rows = if (on_repository || self.cloud.task_binding.is_some()) && ready {
             self.cloud_computer_rows(cx)
         } else {
             div().into_any_element()
         };
+        let active = self.active == self.filtered_device_rows(cx).len();
+        let choices = (matches!(offer, CloudOffer::ChooseRepository)
+            && self.cloud.choose_repository)
+            .then(|| self.cloud_repository_choices(cx));
         div()
             .flex()
             .flex_col()
             .child(computer_rows)
-            .when_some(destination.filter(|_| ready), |view, row| {
-                let selected = selected.as_ref() == Some(&row["projectId"]);
+            .when_some(
+                match &offer {
+                    CloudOffer::Repository(row) => Some(row.clone()),
+                    _ => None,
+                },
+                |view, row| {
+                    let selected = selected.as_ref() == Some(&row["projectId"]);
+                    view.child(zuse_viewport::creation_style::separator())
+                        .child(
+                            zuse_viewport::creation_style::option(
+                                "cloud-destination",
+                                "Cloud",
+                                "cloud-dither",
+                                selected,
+                            )
+                            .debug_selector(|| "cloud-destination".into())
+                            .when(active, |v| v.bg(theme.element_hover))
+                            .child(zuse_viewport::creation_style::meta("Beta"))
+                            .child(zuse_viewport::creation_style::selection(selected))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.select_cloud(row.clone(), cx)
+                                }),
+                            ),
+                        )
+                },
+            )
+            // No Cloud repository for this chat yet: Cloud asks which one.
+            .when(matches!(offer, CloudOffer::ChooseRepository), |view| {
+                let open = self.cloud.choose_repository;
                 view.child(zuse_viewport::creation_style::separator())
                     .child(
                         zuse_viewport::creation_style::option(
                             "cloud-destination",
                             "Cloud",
                             "cloud-dither",
-                            selected,
+                            false,
                         )
-                        .when(self.active == self.filtered_device_rows(cx).len(), |v| {
-                            v.bg(theme.element_hover)
-                        })
-                        .child(zuse_viewport::creation_style::meta("Beta"))
-                        .child(zuse_viewport::creation_style::selection(selected))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_cloud(row.clone(), cx)),
-                        ),
+                        .debug_selector(|| "cloud-choose-repository".into())
+                        .when(active, |v| v.bg(theme.element_hover))
+                        .child(zuse_viewport::creation_style::meta(if open {
+                            "Choose a repository ▾"
+                        } else {
+                            "Choose a repository ▸"
+                        }))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cloud.choose_repository = !this.cloud.choose_repository;
+                            cx.notify();
+                        })),
                     )
+                    .children(choices)
             })
+            // Listed with the reason rather than hidden.
+            .when_some(
+                match &offer {
+                    CloudOffer::Unavailable(reason) => Some(reason.clone()),
+                    _ => None,
+                },
+                |view, reason| {
+                    view.child(zuse_viewport::creation_style::separator())
+                        .child(
+                            zuse_viewport::creation_style::option(
+                                "cloud-destination",
+                                "Cloud",
+                                "cloud-dither",
+                                false,
+                            )
+                            .debug_selector(|| "cloud-unavailable".into())
+                            .opacity(0.6)
+                            .child(zuse_viewport::creation_style::meta("Not ready")),
+                        )
+                        .child(
+                            div()
+                                .px_2()
+                                .pb_1()
+                                .text_size(crate::typography::text_xs())
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(reason)),
+                        )
+                },
+            )
             // Cloud setup is for Cloud subscribers; local-only builds,
             // signed-out and unsubscribed accounts leave it out.
             .when(self.state.read(cx).cloud_access().offers_cloud(), |view| {

@@ -49,9 +49,25 @@ pub(crate) async fn enqueue_tx(
     enqueue_on_tx(tx, owner, &providers, reason, not_before, now).await
 }
 
+/// The account's repository set changed (a repository added or removed):
+/// queue a rebuild after the save debounce, so adding several repositories in
+/// a row builds once. Nothing happens before the account has a machine
+/// version, or where user images are not set up.
+pub(crate) async fn enqueue_repositories_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    owner: &str,
+    now: i64,
+) -> Result<bool, ApiError> {
+    if !schema_ready_tx(tx).await? {
+        return Ok(false);
+    }
+    enqueue_tx(tx, owner, "recipe", now + SAVE_DEBOUNCE_MS, now).await
+}
+
 /// Queue a build of the account's current recipe on these providers.
 /// A waiting build is replaced, never duplicated: the newest recipe wins.
-/// With no setup script, waiting builds are superseded and nothing is queued.
+/// With no setup script and no repositories, waiting builds are superseded
+/// and nothing is queued.
 pub(crate) async fn enqueue_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     owner: &str,
@@ -66,10 +82,11 @@ pub(crate) async fn enqueue_on_tx(
     .bind(owner)
     .fetch_optional(&mut **tx)
     .await?;
+    let repositories = super::has_repositories_tx(tx, owner).await?;
     let digest = latest.as_ref().and_then(|(_, recipe)| {
         serde_json::from_value::<MachineRecipe>(recipe.clone())
             .ok()
-            .and_then(|recipe| image_digest(&recipe))
+            .and_then(|recipe| image_digest_for(&recipe, repositories))
     });
     let (Some((revision, _)), Some(digest)) = (latest, digest) else {
         sqlx::query("UPDATE cloud_machine_images SET state='superseded',updated_at=$2 WHERE owner_id=$1 AND state='queued'")
@@ -279,7 +296,11 @@ impl UserImageControl {
             tx.commit().await?;
             return Ok(true);
         };
-        let Some(digest) = image_digest(&recipe) else {
+        let repositories = super::has_repositories_tx(&mut tx, &owner).await?;
+        // Without a setup script an account with repositories still gets an
+        // image that carries them.
+        let script = image_script(&recipe, repositories).map(str::to_owned);
+        let (Some(script), Some(digest)) = (script, image_digest_for(&recipe, repositories)) else {
             sqlx::query("UPDATE cloud_machine_images SET state='superseded',updated_at=$2 WHERE image_id=$1")
                 .bind(&id).bind(now).execute(&mut *tx).await?;
             tx.commit().await?;
@@ -385,7 +406,7 @@ impl UserImageControl {
             version: 1,
             image_id: id.clone(),
             identity,
-            setup_script: recipe.setup_script.clone(),
+            setup_script: script,
             setup_timeout_seconds: recipe.setup_timeout_seconds,
             initial_runtime_bootstrap: bootstrap,
             repositories: planned_repositories,

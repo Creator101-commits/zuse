@@ -466,3 +466,60 @@ async fn images_bake_included_repositories_and_rebuild_when_the_set_changes() {
     tx.rollback().await.unwrap();
     db.drop().await;
 }
+
+#[tokio::test]
+#[ignore = "requires explicit isolated localhost PostgreSQL"]
+async fn an_account_with_repositories_gets_an_image_without_a_setup_script() {
+    let db = Database::new("uimgo").await;
+    let pool = db.pool.clone();
+    db.base("base-v1", "base-snapshot", 1).await;
+    let host = FakeHost::new();
+    let control = control(&pool, &host);
+    let source = super::repositories_tests::FakeSource::new(3 * 1024 * 1024);
+    control.install_repository_source(source.clone()).unwrap();
+    // No repositories and no script: nothing to build.
+    save(&pool, "user-bob", 0, "", 1_000).await;
+    // Repositories and no script: the first save queues an image of them.
+    project(&pool, "user-alice", "project-app", "team/app", "private").await;
+    save(&pool, "user-alice", 0, "", 1_000).await;
+    run(&control, 1_000 + SAVE_DEBOUNCE_MS, 60).await;
+    let rows = images(&pool).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["owner_id"], "user-alice");
+    assert_eq!(rows[0]["state"], "ready", "{rows:?}");
+    assert_eq!(rows[0]["plan"]["setupScript"], REPOSITORIES_ONLY_SCRIPT);
+    assert_eq!(
+        rows[0]["repositories"]["baked"][0]["repositoryIdentity"],
+        "github.com/team/app"
+    );
+    // Adding repositories in a row queues one rebuild, pushed back by each.
+    let now = 1_000_000;
+    for (at, (id, name)) in [("project-docs", "team/docs"), ("project-web", "team/web")]
+        .into_iter()
+        .enumerate()
+    {
+        project(&pool, "user-alice", id, name, "public").await;
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            enqueue_repositories_tx(&mut tx, "user-alice", now + at as i64)
+                .await
+                .unwrap()
+        );
+        tx.commit().await.unwrap();
+    }
+    let queued: Vec<(String, i64)> = sqlx::query_as("SELECT reason,next_attempt_at FROM cloud_machine_images WHERE owner_id='user-alice' AND state='queued'")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(queued, vec![("recipe".into(), now + 1 + SAVE_DEBOUNCE_MS)]);
+    // An account without a machine version yet queues nothing.
+    project(&pool, "user-carol", "project-carol", "carol/app", "public").await;
+    let mut tx = pool.begin().await.unwrap();
+    assert!(
+        !enqueue_repositories_tx(&mut tx, "user-carol", now)
+            .await
+            .unwrap()
+    );
+    tx.rollback().await.unwrap();
+    db.drop().await;
+}

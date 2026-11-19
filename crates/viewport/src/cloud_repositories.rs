@@ -20,6 +20,7 @@ mod agents;
 mod environment;
 mod form;
 mod github;
+mod image_status;
 mod images;
 mod machine;
 mod onboarding;
@@ -27,7 +28,8 @@ mod overview;
 mod plan;
 mod presentation;
 mod secrets;
-pub use onboarding::StartChat;
+pub use image_status::ImageReadiness;
+pub use onboarding::{FirstChatRepository, StartChat};
 gpui::actions!(
     cloud_setup_overlay,
     [CloseRepositoryPicker, CloseImageHistory, SaveChanges]
@@ -112,6 +114,13 @@ pub struct RepositoryPanel {
     queue: Vec<GithubRepository>,
     keys: BTreeMap<String, String>,
     onboarding: onboarding::Onboarding,
+    /// The repository the first chat starts on, by project id.
+    first_chat_project: Option<String>,
+    /// The debounced look at whether the image should build by itself.
+    image_check: Option<Task<()>>,
+    /// The account state of the last automatic build request, so one the
+    /// server drops is never requested again in a loop.
+    image_auto: Option<(Owner, i64, usize)>,
     /// The host's settled answer to "is this account subscribed?"; `None`
     /// until it knows, when the panel's own entitlement read decides.
     host_subscribed: Option<bool>,
@@ -178,6 +187,9 @@ impl RepositoryPanel {
             queue: vec![],
             keys: BTreeMap::new(),
             onboarding: Default::default(),
+            first_chat_project: None,
+            image_check: None,
+            image_auto: None,
             host_subscribed: None,
             plan_tier: None,
             plan_read: false,
@@ -218,6 +230,9 @@ impl RepositoryPanel {
         self.secrets.reset(cx);
         self.storage_usage = None;
         self.onboarding = Default::default();
+        self.first_chat_project = None;
+        self.image_check = None;
+        self.image_auto = None;
         self.plan_tier = None;
         self.plan_read = false;
         self.plan_summary = None;
@@ -418,6 +433,10 @@ impl RepositoryPanel {
         }
         if pending.kind.starts_with("machine") {
             self.receive_machine(data, cx);
+            // Automatic requests say nothing; the image row shows progress.
+            if matches!(pending.kind, "machine-init" | "machine-auto") {
+                self.machine.notice = None;
+            }
             return;
         }
         if pending.kind.starts_with("agent") {
@@ -448,6 +467,7 @@ impl RepositoryPanel {
                 Ok(list) => {
                     self.projects = list.projects;
                     self.bind_environment(cx);
+                    self.schedule_image_check(cx);
                 }
                 Err(_) => {
                     self.error =
@@ -488,6 +508,16 @@ impl RepositoryPanel {
                         self.connect_next(cx);
                     }
                     self.bind_environment(cx);
+                    // The server rebuilds the image for the new repository
+                    // set; refresh its status once the last one lands.
+                    if self.queue.is_empty()
+                        && !self
+                            .pending
+                            .values()
+                            .any(|p| p.kind == "connect" || p.kind.starts_with("machine"))
+                    {
+                        self.load_machine(cx);
+                    }
                 }
                 Err(_) => {
                     self.error = Some(

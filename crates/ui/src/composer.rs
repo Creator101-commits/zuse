@@ -6975,6 +6975,15 @@ impl Composer {
         cx.notify();
     }
 
+    /// A suggested prompt from the empty chat: put it in the box, ready to
+    /// edit or send, and focus it.
+    pub(crate) fn suggest_prompt(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = text.to_string();
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.focus_pending = true;
+        cx.notify();
+    }
+
     /// Review fixtures: type `text` into the prompt.
     #[cfg(feature = "browser-fixture")]
     pub fn fixture_set_draft(&mut self, text: &str, cx: &mut Context<Self>) {
