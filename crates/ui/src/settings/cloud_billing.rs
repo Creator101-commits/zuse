@@ -302,6 +302,17 @@ impl CloudBillingPage {
         });
         cx.observe(&state, |_: &mut Self, _, cx| cx.notify())
             .detach();
+        // The browser's `zuse://github/confirm` link; the panel ignores any
+        // operation it did not start.
+        cx.subscribe(
+            &state,
+            |this, _, link: &crate::links::GithubConfirmLink, cx| {
+                this.repository_panel.update(cx, |panel, cx| {
+                    panel.confirm_github_from_link(&link.operation_id, &link.code, cx);
+                });
+            },
+        )
+        .detach();
         Self {
             view: CloudView::Overview,
             usage_pages: 0,

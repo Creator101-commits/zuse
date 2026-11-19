@@ -67,6 +67,66 @@ pub fn parse_zuse_conversation_link(url: &str) -> Result<ConversationDeepLink, &
     })
 }
 
+/// `zuse://github/confirm?operation=…&code=…`: the GitHub connect page handing
+/// its one-time code back to the app. Settings submits it only for the
+/// operation it started itself, so a link from someone else's connect does
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubConfirmLink {
+    pub operation_id: String,
+    pub code: String,
+}
+
+/// Whether `url` is any `zuse://github/…` link. Those are never conversation
+/// links, so malformed ones are dropped quietly rather than reported.
+pub fn is_github_link(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| url.scheme() == "zuse" && url.host_str() == Some("github"))
+}
+
+pub fn parse_github_confirm_link(url: &str) -> Option<GithubConfirmLink> {
+    const MAX_ID: usize = 64;
+    let url = url::Url::parse(url).ok()?;
+    if url.scheme() != "zuse"
+        || url.host_str() != Some("github")
+        || url.path() != "/confirm"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    let (mut operation, mut code) = (None, None);
+    for (key, value) in url.query_pairs() {
+        let slot = match key.as_ref() {
+            "operation" => &mut operation,
+            "code" => &mut code,
+            _ => return None,
+        };
+        if slot.replace(value.into_owned()).is_some() {
+            return None;
+        }
+    }
+    let operation_id = operation?;
+    if operation_id.is_empty()
+        || operation_id.len() > MAX_ID
+        || !operation_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return None;
+    }
+    // The server is the judge of the code; this only keeps junk out of it.
+    let code: String = code?.chars().filter(|c| *c != '-').collect();
+    if code.len() != 8 || !code.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(GithubConfirmLink {
+        operation_id,
+        code: code.to_ascii_uppercase(),
+    })
+}
+
 /// Only return schemes verified against the harness app. Hermes exposes a
 /// candidate scheme, but its contract is not stable enough to put on users'
 /// clipboards yet.
@@ -166,6 +226,56 @@ mod tests {
         assert!(parse_zuse_conversation_link("https://example.com").is_err());
         assert!(parse_zuse_conversation_link("zuse://open/chat/id").is_err());
         assert!(parse_zuse_conversation_link("zuse://open/chat/%GG?workspace=x").is_err());
+    }
+
+    #[test]
+    fn github_confirm_links_parse_exactly() {
+        let expected = Some(GithubConfirmLink {
+            operation_id: "0f8e-42".into(),
+            code: "ABCDEFGH".into(),
+        });
+        // The cloud page percent-encodes every non-alphanumeric byte.
+        assert_eq!(
+            parse_github_confirm_link("zuse://github/confirm?operation=0f8e%2D42&code=ABCDEFGH"),
+            expected
+        );
+        assert_eq!(
+            parse_github_confirm_link("ZUSE://github/confirm?code=abcd-efgh&operation=0f8e-42"),
+            expected
+        );
+        assert!(is_github_link("zuse://github/anything"));
+        assert!(!is_github_link("zuse://open/chat/1?workspace=w"));
+    }
+
+    #[test]
+    fn malformed_or_foreign_github_links_are_rejected() {
+        for url in [
+            "https://github/confirm?operation=op&code=ABCDEFGH",
+            "zuse://open/confirm?operation=op&code=ABCDEFGH",
+            "zuse://github/connect?operation=op&code=ABCDEFGH",
+            "zuse://github/confirm/?operation=op&code=ABCDEFGH",
+            "zuse://user@github/confirm?operation=op&code=ABCDEFGH",
+            "zuse://github:1/confirm?operation=op&code=ABCDEFGH",
+            "zuse://github/confirm?operation=op&code=ABCDEFGH#x",
+            "zuse://github/confirm?code=ABCDEFGH",
+            "zuse://github/confirm?operation=op",
+            "zuse://github/confirm?operation=&code=ABCDEFGH",
+            "zuse://github/confirm?operation=op&code=ABCDEFG",
+            "zuse://github/confirm?operation=op&code=ABCDEFGHJ",
+            "zuse://github/confirm?operation=op&code=ABCD%20EFGH",
+            "zuse://github/confirm?operation=op%2Fx&code=ABCDEFGH",
+            "zuse://github/confirm?operation=op&operation=op2&code=ABCDEFGH",
+            "zuse://github/confirm?operation=op&code=ABCDEFGH&next=x",
+            "zuse://github/confirm",
+            "not a url",
+        ] {
+            assert_eq!(parse_github_confirm_link(url), None, "{url}");
+        }
+        let long = format!(
+            "zuse://github/confirm?operation={}&code=ABCDEFGH",
+            "a".repeat(65)
+        );
+        assert_eq!(parse_github_confirm_link(&long), None);
     }
 
     #[test]

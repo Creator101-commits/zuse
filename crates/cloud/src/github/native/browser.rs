@@ -151,6 +151,7 @@ impl NativeGithub {
             .unwrap_or_else(|| "Unavailable".into());
         if let Some(confirmation) = &pending.confirmation {
             return Ok(confirmation::page(
+                &id,
                 &confirmation.code,
                 &user.login,
                 &account,

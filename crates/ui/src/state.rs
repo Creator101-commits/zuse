@@ -1149,6 +1149,7 @@ pub(crate) struct TranscriptTextChanged {
 }
 
 impl gpui::EventEmitter<TranscriptTextChanged> for AppState {}
+impl gpui::EventEmitter<crate::links::GithubConfirmLink> for AppState {}
 
 /// The status a thread row shows when its conversations disagree: whichever
 /// asks more of the user (input, then live work, then a failure, then an
@@ -4030,6 +4031,14 @@ impl AppState {
     }
 
     pub fn open_deep_link(&mut self, url: &str, cx: &mut Context<Self>) {
+        // GitHub confirmations go to whichever Settings page started that
+        // operation; nobody listening, or a foreign operation, drops it.
+        if crate::links::is_github_link(url) {
+            if let Some(link) = crate::links::parse_github_confirm_link(url) {
+                cx.emit(link);
+            }
+            return;
+        }
         match crate::links::parse_zuse_conversation_link(url) {
             Ok(link) => {
                 self.pending_deep_link = Some(link);
