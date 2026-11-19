@@ -88,7 +88,8 @@ mod tests {
         // the parent has only six and a half hours remaining.
         let expiry = scoped_token_expiry(&body(28_800_000), Some(at + 23_400_000), at).unwrap();
         assert_eq!(expiry.provider_expires_at, at + 28_800_000);
-        assert_eq!(expiry.authority_expires_at, at + 3_600_000);
+        // Two minutes under the guest's one-hour bound, for guest clock skew.
+        assert_eq!(expiry.authority_expires_at, at + 3_480_000);
         assert_eq!(
             scoped_token_expiry(&body(28_800_000), Some(at + 900_000), at)
                 .unwrap()
