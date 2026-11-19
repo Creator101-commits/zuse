@@ -786,7 +786,7 @@ mod database {
             .route("/user", get(user))
             .route("/login/oauth/access_token", post(token))
             .route("/app/installations/{id}", get(installation))
-            .route("/user/installations",get(||async{Json(json!({"installations":[{"id":9,"account":{"id":81,"login":"team","type":"Organization"},"repository_selection":"all","suspended_at":null}]}))}))
+            .route("/user/installations",get(||async{Json(json!({"installations":[{"id":9,"account":{"id":81,"login":"team","type":"Organization","avatar_url":"https://avatars.githubusercontent.com/u/81?v=4"},"repository_selection":"all","suspended_at":null}]}))}))
             .route("/user/installations/{id}/repositories", get(repositories))
             .route(
                 "/user/memberships/orgs/team",
@@ -980,7 +980,36 @@ mod database {
             .await
             .unwrap();
         assert!(html.contains("Use team"));
+        assert!(html.contains("src=\"https://avatars.githubusercontent.com/u/81?v=4&amp;s=64\""));
+        assert!(html.contains(">Organization<"));
         assert!(!html.contains("rotated-access"));
+        // An installation already linked to this owner is marked as connected
+        // and stays selectable.
+        let owner: String = sqlx::query_scalar(
+            "SELECT owner_id FROM zuse_rust_github_operations WHERE operation_id=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO zuse_rust_github_installations(owner_id,installation_id,metadata,state,updated_at) VALUES($1,9,'{}','active',0)")
+            .bind(&owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let connected = authority
+            .browser_page(&state, Some(&browser), Some("owner@example.test"))
+            .await
+            .unwrap();
+        assert!(connected.contains(">Organization · Connected<"));
+        assert!(connected.contains("Use team"));
+        sqlx::query(
+            "DELETE FROM zuse_rust_github_installations WHERE owner_id=$1 AND installation_id=9",
+        )
+        .bind(&owner)
+        .execute(&pool)
+        .await
+        .unwrap();
         assert!(
             authority
                 .confirm_browser(
