@@ -33,6 +33,8 @@
 - Checkout diff review moves into the sidebar; pull request editing, filter tabs, the review toolbar, git glyphs, tabs and the working loader are refreshed.
 - Attachment previews in the composer and chat: staged documents preview inline, sent images show as thumbnails and files as compact tiles.
 - Render Markdown tables with compact rows, rounded borders, clearer headers, and better wrapping.
+- Richer file previews, inline diffs in chat, and cards for generated images.
+- Cloud settings cards use the same framed sections as the rest of Settings.
 - The plugin sign-in page opens automatically, and the Plugins page explains why plugins are unavailable.
 
 ### Fixed
