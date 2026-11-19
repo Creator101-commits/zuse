@@ -1,7 +1,7 @@
 //! A read-only workspace image. The client resolves bytes on the owning device.
 use super::client::{FilesRequestContext, WorkspaceFilesClient};
 use crate::{
-    image_media::{MediaImage, decode_image, release_media},
+    image_media::{MediaImage, decode_file_preview_image as decode_image, release_media},
     theme::Theme,
 };
 use gpui::{Bounds, Context, FocusHandle, Pixels, Render, Task, Window, div, prelude::*, px};
@@ -13,7 +13,24 @@ pub(super) fn is_image(path: &str) -> bool {
     path.rsplit_once('.').is_some_and(|(_, extension)| {
         matches!(
             extension.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "tif" | "tiff"
+            "ico"
+                | "pnm"
+                | "pbm"
+                | "pgm"
+                | "ppm"
+                | "qoi"
+                | "tga"
+                | "hdr"
+                | "exr"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "webp"
+                | "svg"
+                | "bmp"
+                | "tif"
+                | "tiff"
         )
     })
 }

@@ -1,5 +1,4 @@
 //! Compact Cloud frames and controls shared by hosting, billing and setup.
-use crate::tooltip::TooltipExt as _;
 use crate::{
     assets::icon,
     palette, settings_style as s,
@@ -49,56 +48,15 @@ fn badge_base(warning: bool, outline: bool) -> Div {
 pub(crate) fn badge(label: impl Into<SharedString>, warning: bool, outline: bool) -> Div {
     badge_base(warning, outline).child(div().flex_none().child(label.into()))
 }
+/// A titled section: the shared settings double card, help behind an info
+/// glyph next to the title.
 pub(crate) fn group(
     title: &'static str,
     help: Option<&'static str>,
     action: Option<AnyElement>,
     body: Div,
 ) -> Div {
-    let mut title_row = div()
-        .flex()
-        .items_center()
-        .gap(px(4.))
-        .child(s::title_text(title));
-    if let Some(help) = help {
-        title_row = title_row.child(
-            div()
-                .id(SharedString::from(format!("cloud-help-{title}")))
-                .role(Role::Button)
-                .aria_label(title)
-                .aria_description(help)
-                .tab_index(0)
-                .size(px(28.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(7.))
-                .text_color(palette::rgb(MUTED))
-                .hover(|v| v.text_color(palette::rgb(TEXT)))
-                .child(icon("information").size(px(12.)))
-                .tip(help),
-        );
-    }
-    let mut header = div()
-        .flex()
-        .items_start()
-        .justify_between()
-        .gap(px(12.))
-        .px(px(10.))
-        .py(px(8.))
-        .child(div().min_w_0().flex_1().child(title_row));
-    if let Some(action) = action {
-        header = header.child(
-            div()
-                .h(px(28.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .child(action),
-        );
-    }
-    s::frame().child(header).child(s::card().child(body))
+    super::kit::section(title, help.unwrap_or_default(), action, body)
 }
 pub(crate) fn setting_row(
     first: bool,
