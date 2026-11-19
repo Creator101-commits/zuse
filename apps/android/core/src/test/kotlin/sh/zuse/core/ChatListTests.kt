@@ -63,9 +63,11 @@ class ChatListTests {
                 row("b", "zuse", 2, place = "cloud"),
                 row("c", "docs", 1, branch = "feature/search"),
             )
+        // The cloud chat joins the laptop's "zuse" group; one computer means no place labels.
         val all = ChatList.groups(rows)
-        assertEquals(setOf("Zuse Cloud", "Laptop"), all.mapNotNull { it.place }.toSet())
-        assertEquals(3, all.size)
+        assertTrue(all.all { it.place == null })
+        assertEquals(listOf("a", "b"), all.first { it.title == "zuse" }.rows.map { it.chatId })
+        assertEquals(2, all.size)
         val laptop = ChatList.groups(rows, place = "device:laptop")
         assertEquals(listOf("a", "c"), laptop.flatMap { it.rows }.map { it.chatId })
         assertTrue(laptop.all { it.place == null })
@@ -290,4 +292,32 @@ class ChatListTests {
                 server.shutdown()
             }
         }
+
+    @Test
+    fun archiveFilterShowsActiveArchivedOrEverything() {
+        val rows =
+            listOf(
+                ChatRow("a", "a", "device:1", "Mac", "p", "zuse", "Live chat"),
+                ChatRow("b", "b", "device:1", "Mac", "p", "zuse", "Old chat", archived = true),
+            )
+        fun titles(filter: ArchiveFilter) = ChatList.groups(rows, archive = filter).flatMap { it.rows }.map { it.title }
+        kotlin.test.assertEquals(listOf("Live chat"), titles(ArchiveFilter.Active))
+        kotlin.test.assertEquals(listOf("Old chat"), titles(ArchiveFilter.Archived))
+        kotlin.test.assertEquals(setOf("Live chat", "Old chat"), titles(ArchiveFilter.All).toSet())
+    }
+
+    @Test
+    fun cloudChatsJoinTheirRepositoryGroupLikeOrdinaryChats() {
+        val rows =
+            listOf(
+                ChatRow("a", "a", "device:1", "Mac", "p1", "zuse", "Local chat", activityAt = 1),
+                ChatRow("b", "b", ChatList.CLOUD_PLACE, "Zuse Cloud", "c1", "zuse", "Cloud chat", activityAt = 2),
+                ChatRow("c", "c", ChatList.CLOUD_PLACE, "Zuse Cloud", "c2", "website", "Other repo"),
+            )
+        val groups = ChatList.groups(rows)
+        kotlin.test.assertEquals(2, groups.size)
+        val zuse = groups.first { it.title == "zuse" }
+        kotlin.test.assertEquals(listOf("Cloud chat", "Local chat"), zuse.rows.map { it.title })
+        kotlin.test.assertTrue(groups.all { it.place == null }, "cloud never counts as another computer")
+    }
 }

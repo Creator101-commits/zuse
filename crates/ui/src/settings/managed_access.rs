@@ -324,12 +324,15 @@ impl ManagedAccessCard {
     }
 }
 #[derive(Clone)]
+// Setup and unlink return with the account/relay row; hidden from Remote access until it ships.
+#[allow(dead_code)]
 enum Dialog {
     Setup,
     Unlink,
 }
 
 impl ManagedAccessCard {
+    #[allow(dead_code)]
     fn open_dialog(&mut self, dialog: Dialog, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -361,6 +364,7 @@ impl ManagedAccessCard {
         true
     }
     /// The account-backed "Zuse Serve" access row. Hidden in local-only builds.
+    #[allow(dead_code)]
     pub(super) fn method(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use zuse_viewport::remote_access_style as r;
         if !zuse_viewport::cloud_gate::enabled() {
@@ -380,9 +384,9 @@ impl ManagedAccessCard {
         } else if configured {
             "Reconnecting to your account…".into()
         } else {
-            "Access this computer from your signed-in devices.".into()
+            "Reach this computer from anywhere you're signed in, without Tailscale.".into()
         };
-        r::method_row("remote-server", "Zuse Serve", description, true)
+        r::method_row("remote-server", "Your Zuse account", description, false)
             .child(
                 r::method_button(
                     "managed-host-link",
@@ -411,13 +415,13 @@ impl ManagedAccessCard {
             .into_any_element()
             .into()
     }
-    pub(super) fn computers(&self, add: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+    /// Other computers as rows for the Devices list; `offset` rows already sit above them.
+    pub(super) fn computer_rows(&self, offset: usize, cx: &mut Context<Self>) -> Vec<AnyElement> {
         use zuse_viewport::{remote_access_style as r, settings_style as s};
         let rows =
             zuse_protocol::managed_connection::computer_rows(&self.environments, &self.saved);
-        r::frame(crate::localization::text("settings-remote_other_computers", cx),crate::localization::text("settings-using_computers_card_projects_and_chats_from_connected_computers_stay_in_the_same_sidebar", cx),Some(add))
-            .child(s::card().when(rows.is_empty(),|v|v.child(r::empty_computers(cx)))
-                .children(rows.into_iter().enumerate().map(|(index,computer)| {
+        rows.into_iter().enumerate().map(|(index,computer)| {
+                    let index = index + offset;
                     let environment=computer["environmentId"].as_str().unwrap_or_default().to_owned();
                     let subject=self.account["user"]["id"].as_str().unwrap_or_default().to_owned();
                     let controller=self.engine.clone();let label=computer["label"].as_str().unwrap_or("Linked computer").to_owned();
@@ -434,8 +438,11 @@ impl ManagedAccessCard {
                             .on_click(move|_,_,cx|if let Some(controller)=controller.clone(){crate::open_account_window(crate::state::AccountTarget{controller,subject:subject.clone(),environment:environment.clone(),label:label.clone()},cx);})))
                         .when(remembered,|v|v.child(r::button(("forget-account-computer",index),"Forget saved")
                             .on_click(cx.listener(move|this,_,_,cx|this.request(methods::FORGET_ACCOUNT_ROUTE,json!({"environmentId":forget_id,"expectedSubject":forget_subject}),cx)))))
-                }))).into_any_element()
+                        .into_any_element()
+                }).collect()
     }
+    // Returns with the account/relay option; hidden from Remote access until it ships.
+    #[allow(dead_code)]
     pub(super) fn account_devices(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         use zuse_viewport::{remote_access_style as r, settings_style as s};
         if !self.account["user"].is_object() {

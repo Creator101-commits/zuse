@@ -65,6 +65,7 @@ cli-pair = 為其他裝置建立私密連結
 cli-pair_label = 在「已連線裝置」中顯示的名稱
 
 cli-pair_app = 顯示用於 Zuse 應用程式而非瀏覽器的 QR 碼
+cli-pair_json = 以 JSON 輸出連結，供指令碼與 Zuse 應用程式使用
 
 cli-login = 登入你的 Zuse 帳號
 

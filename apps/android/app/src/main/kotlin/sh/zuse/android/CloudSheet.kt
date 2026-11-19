@@ -40,15 +40,9 @@ private fun CloudPicker(
                 Text(rows.firstOrNull { it.first == selected }?.second ?: "Choose…", maxLines = 1)
                 Icon(Icons.Outlined.ExpandMore, null, Modifier.size(16.dp))
             }
-            DropdownMenu(expanded, { expanded = false }) {
+            ZuseMenu(expanded, { expanded = false }, alignEnd = false) {
                 rows.forEach { (id, title) ->
-                    DropdownMenuItem(
-                        text = { Text(title) },
-                        onClick = {
-                            onSelect(id)
-                            expanded = false
-                        },
-                    )
+                    MenuItem(title, selected = id == selected) { onSelect(id) }
                 }
             }
         }

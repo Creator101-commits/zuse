@@ -18,21 +18,74 @@ struct HomeView: View {
   }
   @State private var search = ""
   @State private var collapsed: Set<String> = []
-  @State private var showArchivedCloud = false
+  @State private var archiveFilter: ArchiveFilter = .active
   @State private var cloudConfirmation: CloudActionSelection?
   @State private var connectMethod: ConnectionMethod?
+  @State private var showComputers = false
   @State private var signingIn = false
   private struct CloudActionSelection {
     let chat: CloudChat
     let action: CloudWorkspaceAction
   }
+  /// The open computer's place in the chat list; the home list shows one computer at a time.
+  private static let computerPlace = "computer"
+  private static func key(_ session: SessionRow) -> String { computerPlace + "|" + session.id }
+  private static func key(_ chat: CloudChat) -> String { ChatList.cloudPlace + "|" + chat.id }
+
+  /// Every chat the list can show: the open computer's, active and archived, then Zuse Cloud's.
+  private var chatRows: [ChatListRow] {
+    var rows: [ChatListRow] = []
+    // A cloud workspace's own catalog is reached through its cloud chat row.
+    if !workspace.isCloudActive {
+      let label = workspace.connectedComputer ?? "Computer"
+      for project in workspace.projects {
+        let name = project.id == CanonicalWorkspace.projectless ? nil : project.name
+        for (sessions, archived) in [
+          (workspace.sessions, false), (workspace.archivedSessions, true),
+        ] {
+          for session in sessions where session.projectId == project.id {
+            rows.append(
+              ChatListRow(
+                id: Self.key(session), chatID: session.id, placeKey: Self.computerPlace,
+                placeLabel: label, projectKey: project.id, projectName: name,
+                title: session.title.isEmpty ? "New chat" : session.title, archived: archived))
+          }
+        }
+      }
+    }
+    for chat in workspace.cloudChats {
+      rows.append(
+        ChatListRow(
+          id: Self.key(chat), chatID: chat.chatId, placeKey: ChatList.cloudPlace,
+          placeLabel: "Zuse Cloud", projectKey: chat.projectId,
+          projectName: chat.repositoryDisplayName,
+          title: chat.title.isEmpty ? "Untitled chat" : chat.title, archived: chat.isArchived))
+    }
+    return rows
+  }
+  /// Chat groups, plus the open computer's projects that have no active chats yet.
+  private func listGroups(_ rows: [ChatListRow]) -> [ChatListGroup] {
+    var groups = ChatList.groups(rows, query: search, archive: archiveFilter)
+    guard archiveFilter == .active, search.isEmpty, !workspace.isCloudActive else { return groups }
+    for project in workspace.projects where project.id != CanonicalWorkspace.projectless {
+      let id = Self.computerPlace + "|" + project.id
+      guard
+        !groups.contains(where: {
+          $0.id == id || $0.title.lowercased() == project.name.lowercased()
+        })
+      else { continue }
+      groups.append(ChatListGroup(id: id, title: project.name, place: nil, rows: []))
+    }
+    return groups
+  }
 
   var body: some View {
-    let grouped = Dictionary(
-      grouping: workspace.sessions.filter { matches($0.title) }, by: \.projectId)
-    let visibleCloud = workspace.cloudChats.filter {
-      $0.isArchived == showArchivedCloud && matches($0.title)
-    }
+    let groups = listGroups(chatRows)
+    let sessionsByKey = Dictionary(
+      (workspace.sessions + workspace.archivedSessions).map { (Self.key($0), $0) },
+      uniquingKeysWith: { first, _ in first })
+    let cloudByKey = Dictionary(
+      workspace.cloudChats.map { (Self.key($0), $0) }, uniquingKeysWith: { first, _ in first })
     List(selection: $selection) {
       if showsConnectionBanner {
         ConnectionBanner(workspace: workspace).homeRow(leading: 4, minHeight: 0)
@@ -44,81 +97,46 @@ struct HomeView: View {
       if let problem = workspace.cloudCatalogProblem {
         HomeNotice(text: problem, icon: "cloud.bolt")
       }
-      if !workspace.cloudChats.isEmpty {
-        HStack {
-          Text(showArchivedCloud ? "Archived" : "Cloud")
-          Spacer()
-          Menu {
-            Picker("Show", selection: $showArchivedCloud) {
-              Text("Active").tag(false)
-              Text("Archived").tag(true)
-            }
-          } label: {
-            Image(systemName: "line.3.horizontal.decrease").frame(width: 32, height: 28)
-              .contentShape(Rectangle())
-          }.accessibilityLabel("Filter cloud chats")
-        }
-        .font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
-        .homeRow(leading: 20, minHeight: 32)
-        if visibleCloud.isEmpty {
-          Text(showArchivedCloud ? "No archived cloud chats" : "No active cloud chats")
-            .font(.subheadline).foregroundStyle(.tertiary).homeRow(leading: 24, minHeight: 40)
-        }
-        ForEach(visibleCloud) { chat in
-          Button {
-            if let pending = workspace.pendingCloudActions[chat.workspaceId] {
-              requestCloudAction(chat, action: pending)
-            } else if chat.isArchived {
-              requestCloudAction(chat, action: .unarchive)
-            } else {
-              workspace.openCloud(chat)
-            }
-          } label: {
-            HomeChatLabel(
-              title: chat.title.isEmpty ? "Untitled chat" : chat.title,
-              detail: workspace.pendingCloudActions[chat.workspaceId].map {
-                $0.title + " pending"
-              } ?? chat.statusLabel
-            ) {
-              if workspace.cloudRequestsBusy.contains(chat.workspaceId) {
-                ProgressView().controlSize(.mini)
-              } else {
-                Image(systemName: chat.isArchived ? "archivebox" : "cloud")
-                  .font(.system(size: 14)).foregroundStyle(.secondary)
-              }
-            }
-          }
-          .buttonStyle(.plain)
-          .disabled(workspace.cloudRequestsBusy.contains(chat.workspaceId))
-          .homeRow(leading: 24)
-          .contextMenu { cloudActions(chat) }
-          .swipeActions { cloudActions(chat) }
-        }
-      }
-      ForEach(workspace.projects) { project in
-        let chats = grouped[project.id] ?? []
+      ForEach(groups) { group in
+        let isCollapsed = collapsed.contains(group.id)
         Button {
           withAnimation(.snappy(duration: 0.2)) {
-            if collapsed.contains(project.id) {
-              collapsed.remove(project.id)
+            if isCollapsed {
+              collapsed.remove(group.id)
             } else {
-              collapsed.insert(project.id)
+              collapsed.insert(group.id)
             }
           }
         } label: {
           HomeProjectHeader(
-            name: project.name, count: chats.count, collapsed: collapsed.contains(project.id))
+            name: group.title, place: group.place, count: group.rows.count,
+            collapsed: isCollapsed)
         }
         .buttonStyle(.plain).homeRow(leading: 16, minHeight: 48)
         .padding(.top, 4)
         .accessibilityLabel(
-          "\(project.name), \(chats.count) chats"
-            + (collapsed.contains(project.id) ? ", collapsed" : ""))
-        if !collapsed.contains(project.id) {
-          ForEach(chats) { session in
-            SessionListRow(workspace: workspace, session: session)
+          "\(group.title), \(group.rows.count) chats" + (isCollapsed ? ", collapsed" : ""))
+        if !isCollapsed {
+          ForEach(group.rows) { row in
+            if row.archived {
+              ArchivedChatRow(
+                title: row.title, cloud: row.isCloud, tagged: archiveFilter == .all,
+                busy: restoring(row, chat: cloudByKey[row.id])
+              ) { open in
+                restore(row, open: open)
+              }
+              .homeRow(leading: 24)
+            } else if row.isCloud, let chat = cloudByKey[row.id] {
+              cloudRow(chat)
+            } else if let session = sessionsByKey[row.id] {
+              SessionListRow(workspace: workspace, session: session)
+            }
           }
-          if chats.isEmpty && workspace.catalogProblem != nil && search.isEmpty {
+          if group.rows.isEmpty && workspace.catalogProblem != nil && search.isEmpty,
+            let project = workspace.projects.first(where: {
+              Self.computerPlace + "|" + $0.id == group.id
+            })
+          {
             Button("Retry loading chats") {
               workspace.selectedProject = project
               Task { await workspace.loadSessions() }
@@ -126,15 +144,20 @@ struct HomeView: View {
           }
         }
       }
-      if workspace.projects.isEmpty && workspace.cloudChats.isEmpty && search.isEmpty
-        && !showsConnectionBanner
-      {
-        emptyState.homeRow(leading: 0).padding(.top, 72)
-      }
-      if !search.isEmpty && !workspace.sessions.contains(where: { matches($0.title) })
-        && visibleCloud.isEmpty
-      {
-        ContentUnavailableView.search(text: search).homeRow(leading: 0)
+      if groups.isEmpty {
+        if !search.isEmpty {
+          ContentUnavailableView.search(text: search).homeRow(leading: 0)
+        } else if archiveFilter == .archived {
+          ContentUnavailableView {
+            Label("No archived chats", systemImage: "archivebox")
+          } description: {
+            Text("Chats you archive show up here, ready to restore.")
+          }.homeRow(leading: 0).padding(.top, 48)
+        } else if workspace.projects.isEmpty && workspace.cloudChats.isEmpty
+          && !showsConnectionBanner
+        {
+          emptyState.homeRow(leading: 0).padding(.top, 72)
+        }
       }
     }
     .listStyle(.plain)
@@ -149,7 +172,7 @@ struct HomeView: View {
       ToolbarItem(placement: .principal) { BrandTitle() }
       if !isTablet {
         ToolbarItemGroup(placement: .primaryAction) {
-          Button("Pair with desktop", systemImage: "qrcode.viewfinder", action: connect)
+          ComputersButton(workspace: workspace) { showComputers = true }
           Button("Open settings", systemImage: "gearshape.fill", action: settings)
         }
       }
@@ -163,9 +186,9 @@ struct HomeView: View {
               .frame(width: 44, height: 44).contentShape(Circle()).floatingGlass(radius: 22)
           }
           .buttonStyle(.plain).accessibilityLabel("Open settings")
-          .contextMenu {
-            Button("Pair with desktop", systemImage: "qrcode.viewfinder", action: connect)
-          }
+          ComputersButton(workspace: workspace) { showComputers = true }
+            .font(.system(size: 16)).frame(width: 44, height: 44).contentShape(Circle())
+            .floatingGlass(radius: 22).buttonStyle(.plain)
         }
         HStack(spacing: 8) {
           Image(systemName: "magnifyingglass").font(.system(size: 16)).foregroundStyle(.secondary)
@@ -175,8 +198,9 @@ struct HomeView: View {
             Button("Clear search", systemImage: "xmark.circle.fill") { search = "" }
               .labelStyle(.iconOnly).foregroundStyle(.tertiary)
           }
+          ArchiveFilterMenu(filter: $archiveFilter)
         }
-        .padding(.horizontal, 14).frame(height: 44).floatingGlass(radius: 22)
+        .padding(.leading, 14).padding(.trailing, 6).frame(height: 44).floatingGlass(radius: 22)
         Button(action: newChat) {
           Image(systemName: "square.and.pencil").font(.system(size: 18, weight: .medium))
             .frame(width: 44, height: 44).contentShape(Circle()).floatingGlass(radius: 22)
@@ -196,6 +220,7 @@ struct HomeView: View {
       }
     }
     .connectionFlow($connectMethod, workspace: workspace)
+    .sheet(isPresented: $showComputers) { ComputersSheet(workspace: workspace) }
     .confirmationDialog(
       cloudConfirmation?.action == .archive ? "Archive cloud workspace?" : "Pause cloud workspace?",
       isPresented: Binding(
@@ -252,21 +277,46 @@ struct HomeView: View {
           .buttonStyle(.borderedProminent).tint(AppTheme.accent).disabled(signingIn)
         }
         Button {
-          connectMethod = .pairing
+          connectMethod = .add
         } label: {
-          Label("Scan QR Code", systemImage: "qrcode.viewfinder").frame(maxWidth: .infinity)
+          Label("Add computer", systemImage: "desktopcomputer").frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)
         .tint(workspace.account.signedIn ? AppTheme.accent : Color.primary.opacity(0.12))
         .foregroundStyle(workspace.account.signedIn ? Color.white : Color.primary)
-        HStack(spacing: 24) {
-          Button("Find Nearby") { connectMethod = .nearby }
-          Button("Add Manually") { connectMethod = .manual }
-        }.buttonStyle(.borderless).font(.subheadline).foregroundStyle(.secondary)
       }
       .controlSize(.large).buttonBorderShape(.capsule)
       .frame(maxWidth: 340).padding(.horizontal, 24)
     }.frame(maxWidth: .infinity)
+  }
+  /// A cloud chat is an ordinary chat; only the dithered cloud says where it runs.
+  private func cloudRow(_ chat: CloudChat) -> some View {
+    let busy = workspace.cloudRequestsBusy.contains(chat.workspaceId)
+    let pending = workspace.pendingCloudActions[chat.workspaceId]
+    return Button {
+      if let pending {
+        requestCloudAction(chat, action: pending)
+      } else {
+        workspace.openCloud(chat)
+      }
+    } label: {
+      HomeChatLabel(
+        title: chat.title.isEmpty ? "Untitled chat" : chat.title,
+        detail: pending.map { $0.title + " pending" }
+          ?? (chat.state == "ready" && !chat.isTransitioning ? nil : chat.statusLabel)
+      ) {
+        if busy {
+          ProgressView().controlSize(.mini)
+        } else {
+          DitherCloudIcon()
+        }
+      }
+    }
+    .buttonStyle(.plain)
+    .disabled(busy)
+    .homeRow(leading: 24)
+    .contextMenu { cloudActions(chat) }
+    .swipeActions { cloudActions(chat) }
   }
   @ViewBuilder private func cloudActions(_ chat: CloudChat) -> some View {
     if let pending = workspace.pendingCloudActions[chat.workspaceId] {
@@ -288,259 +338,142 @@ struct HomeView: View {
     if action.stopsWork {
       cloudConfirmation = CloudActionSelection(chat: chat, action: action)
     } else {
-      Task {
-        if await workspace.controlCloud(chat, action: action), action == .unarchive {
-          showArchivedCloud = false
+      Task { await workspace.controlCloud(chat, action: action) }
+    }
+  }
+  private func restoring(_ row: ChatListRow, chat: CloudChat?) -> Bool {
+    if let chat { return workspace.cloudRequestsBusy.contains(chat.workspaceId) }
+    return workspace.restoringChats.contains(row.chatID)
+  }
+  /// Restores an archived chat where it lives, then opens it when asked.
+  private func restore(_ row: ChatListRow, open: Bool) {
+    Task {
+      if row.isCloud {
+        guard let chat = workspace.cloudChats.first(where: { Self.key($0) == row.id }),
+          await workspace.controlCloud(chat, action: .unarchive), open
+        else { return }
+        archiveFilter = .active
+        // A workspace still coming back from the archive opens once it is ready.
+        if let fresh = workspace.cloudChats.first(where: { $0.id == chat.id }), !fresh.isArchived {
+          workspace.openCloud(fresh)
         }
+      } else {
+        guard let session = workspace.archivedSessions.first(where: { $0.id == row.chatID }),
+          await workspace.restoreChat(session), open
+        else { return }
+        archiveFilter = .active
+        selection = workspace.sessions.first { $0.id == session.id } ?? session
       }
     }
   }
-  private func matches(_ title: String) -> Bool {
-    search.isEmpty || title.localizedCaseInsensitiveContains(search)
+}
+
+/// Active, archived or every chat, from the trailing edge of the search field.
+private struct ArchiveFilterMenu: View {
+  @Binding var filter: ArchiveFilter
+  var body: some View {
+    Menu {
+      Picker("Show", selection: $filter) {
+        ForEach(ArchiveFilter.allCases, id: \.self) { option in
+          Label(option.label, systemImage: option.symbol).tag(option)
+        }
+      }
+    } label: {
+      HStack(spacing: 5) {
+        if filter != .active {
+          Text(filter.label).font(.system(size: 13, weight: .medium)).lineLimit(1)
+            .foregroundStyle(.primary)
+        }
+        Image(systemName: "line.3.horizontal.decrease").font(.system(size: 15, weight: .medium))
+          .foregroundStyle(.secondary)
+      }
+      .padding(.horizontal, 8).frame(minWidth: 32, minHeight: 32)
+      .background(
+        filter == .active ? Color.clear : Color.primary.opacity(0.08), in: Capsule()
+      )
+      .contentShape(Capsule())
+    }
+    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+    .accessibilityLabel(filter.accessibilityLabel)
+    .accessibilityHint("Choose which chats to show")
+    .accessibilityIdentifier("archive-filter")
   }
 }
 
-struct SettingsView: View {
-  @Bindable var workspace: WorkspaceModel
-  @Environment(\.dismiss) private var dismiss
-  @AppStorage("native.appearance") private var appearance = "system"
-  @State private var showCloud = false
-  @State private var showCloudPreferences = false
-  private var version: String {
-    let info = Bundle.main.infoDictionary
-    let short = info?["CFBundleShortVersionString"] as? String ?? "1.0"
-    let build = info?["CFBundleVersion"] as? String ?? ""
-    return build.isEmpty ? short : "\(short) (\(build))"
+extension ArchiveFilter {
+  fileprivate var symbol: String {
+    switch self {
+    case .active: return "bubble.left.and.bubble.right"
+    case .archived: return "archivebox"
+    case .all: return "tray.full"
+    }
   }
+}
+
+/// An archived chat: quieter, and tapping offers to bring it back rather than opening it.
+private struct ArchivedChatRow: View {
+  let title: String
+  let cloud: Bool
+  let tagged: Bool
+  let busy: Bool
+  let restore: (Bool) -> Void
   var body: some View {
-    NavigationStack {
-      List {
-        Section {
-          if workspace.account.signedIn {
-            NavigationLink {
-              accountSettings
-            } label: {
-              SettingsRow(
-                title: "Account", subtitle: "Cloud chats and remote access",
-                icon: "person.crop.circle.fill", brand: true)
-            }
+    Menu {
+      Button("Restore and open", systemImage: "arrow.up.bin") { restore(true) }
+      Button("Restore", systemImage: "arrow.uturn.backward") { restore(false) }
+    } label: {
+      HStack(spacing: 10) {
+        Group {
+          if busy {
+            ProgressView().controlSize(.mini)
           } else {
-            Button {
-              Task {
-                do { try await workspace.signIn() } catch {
-                  workspace.error = error.localizedDescription
-                }
-              }
-            } label: {
-              SettingsRow(
-                title: "Sign in", subtitle: "Cloud chats and remote access",
-                icon: "person.crop.circle.fill", brand: true)
-            }.accessibilityLabel("Sign in to Zuse")
+            Image(systemName: "archivebox").font(.system(size: 14)).foregroundStyle(.secondary)
           }
-        }
-        Section {
-          NavigationLink {
-            ComputerConnectionsView(workspace: workspace)
-          } label: {
-            SettingsRow(
-              title: "Computers", icon: "desktopcomputer",
-              value: workspace.connectedComputer)
-          }
-          NavigationLink {
-            List {
-              Picker("Theme", selection: $appearance) {
-                Text("System").tag("system")
-                Text("Light").tag("light")
-                Text("Dark").tag("dark")
-              }.pickerStyle(.inline).labelsHidden()
-            }.settingsList().navigationTitle("Appearance").compactNavigationTitle()
-          } label: {
-            SettingsRow(
-              title: "Appearance", icon: "circle.lefthalf.filled", value: appearance.capitalized)
-          }
-        }
-        if workspace.account.signedIn {
-          Section {
-            NavigationLink {
-              CloudInfrastructureView(workspace: workspace)
-            } label: {
-              SettingsRow(title: "Cloud providers", icon: "cloud.fill")
-            }
-            NavigationLink {
-              RegisteredDevicesView(workspace: workspace)
-            } label: {
-              SettingsRow(title: "Registered devices", icon: "iphone.gen3")
-            }
-          }
-        }
-        Section {
-        } footer: {
-          Text("Zuse \(version)").frame(maxWidth: .infinity).font(.caption)
-            .foregroundStyle(.tertiary)
+        }.frame(width: 20, height: 20)
+        if cloud { DitherCloudIcon() }
+        Text(title).font(.system(size: 16)).foregroundStyle(.secondary).lineLimit(1)
+        Spacer(minLength: 6)
+        if tagged {
+          Text("Archived").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            .padding(.horizontal, 6).padding(.vertical, 1)
+            .background(
+              Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+            )
         }
       }
-      .settingsList()
-      .navigationTitle("Settings").compactNavigationTitle()
-      .toolbar {
-        ToolbarItem(placement: .sheetClose) { SheetCloseButton { dismiss() } }
-      }
-      .disabled(workspace.clearingAccount)
-    }.nativeSheetSize(width: 440, height: 520).tint(.primary)
-      .sheet(isPresented: $showCloud) { CloudSettingsView(workspace: workspace).nativeSheetSize() }
-      .sheet(isPresented: $showCloudPreferences) {
-        RuntimeSettingsView(cloud: workspace.cloud).nativeSheetSize()
-      }
-  }
-  private var accountSettings: some View {
-    List {
-      Section {
-        SettingsRow(
-          title: "Signed in",
-          subtitle: workspace.account.reauthenticationRequired
-            ? "Session expired" : "Zuse account", icon: "checkmark.seal.fill", brand: true)
-        if workspace.account.reauthenticationRequired {
-          Button {
-            Task {
-              do { try await workspace.signIn() } catch {
-                workspace.error = error.localizedDescription
-              }
-            }
-          } label: {
-            SettingsRow(title: "Sign in again", icon: "arrow.clockwise")
-          }
-        }
-      }
-      Section {
-        Button {
-          showCloudPreferences = true
-        } label: {
-          SettingsRow(title: "Cloud preferences", icon: "slider.horizontal.3")
-        }
-        Button {
-          showCloud = true
-        } label: {
-          SettingsRow(title: "Agent sign-in", icon: "key.fill")
-        }
-      }
-      Section {
-        Button {
-          Task { await workspace.signOut() }
-        } label: {
-          SettingsRow(
-            title: "Sign out", icon: "rectangle.portrait.and.arrow.right", destructive: true)
-        }
-      }
-    }.settingsList()
-      .navigationTitle("Account").compactNavigationTitle()
+      .frame(minHeight: 44).contentShape(Rectangle())
+    }
+    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden)
+    .disabled(busy)
+    .accessibilityLabel(title + ", archived" + (cloud ? ", Zuse Cloud" : ""))
+    .accessibilityHint("Shows restore options")
   }
 }
 
-struct ComputerConnectionsView: View {
-  @Bindable var workspace: WorkspaceModel
-  @State private var method: ConnectionMethod?
-  @State private var forgetting: RemoteConnection?
-  @State private var showRuntime = false
+/// The dithered cloud that marks Zuse Cloud chats, drawn from the shared icon's cells.
+struct DitherCloudIcon: View {
+  var size: CGFloat = 16
   var body: some View {
-    List {
-      Section {
-        Button {
-          method = .nearby
-        } label: {
-          SettingsRow(
-            title: "Connect to a nearby computer", subtitle: "Find it automatically over Wi-Fi",
-            icon: "wifi")
+    Canvas { context, canvas in
+      let cell = canvas.width / CGFloat(DitherCloud.gridSize)
+      func path(_ cells: [DitherCloud.Cell]) -> Path {
+        var path = Path()
+        for item in cells {
+          path.addRect(
+            CGRect(
+              x: CGFloat(item.x) * cell, y: CGFloat(item.y) * cell,
+              width: CGFloat(item.width) * cell, height: cell))
         }
-        Button {
-          method = .pairing
-        } label: {
-          SettingsRow(title: "Scan a pairing code", icon: "qrcode.viewfinder")
-        }
-        Button {
-          method = .manual
-        } label: {
-          SettingsRow(title: "Add manually", icon: "plus")
-        }
-      } header: {
-        Text("Connections")
-      } footer: {
-        Text("Pairs over your local network. No account needed.")
+        return path
       }
-      if !workspace.savedConnections.isEmpty {
-        Section("Saved computers") {
-          ForEach(workspace.savedConnections) { connection in
-            let current = workspace.connectedComputer == connection.displayName
-            Button {
-              workspace.openRemote(connection)
-            } label: {
-              SettingsRow(
-                title: connection.displayName,
-                subtitle: current ? workspace.connectionSummary : connection.transportName,
-                icon: "laptopcomputer", brand: current)
-            }.contextMenu {
-              Button("Forget computer", role: .destructive) { forgetting = connection }
-            }
-            .swipeActions { Button("Forget") { forgetting = connection }.tint(.red) }
-          }
-        }
-      }
-      if !workspace.environments.isEmpty {
-        Section("Account computers") {
-          ForEach(workspace.environments) { environment in
-            Button {
-              workspace.openEnvironment(environment)
-            } label: {
-              SettingsRow(
-                title: environment.label ?? "Computer", subtitle: "Remote access",
-                icon: "desktopcomputer")
-            }
-          }
-        }
-      }
-      if let name = workspace.connectedComputer {
-        Section(name) {
-          if let rpc = workspace.rpc {
-            Button {
-              showRuntime = true
-            } label: {
-              SettingsRow(title: "Computer settings", icon: "slider.horizontal.3")
-            }.disabled(workspace.connectionState != "Connected")
-            NavigationLink {
-              ComputerAccessView(rpc: rpc)
-            } label: {
-              SettingsRow(title: "Device access", icon: "ipad.and.iphone")
-            }.disabled(workspace.connectionState != "Connected")
-          }
-          Button {
-            workspace.persistDraft(immediate: true)
-            workspace.disconnect(clearSaved: true)
-          } label: {
-            SettingsRow(title: "Disconnect", icon: "xmark", destructive: true)
-          }
-        }
-      }
-      Section {
-        NavigationLink {
-          ServeSettingsView(workspace: workspace)
-        } label: {
-          SettingsRow(
-            title: "Remote network", subtitle: "Zuse Serve and Tailscale", icon: "network")
-        }
-      }
-    }.settingsList()
-      .navigationTitle("Computers").compactNavigationTitle()
-      .connectionFlow($method, workspace: workspace)
-      .sheet(isPresented: $showRuntime) {
-        if let rpc = workspace.rpc { RuntimeSettingsView(rpc: rpc).nativeSheetSize() }
-      }
-      .confirmationDialog(
-        "Forget this computer?",
-        isPresented: Binding(get: { forgetting != nil }, set: { if !$0 { forgetting = nil } })
-      ) {
-        Button("Forget computer", role: .destructive) {
-          if let connection = forgetting { workspace.forgetComputer(connection) }
-          forgetting = nil
-        }
-      }
+      context.fill(path(DitherCloud.solid), with: .foreground)
+      context.opacity = DitherCloud.faintOpacity
+      context.fill(path(DitherCloud.faint), with: .foreground)
+    }
+    .frame(width: size, height: size)
+    .foregroundStyle(.secondary)
+    .accessibilityElement()
+    .accessibilityLabel("Zuse Cloud")
   }
 }
 
@@ -621,7 +554,9 @@ private struct SessionListRow: View {
     }
     .contextMenu {
       if let value = info["url"].string, let url = URL(string: value), url.scheme == "https" {
-        Link("Open pull request", destination: url)
+        Link(destination: url) {
+          Label("Open pull request", systemImage: "arrow.up.right.square")
+        }
       }
     }
   }
@@ -653,6 +588,7 @@ extension HomeChatLabel where Trailing == EmptyView {
 
 private struct HomeProjectHeader: View {
   let name: String
+  var place: String? = nil
   let count: Int
   let collapsed: Bool
   var body: some View {
@@ -668,6 +604,9 @@ private struct HomeProjectHeader: View {
             .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
         }
       Text(name).font(.system(size: 16, weight: .bold)).lineLimit(1)
+      if let place {
+        Text(place).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
+      }
       Spacer(minLength: 6)
       Text("\(count)").font(.system(size: 13)).monospacedDigit().foregroundStyle(.secondary)
       Image(systemName: collapsed ? "chevron.right" : "chevron.down")

@@ -94,6 +94,8 @@ required-features = ["compact-picker-fixture"]
 
 [dependencies]
 hayro = "0.9"
+# Pairing codes shown in Remote access, the same encoder `zuse pair` uses.
+qrcode = { version = "0.14", default-features = false }
 zuse-analytics.workspace = true
 zuse-i18n.workspace = true
 zuse-model.workspace = true

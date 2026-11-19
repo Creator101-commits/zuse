@@ -15478,6 +15478,7 @@ dependencies = [
  "percent-encoding",
  "png 0.18.1",
  "pulldown-cmark",
+ "qrcode",
  "raw-window-handle",
  "reqwest 0.12.28",
  "roxmltree 0.21.1",

@@ -142,16 +142,29 @@ final class NativeChatTests: XCTestCase {
     XCTAssertTrue(app.staticTexts["Review authentication changes"].exists)
     XCTAssertFalse(app.staticTexts["Polish the mobile navigation"].exists)
     app.buttons["Clear search"].tap()
+    let archivedRow = app.buttons["Try the old sidebar, archived"]
+    XCTAssertFalse(archivedRow.exists)
+    app.buttons["archive-filter"].tap()
+    app.buttons["Archived"].firstMatch.tap()
+    XCTAssertTrue(archivedRow.waitForExistence(timeout: 5))
+    XCTAssertFalse(app.staticTexts["Polish the mobile navigation"].exists)
+    app.buttons["archive-filter"].tap()
+    app.buttons["Active"].firstMatch.tap()
+    XCTAssertTrue(app.staticTexts["Polish the mobile navigation"].waitForExistence(timeout: 5))
     app.buttons["Open settings"].tap()
     XCTAssertTrue(app.buttons["Sign in to Zuse"].waitForExistence(timeout: 5))
-    app.staticTexts["Computers"].tap()
-    XCTAssertTrue(app.staticTexts["Connect to a nearby computer"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Not signed in"].exists)
+    XCTAssertFalse(app.staticTexts["Archived chats"].exists)
+    app.buttons["settings-computers"].tap()
+    XCTAssertTrue(app.staticTexts["Connect your computer"].waitForExistence(timeout: 5))
     let computers = XCTAttachment(screenshot: app.screenshot())
     computers.name = "Computer connections"
     computers.lifetime = .keepAlways
     add(computers)
-    app.staticTexts["Add manually"].tap()
-    XCTAssertTrue(app.secureTextFields["Connection token"].waitForExistence(timeout: 5))
+    app.buttons["Add computer"].tap()
+    XCTAssertTrue(app.textFields["Invitation link"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Connect with SSH"].exists)
+    XCTAssertFalse(app.secureTextFields["Connection token"].exists)
     XCTAssertFalse(app.staticTexts["Nearby computers"].exists)
   }
 

@@ -188,7 +188,7 @@ struct WorkspaceView: View {
           let arguments = ProcessInfo.processInfo.arguments
           if arguments.contains("--settings-preview") { showSettings = true }
           if arguments.contains("--new-chat-preview") { openNewChat(cloud: false) }
-          if arguments.contains("--pairing-preview") { connectionMethod = .pairing }
+          if arguments.contains("--pairing-preview") { connectionMethod = .add }
         #endif
       }
       .fileImporter(
@@ -241,7 +241,7 @@ struct WorkspaceView: View {
     ) {
       HomeView(
         workspace: workspace, selection: $selection,
-        settings: { showSettings = true }, connect: { connectionMethod = .pairing },
+        settings: { showSettings = true }, connect: { connectionMethod = .add },
         newChat: { openNewChat(cloud: false) }, newCloudChat: { openNewChat(cloud: true) },
         addProject: { showProject = true }
       )
@@ -539,128 +539,6 @@ struct WorkspaceView: View {
   private var sendDisabled: Bool {
     if stopsTurn { return workspace.sending || workspace.connectionState != "Connected" }
     return !workspace.canSend || workspace.sending || !hasDraft
-  }
-}
-
-enum ConnectionMethod: String, Identifiable {
-  case nearby, pairing, manual
-  var id: String { rawValue }
-  var title: String {
-    switch self {
-    case .nearby: "Nearby computers"
-    case .pairing: "Pair a computer"
-    case .manual: "Add computer"
-    }
-  }
-}
-
-struct ConnectionView: View {
-  let workspace: WorkspaceModel
-  var method: ConnectionMethod = .nearby
-  @Environment(\.dismiss) private var dismiss
-  @State private var address = ""
-  @State private var token = ""
-  @State private var link = ""
-  @State private var pairing = false
-  @State private var pairingTask: Task<Void, Never>?
-  @State private var pairRequest = UUID()
-  @State private var nearby = NearbyBrowser()
-  @State private var nearbySelection: NearbyBrowser.Computer?
-  @State private var nearbyCode = ""
-  @State private var error: String?
-  var body: some View {
-    NavigationStack {
-      Form {
-        if method == .nearby {
-          Section("Nearby computers") {
-            ForEach(nearby.computers) { computer in
-              Button(computer.name, systemImage: "laptopcomputer") { nearbySelection = computer }
-                .disabled(pairing)
-            }
-            if nearby.computers.isEmpty {
-              Text(nearby.error ?? "Looking for computers on your network…").font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            if let computer = nearbySelection {
-              Text("Pair with " + computer.name).font(.subheadline)
-              TextField("Pairing code from your computer", text: $nearbyCode)
-                .verbatimInput().autocorrectionDisabled().frame(height: 28)
-              Button("Pair nearby computer") {
-                var url = URLComponents(url: computer.url, resolvingAgainstBaseURL: false)
-                var fragment = URLComponents()
-                fragment.queryItems = [URLQueryItem(name: "pair", value: nearbyCode)]
-                url?.percentEncodedFragment = fragment.percentEncodedQuery
-                if let value = url?.url?.absoluteString {
-                  link = value
-                  pair(pin: computer.pin)
-                }
-              }.disabled(pairing || nearbyCode.isEmpty)
-            }
-          }
-          .disabled(pairing)
-        }
-        if method == .pairing {
-          Section("Pair with your computer") {
-            TextField("Paste a Zuse pairing link", text: $link).verbatimInput()
-              .autocorrectionDisabled().frame(height: 28)
-            Button(pairing ? "Pairing…" : "Pair") { pair() }.disabled(link.isEmpty || pairing)
-          }
-        }
-        if method == .manual {
-          Section {
-            TextField("wss://your-computer.example/rpc", text: $address).verbatimInput()
-              .autocorrectionDisabled()
-            SecureField("Connection token", text: $token).frame(height: 28)
-            Button("Connect") {
-              workspace.openRemote(
-                RemoteConnection(
-                  address: address.trimmingCharacters(in: .whitespacesAndNewlines), token: token))
-              dismiss()
-            }.disabled(address.isEmpty || pairing)
-          } header: {
-            Text("Manual connection")
-          } footer: {
-            Text(
-              "Use a secure remote address or a private local address. Credentials stay in this device’s Keychain."
-            )
-          }
-        }
-        if let error { Text(error).foregroundStyle(.red) }
-      }.navigationTitle(method.title).compactNavigationTitle()
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-    }.task { if method == .nearby { nearby.start() } }.onDisappear {
-      nearby.stop()
-      pairRequest = UUID()
-      pairingTask?.cancel()
-      pairingTask = nil
-      pairing = false
-      token = ""
-      link = ""
-      nearbyCode = ""
-    }
-  }
-  private func pair(pin: String? = nil) {
-    guard !pairing else { return }
-    let submittedLink = link
-    let request = UUID()
-    pairRequest = request
-    pairing = true
-    error = nil
-    pairingTask = Task {
-      defer {
-        if pairRequest == request {
-          pairing = false
-          pairingTask = nil
-        }
-      }
-      do {
-        try await workspace.pair(submittedLink, certificatePin: pin)
-        guard pairRequest == request, !Task.isCancelled else { return }
-        dismiss()
-      } catch is CancellationError {} catch {
-        if pairRequest == request { self.error = error.localizedDescription }
-      }
-    }
   }
 }
 

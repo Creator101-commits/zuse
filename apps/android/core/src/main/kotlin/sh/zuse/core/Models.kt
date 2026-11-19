@@ -75,6 +75,10 @@ data class SavedDevice(
     val environmentId: String? = null,
     val certificatePin: String? = null,
     val pairingLink: String? = null,
+    /** Set when the computer is reached by signing in over SSH. */
+    val ssh: SshTarget? = null,
+    /** Connect through an SSH port forward, for computers that only listen on loopback. */
+    val tunnel: Boolean = false,
 )
 
 @Serializable
@@ -210,7 +214,7 @@ fun decodeSessionMetadata(encoded: String): DecodedMetadata {
     )
 }
 
-class ClientException(message: String) : Exception(message)
+open class ClientException(message: String) : Exception(message)
 
 class HttpRequestFailure(val status: Int, message: String) : Exception(message)
 

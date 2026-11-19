@@ -1,58 +1,57 @@
 import Foundation
 
-/// The existing CLI owns this configuration. Native controls read it without rewriting its files.
-public struct ServeConfiguration: Sendable {
-  public let tailscale: Bool
-  public let lan: Bool
-  public let host: String?
-  public let port: Int?
-  public let sshManaged: Bool
-  public let noAccount: Bool
-  public init(_ value: JSONValue) {
-    tailscale = value["tailscale"].bool
-    lan = value["lan"].bool
-    host = value["host"].string
-    if case .number(let number) = value["port"], number.isFinite, number.rounded() == number,
-      (1...65535).contains(number)
-    {
-      port = Int(number)
-    } else {
-      port = nil
-    }
-    sshManaged = value["sshManaged"].bool
-    noAccount = value["noAccount"].bool
+/// Commands that share a computer with this app's other devices. The CLI owns all state; these
+/// only build its literal arguments and read what it prints.
+public enum ShareComputer {
+  /// `zuse serve` with the chosen sharing, as a person would type it.
+  public static func serveCommand(lan: Bool, tailscaleServe: Bool = false) -> String {
+    (["zuse"] + serveArguments(lan: lan, tailscaleServe: tailscaleServe)).joined(separator: " ")
   }
-  public func startArguments(tailscale: Bool, lan: Bool) -> [String] {
-    var arguments = ["serve", "start"]
-    if tailscale { arguments.append("--tailscale") }
-    if lan { arguments.append("--lan") }
-    if noAccount { arguments.append("--no-account") }
-    // An explicit local-sharing change replaces the old bind choice. Otherwise preserve it.
-    if self.lan == lan {
-      if sshManaged { arguments.append("--ssh-managed") }
-      if let host { arguments += ["--host", host] }
+  public static func serveArguments(lan: Bool, tailscaleServe: Bool = false) -> [String] {
+    var arguments = ["serve"]
+    if lan {
+      arguments.append("--lan")
+      // The CLI only accepts --tailscale-serve together with --lan.
+      if tailscaleServe { arguments.append("--tailscale-serve") }
     }
-    if let port { arguments += ["--port", String(port)] }
     return arguments
   }
+  /// Keeps `zuse serve` running across restarts, with the same sharing flags.
+  public static func serviceArguments(lan: Bool, tailscaleServe: Bool = false) -> [String] {
+    ["daemon", "install", "--serve"]
+      + Array(serveArguments(lan: lan, tailscaleServe: tailscaleServe).dropFirst())
+  }
+  public static let removeServiceArguments = ["daemon", "uninstall"]
+  public static let statusArguments = ["status"]
+  public static func pairArguments(label: String) -> [String] {
+    ["pair", "--json", "--label", label]
+  }
+  public static let pairCommand = "zuse pair --app"
+  public static let linkCommand = "zuse link"
 }
 
-public enum ServeRuntimeFile: String, Sendable {
-  case configuration = "serve-settings.json"
-  case pairing = "pairing.json"
-  public func read(directory: String) throws -> JSONValue? {
-    let file = URL(fileURLWithPath: directory).appendingPathComponent(rawValue)
-    guard FileManager.default.fileExists(atPath: file.path) else { return nil }
-    let handle = try FileHandle(forReadingFrom: file)
-    defer { try? handle.close() }
-    let data = try handle.read(upToCount: 64 * 1024 + 1) ?? Data()
-    guard data.count <= 64 * 1024 else {
-      throw ClientError("The service configuration file is too large.")
+/// One line from `zuse pair --json`.
+public struct PairJSON: Sendable, Equatable {
+  public let app: String?
+  public let browser: String?
+  public let selfSigned: Bool
+  public let localOnly: Bool
+  /// The link an app should open.
+  public var invitation: String? { app ?? browser }
+
+  public init(output: String) throws {
+    for line in output.split(whereSeparator: \.isNewline).reversed() {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      guard trimmed.hasPrefix("{"),
+        let value = try? JSONDecoder().decode(JSONValue.self, from: Data(trimmed.utf8)),
+        case .object = value
+      else { continue }
+      app = value["app"].string
+      browser = value["browser"].string
+      selfSigned = value["selfSigned"].bool
+      localOnly = value["localOnly"].bool
+      return
     }
-    let value = try JSONDecoder().decode(JSONValue.self, from: data)
-    guard case .object = value else {
-      throw ClientError("The service configuration file is invalid.")
-    }
-    return value
+    throw ClientError("Zuse did not print an invitation. Update Zuse on this computer.")
   }
 }

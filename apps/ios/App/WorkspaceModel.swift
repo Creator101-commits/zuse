@@ -22,12 +22,21 @@ import ZuseCore
   private var gitWorker: Task<Void, Never>?
   var projects: [ProjectRow] = []
   var sessions: [SessionRow] = []
+  /// Archived chats on the open computer, loaded with the session catalog.
+  var archivedSessions: [SessionRow] = []
+  /// Chats with a restore request in flight.
+  var restoringChats = Set<String>()
   var selectedProject: ProjectRow?
   var selectedSession: SessionRow?
   var transcript = Transcript()
   var error: String?
   var connectionState = "Not connected" {
-    didSet { if connectionState != oldValue { updateConnectionIssue() } }
+    didSet {
+      guard connectionState != oldValue else { return }
+      updateConnectionIssue()
+      // "Last connected" means the last moment the connection worked.
+      if oldValue == "Connected" { recordActiveComputer() }
+    }
   }
   /// Set only when a failure outlasts automatic retries or needs the user; brief reconnects stay quiet.
   private(set) var connectionIssue = false
@@ -95,14 +104,81 @@ import ZuseCore
   private var foreground = true
   private var networkAvailable = true
   private let network = NWPathMonitor()
-  private(set) var linkRoute: PairedRouteStatus?
+  private(set) var linkRoute: PairedRouteStatus? {
+    didSet {
+      if let kind = linkRoute?.kind, kind != oldValue?.kind, connectionState == "Connected" {
+        recordActiveComputer(route: kind)
+      }
+    }
+  }
   private var linkResumes: Bool { linkRoute?.resumable == true && rpc != nil }
+  /// Held while the open connection runs through an SSH port forward.
+  private var sshLease: SSHSession?
+  private var sshForwardPort: Int?
   /// The connection state, plus the route it is using once there is one.
   var connectionSummary: String {
-    guard connectionState == "Connected", let route = linkRoute, let label = route.label else {
+    guard connectionState == "Connected", let label = activeRouteLabel else {
       return connectionState
     }
-    return route.rttMs.map { "\(label) · \($0) ms" } ?? label
+    return linkRoute?.rttMs.map { "\(label) · \($0) ms" } ?? label
+  }
+  /// "SSH tunnel" for forwarded connections, otherwise the route the link reports.
+  var activeRouteLabel: String? {
+    if case .remote(let connection) = source, connection.ssh?.tunnel == true { return "SSH tunnel" }
+    return linkRoute?.label
+  }
+  var activeConnectionID: String? {
+    if case .remote(let connection) = source { return connection.id }
+    return nil
+  }
+  var activeEnvironmentID: String? {
+    if case .environment(let id) = source { return id }
+    return nil
+  }
+  var isCloudActive: Bool {
+    if case .cloud = source { return true }
+    return false
+  }
+  private var activeState: ComputerState {
+    switch connectionState {
+    case "Connected": return .connected
+    case "Not connected": return .idle
+    default: return connectionIssue ? .unreachable : .connecting
+    }
+  }
+  func state(for connection: RemoteConnection) -> ComputerState {
+    activeConnectionID == connection.id ? activeState : .idle
+  }
+  func state(forEnvironment id: String) -> ComputerState {
+    activeEnvironmentID == id ? activeState : .idle
+  }
+  func statusLine(for connection: RemoteConnection) -> String {
+    let current = state(for: connection)
+    let saved = savedConnections.first { $0.id == connection.id } ?? connection
+    return ComputerStatusText.line(
+      current, route: current == .connected ? activeRouteLabel : nil,
+      rttMs: current == .connected && connection.ssh?.tunnel != true ? linkRoute?.rttMs : nil,
+      lastConnected: saved.lastConnectedAt)
+  }
+  /// The Computers button's dot; nil hides it when nothing is set up.
+  var computersIndicator: ComputerState? {
+    guard !savedConnections.isEmpty || !environments.isEmpty else { return nil }
+    switch source {
+    case .remote, .environment: return activeState
+    default: return .idle
+    }
+  }
+  private func recordActiveComputer(route: RouteKind? = nil) {
+    guard case .remote(let active) = source,
+      let index = savedConnections.firstIndex(where: { $0.id == active.id })
+    else { return }
+    var updated = savedConnections
+    updated[index].lastConnectedAt = Date()
+    if let route, active.ssh?.tunnel != true { updated[index].lastRoute = route }
+    do {
+      try Vault.write(JSONEncoder().encode(updated), key: "computers")
+      savedConnections = updated
+    } catch { self.error = error.localizedDescription }
   }
   private var drafts: [String: String] = [:]
   enum Source {
@@ -394,6 +470,9 @@ import ZuseCore
       try Vault.write(JSONEncoder().encode(updated), key: "computers")
       savedConnections = updated
       if case .remote(let active) = source, active.id == connection.id { disconnect() }
+      if let target = connection.ssh?.target {
+        Task { await SSHSessionPool.shared.close(target) }
+      }
     } catch { self.error = error.localizedDescription }
   }
   func renameComputer(_ connection: RemoteConnection, label: String) {
@@ -405,18 +484,34 @@ import ZuseCore
       savedConnections = profiles
     } catch { self.error = error.localizedDescription }
   }
-  func pair(_ value: String, certificatePin: String? = nil) async throws {
+  /// Opens an invitation. `ssh` records how the link was obtained; with `tunnel` set, a
+  /// loopback invitation is reached through an SSH port forward.
+  /// `allowLoopback` is for pairing the computer this app runs on.
+  func pair(
+    _ value: String, certificatePin: String? = nil, ssh: SSHAccess? = nil,
+    allowLoopback: Bool = false
+  ) async throws {
     let current = selection
+    var value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    // A pasted message can wrap the link in other text.
+    if !PairingLink.isNativeInvitation(value), let found = InvitationLink.extract(from: value) {
+      value = found
+    }
     if PairingLink.isNativeInvitation(value) {
       guard certificatePin == nil else {
         throw ClientError("Native invitations use the server's trusted TLS certificate.")
+      }
+      let invitation = try InvitationLink(value)
+      if invitation.isLoopback && ssh?.tunnel != true && !allowLoopback {
+        throw ClientError(InvitationLink.loopbackOnlyMessage, code: "loopback-invitation")
       }
       let bridge = try NativePairing()
       let start = try bridge.request(["op": .string("start"), "link": .string(value)])
       defer { _ = try? bridge.request(["op": .string("close"), "handle": start["handle"]]) }
       guard let address = start["url"].string else { throw ClientError("Missing paired endpoint.") }
       let connection = RemoteConnection(
-        address: address, token: "", label: "Computer", pairingLink: value)
+        address: address, token: "", label: ssh?.target.host ?? "Computer", pairingLink: value,
+        ssh: ssh)
       openRemote(connection)
       return
     }
@@ -535,8 +630,27 @@ import ZuseCore
           url.queryItems = items
           guard let address = url.url else { throw ClientError("Invalid remote address.") }
           if let invitation = connection.pairingLink {
+            var link = invitation
+            if let ssh = connection.ssh, ssh.tunnel {
+              // Re-establish the forward first; the paired link then treats it as one more route.
+              let session = try await SSHSessionPool.shared.acquire(
+                ssh.target, expectedHostKey: ssh.hostKey)
+              guard current == selection, !Task.isCancelled else {
+                await SSHSessionPool.shared.release(session)
+                return
+              }
+              sshLease = session
+              let parsed = try InvitationLink(invitation)
+              let port = try await session.forward(toHost: parsed.host, port: parsed.port)
+              guard current == selection, !Task.isCancelled else {
+                await session.stopForwarding(port)
+                return
+              }
+              sshForwardPort = port
+              link = parsed.rewritingOrigin(port: port)
+            }
             client = try RPCClient(
-              pairingLink: invitation,
+              pairingLink: link,
               onRoute: { [weak self] status in
                 Task { @MainActor in self?.linkRoute = status }
               })
@@ -572,6 +686,9 @@ import ZuseCore
             var verified = connection
             verified.environmentID = identity ?? connection.environmentID
             verified.label = connection.label ?? descriptor["label"].string
+            verified.lastConnectedAt = Date()
+            let savedRoute = savedConnections.first { $0.id == connection.id }?.lastRoute
+            verified.lastRoute = linkRoute?.kind ?? savedRoute ?? connection.lastRoute
             let profiles = ConnectionProfiles.saving(verified, in: savedConnections)
             try Vault.write(JSONEncoder().encode(profiles), key: "computers")
             try Vault.write(nil, key: "remote")
@@ -715,6 +832,21 @@ import ZuseCore
   func refreshSessionCatalog() async {
     guard let rpc else { return }
     let current = selection
+    if await rpc.canonical {
+      // One snapshot gives both the active list and the archive behind the home filter.
+      do {
+        let (active, archived) = try await CanonicalWorkspace(rpc).chatsWithArchived()
+        guard current == selection, !Task.isCancelled else { return }
+        let known = Set(projects.map(\.id))
+        sessions = active.filter { known.contains($0.projectId) }
+        archivedSessions = archived.filter { known.contains($0.projectId) }
+        catalogProblem = nil
+      } catch {
+        guard current == selection, !Task.isCancelled else { return }
+        catalogProblem = "Some project chats could not be loaded. Pull to refresh."
+      }
+      return
+    }
     let result = await SessionCatalog.load(projects.map(\.id)) { projectID in
       if await rpc.canonical {
         return try await CanonicalWorkspace(rpc).sessions(projectID: projectID)
@@ -727,6 +859,34 @@ import ZuseCore
     sessions = result.rows + sessions.filter { failed.contains($0.projectId) }
     catalogProblem =
       failed.isEmpty ? nil : "Some project chats could not be loaded. Pull to refresh."
+  }
+  /// Brings an archived chat on the open computer back to the active list.
+  @discardableResult func restoreChat(_ session: SessionRow) async -> Bool {
+    #if DEBUG
+      if ProcessInfo.processInfo.arguments.contains("--native-preview") {
+        archivedSessions.removeAll { $0.id == session.id }
+        sessions.append(session)
+        return true
+      }
+    #endif
+    guard let rpc, connectionState == "Connected", await rpc.canonical else {
+      error = "Connect to \(connectedComputer ?? "this computer") to restore this chat."
+      return false
+    }
+    guard restoringChats.insert(session.id).inserted else { return false }
+    let current = selection
+    defer { if current == selection { restoringChats.remove(session.id) } }
+    do {
+      try await CanonicalWorkspace(rpc).setArchived(chatID: session.id, archived: false)
+      guard current == selection else { return false }
+      archivedSessions.removeAll { $0.id == session.id }
+      if !sessions.contains(where: { $0.id == session.id }) { sessions.append(session) }
+      await refreshSessionCatalog()
+      return current == selection
+    } catch {
+      if current == selection { self.error = error.localizedDescription }
+      return false
+    }
   }
   func selectSession(_ session: SessionRow) {
     #if DEBUG
@@ -1173,8 +1333,18 @@ import ZuseCore
     sessionCatalogTask?.cancel()
     catalogProblem = nil
     timelineTask?.cancel()
+    if connectionState == "Connected" { recordActiveComputer() }
     if let rpc { Task { await rpc.close() } }
     rpc = nil
+    if let lease = sshLease {
+      let port = sshForwardPort
+      Task {
+        if let port { await lease.stopForwarding(port) }
+        await SSHSessionPool.shared.release(lease)
+      }
+    }
+    sshLease = nil
+    sshForwardPort = nil
     source = nil
     connectedComputer = nil
     if let archive { Task { await archive.releaseMemory() } }
@@ -1183,6 +1353,8 @@ import ZuseCore
     outbox = []
     projects = []
     sessions = []
+    archivedSessions = []
+    restoringChats = []
     selectedSession = nil
     selectedProject = nil
     transcript = Transcript()
@@ -1420,4 +1592,32 @@ import ZuseCore
     }
   }
 
+  /// Waits for a computer's connection to work or fail.
+  func waitForConnection(_ id: String, timeout: Duration = .seconds(30)) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: timeout)
+    while ContinuousClock.now < deadline, !Task.isCancelled {
+      guard activeConnectionID == id else { return false }
+      if rpc != nil && ["Connected", "Synchronizing…"].contains(connectionState) { return true }
+      if connectionState == "Connection needs attention" { return false }
+      try? await Task.sleep(for: .milliseconds(250))
+    }
+    return false
+  }
+
+  /// Opens the computer if needed and times one engine round trip, in milliseconds.
+  func measureRoundTrip(to connection: RemoteConnection) async throws -> Int {
+    if activeConnectionID != connection.id {
+      openRemote(connection)
+    } else if rpc == nil && !loading {
+      reconnect()
+    }
+    guard await waitForConnection(connection.id, timeout: .seconds(25)), let rpc else {
+      throw ClientError(connectionProblem ?? "Couldn’t reach \(connection.displayName).")
+    }
+    let started = ContinuousClock.now
+    let native = await rpc.canonical
+    _ = try await rpc.call(native ? "EngineInfo" : "connect.describe")
+    let elapsed = started.duration(to: .now).components
+    return Int(elapsed.seconds) * 1000 + Int(elapsed.attoseconds / 1_000_000_000_000_000)
+  }
 }

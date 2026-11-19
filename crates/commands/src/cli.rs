@@ -75,6 +75,8 @@ pub enum Command {
         label: Option<String>,
         #[arg(long)]
         app: bool,
+        #[arg(long, conflicts_with = "app")]
+        json: bool,
     },
     Link {
         #[arg(long)]
@@ -209,6 +211,7 @@ pub(crate) fn argument_help(id: &str, l10n: &Localizer) -> Option<String> {
         "account" => m::account(l10n),
         "label" => m::pair_label(l10n),
         "app" => m::pair_app(l10n),
+        "json" => m::pair_json(l10n),
         "name" => m::link_name(l10n),
         "no_browser" => m::login_no_browser(l10n),
         "serve" => m::daemon_serve(l10n),
@@ -520,7 +523,8 @@ mod tests {
             cli.command,
             Some(Command::Pair {
                 label: None,
-                app: true
+                app: true,
+                json: false,
             })
         ));
         let cli = parse(&["zuse", "--ipc-port", "4001", "ssh-proxy", "zuse-w1"]);

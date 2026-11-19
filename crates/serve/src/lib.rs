@@ -237,7 +237,22 @@ impl BrowserServer {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.serve_private(listener, None, None, signal).await
+        self.serve_private(listener, None, None, None, signal).await
+    }
+
+    /// [`Self::serve_paired_only`], admitting only private peers `allow` accepts, so a host can
+    /// offer its local network without its tailnet or the other way round.
+    pub async fn serve_paired_only_from<F>(
+        self,
+        listener: TcpListener,
+        allow: PeerFilter,
+        signal: F,
+    ) -> anyhow::Result<()>
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.serve_private(listener, None, None, Some(allow), signal)
+            .await
     }
 
     /// Serve the browser app beside paired RPC, to private network peers only.
@@ -254,7 +269,7 @@ impl BrowserServer {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        self.serve_private(listener, Some(assets), tls, signal)
+        self.serve_private(listener, Some(assets), tls, None, signal)
             .await
     }
 
@@ -263,6 +278,7 @@ impl BrowserServer {
         listener: TcpListener,
         assets: Option<PathBuf>,
         tls: Option<TlsConfig>,
+        allow: Option<PeerFilter>,
         signal: F,
     ) -> anyhow::Result<()>
     where
@@ -288,12 +304,15 @@ impl BrowserServer {
         }
         match tls {
             Some(tls) => {
-                axum::serve(PrivatePeers(tls::Listener::new(listener, tls)), router)
-                    .with_graceful_shutdown(signal)
-                    .await?
+                axum::serve(
+                    PrivatePeers(tls::Listener::new(listener, tls), allow),
+                    router,
+                )
+                .with_graceful_shutdown(signal)
+                .await?
             }
             None => {
-                axum::serve(PrivatePeers(listener.tap_io(no_delay)), router)
+                axum::serve(PrivatePeers(listener.tap_io(no_delay), allow), router)
                     .with_graceful_shutdown(signal)
                     .await?
             }
@@ -384,8 +403,11 @@ async fn no_owner_session() -> Response {
         .into_response()
 }
 
+/// Decides whether a private peer may connect, by its address.
+pub type PeerFilter = std::sync::Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>;
+
 /// Accepts private network peers only, for any transport on top of TCP.
-struct PrivatePeers<L>(L);
+struct PrivatePeers<L>(L, Option<PeerFilter>);
 impl<L> axum::serve::Listener for PrivatePeers<L>
 where
     L: axum::serve::Listener<Addr = std::net::SocketAddr>,
@@ -395,7 +417,10 @@ where
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
             let (io, peer) = self.0.accept().await;
-            if zuse_remote::routes::is_private_host(&peer.ip().to_canonical().to_string()) {
+            let ip = peer.ip().to_canonical();
+            if zuse_remote::routes::is_private_host(&ip.to_string())
+                && self.1.as_ref().is_none_or(|allow| allow(ip))
+            {
                 return (io, peer);
             }
         }

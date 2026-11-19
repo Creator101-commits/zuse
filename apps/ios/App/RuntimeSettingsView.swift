@@ -214,7 +214,9 @@ private struct SettingContainer: View {
           )
           .contextMenu {
             if fields[key] != nil, schema.canRemoveField(key, in: definition) {
-              Button("Remove override", role: .destructive) { value = value.removing(key) }
+              Button("Remove override", systemImage: "trash", role: .destructive) {
+                value = value.removing(key)
+              }
             }
           }
         }

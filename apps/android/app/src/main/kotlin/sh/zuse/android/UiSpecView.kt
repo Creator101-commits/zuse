@@ -340,15 +340,11 @@ private fun UiNode(
                     var expanded by remember { mutableStateOf(false) }
                     Box {
                         TextButton(onClick = { expanded = true }, enabled = enabled) { Text(value) }
-                        DropdownMenu(expanded, { expanded = false }) {
+                        ZuseMenu(expanded, { expanded = false }, alignEnd = false) {
                             options.forEach { option ->
-                                DropdownMenuItem(
-                                    text = { Text(option) },
-                                    onClick = {
-                                        values[name] = option.json()
-                                        expanded = false
-                                    },
-                                )
+                                MenuItem(option, selected = option == value) {
+                                    values[name] = option.json()
+                                }
                             }
                         }
                     }

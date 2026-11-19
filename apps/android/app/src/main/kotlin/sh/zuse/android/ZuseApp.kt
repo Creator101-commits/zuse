@@ -43,14 +43,16 @@ fun ZuseApp(workspace: WorkspaceViewModel, openUri: (Uri) -> Unit) {
     var settingsPage by rememberSaveable { mutableStateOf("home") }
     var cloud by rememberSaveable { mutableStateOf(false) }
     var diffs by rememberSaveable { mutableStateOf(false) }
+    var computers by rememberSaveable { mutableStateOf<String?>(null) }
     val snackbar = remember { SnackbarHostState() }
     val error = workspace.error
-    LaunchedEffect(error, settings, cloud, diffs) {
+    LaunchedEffect(error, settings, cloud, diffs, computers) {
         if (
             error != null &&
                 !settings &&
                 !cloud &&
                 !diffs &&
+                computers == null &&
                 workspace.pairingLink == null
         ) {
             snackbar.showSnackbar(error)
@@ -70,7 +72,7 @@ fun ZuseApp(workspace: WorkspaceViewModel, openUri: (Uri) -> Unit) {
                 scope.launch { navigator.navigateTo(ListDetailPaneScaffoldRole.Detail, "new") }
             }
             workspace.signedIn -> cloud = true
-            else -> openSettings("pair")
+            else -> computers = "add"
         }
         Unit
     }
@@ -98,7 +100,8 @@ fun ZuseApp(workspace: WorkspaceViewModel, openUri: (Uri) -> Unit) {
                             navigator.scaffoldValue[ListDetailPaneScaffoldRole.Detail] !=
                                 PaneAdaptedValue.Hidden,
                         onSettings = { openSettings("home") },
-                        onPair = { openSettings("pair") },
+                        onComputers = { computers = "list" },
+                        onPair = { computers = "add" },
                         onSignIn = { workspace.signIn(openUri) },
                         onNewChat = startNewChat,
                         onOpen = { row ->
@@ -138,7 +141,7 @@ fun ZuseApp(workspace: WorkspaceViewModel, openUri: (Uri) -> Unit) {
             },
         )
     }
-    if (settings || workspace.pairingLink != null)
+    if (settings)
         SettingsSheet(
             workspace,
             openUri,
@@ -147,10 +150,28 @@ fun ZuseApp(workspace: WorkspaceViewModel, openUri: (Uri) -> Unit) {
                 settings = false
                 cloud = true
             },
+            onComputers = {
+                settings = false
+                computers = "list"
+            },
             onClose = {
                 settings = false
                 settingsPage = "home"
+            },
+        )
+    if (computers != null || workspace.pairingLink != null)
+        ComputersSheet(
+            workspace,
+            openUri,
+            initialPage = computers ?: "add",
+            onCloud = {
+                computers = null
+                cloud = true
+            },
+            onClose = {
+                computers = null
                 workspace.pairingLink = null
+                workspace.resetSsh()
             },
         )
     if (cloud) CloudSheet(workspace, openUri, onClose = { cloud = false })
@@ -206,6 +227,7 @@ private fun HomePane(
     workspace: WorkspaceViewModel,
     showSelection: Boolean,
     onSettings: () -> Unit,
+    onComputers: () -> Unit,
     onPair: () -> Unit,
     onSignIn: () -> Unit,
     onNewChat: () -> Unit,
@@ -230,7 +252,8 @@ private fun HomePane(
     }
     val places = workspace.places
     val filter = workspace.activePlaceFilter
-    val groups = ChatList.groups(workspace.chatRows(), search, filter)
+    val archive = workspace.archiveFilter
+    val groups = ChatList.groups(workspace.chatRows(), search, filter, archive)
     val unconfigured = workspace.unconfigured
     Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(Modifier.fillMaxSize()) {
@@ -247,10 +270,11 @@ private fun HomePane(
                     fontWeight = FontWeight.SemiBold,
                 )
                 if (places.size > 1) PlaceSwitcher(workspace, places, filter)
+                if (!unconfigured) ComputersButton(workspace, onComputers)
                 SmallIcon(Icons.Outlined.Settings, "Settings", onSettings)
             }
             if (!unconfigured) {
-                SearchField(search, { search = it })
+                SearchField(search, { search = it }, archive) { workspace.archiveFilter = it }
                 HomeBanner(workspace)
             }
             val refreshing = workspace.inboxRefreshing || workspace.cloudLoading
@@ -268,15 +292,22 @@ private fun HomePane(
                             ProjectHeader(group.title, group.place)
                         }
                         items(group.rows, key = { it.key }, contentType = { "chat" }) { row ->
-                            ChatListRow(row, showSelection && workspace.isOpen(row)) {
-                                onOpen(row)
-                            }
+                            if (row.archived) ArchivedChatRow(workspace, row, archive == ArchiveFilter.All)
+                            else
+                                ChatListRow(row, showSelection && workspace.isOpen(row)) {
+                                    onOpen(row)
+                                }
                         }
                     }
                     if (groups.isEmpty())
                         item(key = "empty") {
                             when {
                                 unconfigured -> ConnectEmptyState(onPair, onSignIn)
+                                archive == ArchiveFilter.Archived && search.isBlank() ->
+                                    QuietEmptyState(
+                                        "No archived chats",
+                                        "Chats you archive show up here, ready to restore.",
+                                    )
                                 search.isNotBlank() ->
                                     QuietEmptyState(
                                         "No matching chats",
@@ -344,26 +375,32 @@ private fun PlaceSwitcher(
             )
             Icon(Icons.Outlined.ExpandMore, null, Modifier.padding(start = 2.dp).size(18.dp))
         }
-        DropdownMenu(open, { open = false }) {
-            (listOf<Pair<String?, String>>(null to "All computers") + places).forEach {
-                (key, name) ->
-                DropdownMenuItem(
-                    text = { Text(name) },
-                    trailingIcon = {
-                        if (key == filter) Icon(Icons.Outlined.Check, "Selected", Modifier.size(18.dp))
-                    },
-                    onClick = {
-                        open = false
-                        workspace.placeFilter = key
-                    },
-                )
+        ZuseMenu(open, { open = false }) {
+            MenuItem("All computers", Icons.Outlined.Devices, selected = filter == null) {
+                workspace.placeFilter = null
+            }
+            MenuDivider()
+            places.forEach { (key, name) ->
+                MenuItem(
+                    name,
+                    if (key == WorkspaceViewModel.CLOUD_PLACE) Icons.Outlined.CloudQueue
+                    else Icons.Outlined.Laptop,
+                    selected = key == filter,
+                ) {
+                    workspace.placeFilter = key
+                }
             }
         }
     }
 }
 
 @Composable
-private fun SearchField(value: String, onChange: (String) -> Unit) {
+private fun SearchField(
+    value: String,
+    onChange: (String) -> Unit,
+    archive: ArchiveFilter,
+    onArchive: (ArchiveFilter) -> Unit,
+) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         shape = RoundedCornerShape(24.dp),
@@ -381,6 +418,7 @@ private fun SearchField(value: String, onChange: (String) -> Unit) {
             )
             BasicSearch(value, onChange, Modifier.weight(1f))
             if (value.isNotEmpty()) SmallIcon(Icons.Outlined.Close, "Clear search", { onChange("") })
+            ArchiveFilterButton(archive, onArchive)
         }
     }
 }
@@ -501,6 +539,14 @@ private fun ChatListRow(row: ChatRow, selected: Boolean, onClick: () -> Unit) {
     ) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // A cloud chat is an ordinary chat; only the dithered cloud says where it runs.
+                if (row.placeKey == WorkspaceViewModel.CLOUD_PLACE)
+                    Icon(
+                        androidx.compose.ui.res.painterResource(R.drawable.dither_cloud),
+                        "Zuse Cloud",
+                        Modifier.padding(end = 6.dp).size(14.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 Text(
                     row.title,
                     Modifier.weight(1f),
@@ -589,14 +635,14 @@ private fun ConnectEmptyState(onPair: () -> Unit, onSignIn: () -> Unit) {
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
         Text(
-            "Your chats run on your computer. Open Zuse there, choose Devices, and scan the code or paste the pairing link.",
+            "Your chats run on your own computer. Scan the code from Zuse on it, paste a link, or sign in over SSH.",
             Modifier.padding(top = 8.dp),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
         )
         Spacer(Modifier.height(28.dp))
-        CompactAction("Pair a computer", onClick = onPair)
+        CompactAction("Add computer", onClick = onPair)
         TextButton(onClick = onSignIn, modifier = Modifier.padding(top = 8.dp)) {
             Text("Sign in to Zuse Cloud")
         }
@@ -767,54 +813,49 @@ private fun ConversationPane(
             actions = {
                 Box {
                     SmallIcon(Icons.Outlined.MoreVert, "Chat actions", { actions = true })
-                    DropdownMenu(actions, { actions = false }) {
-                        if (session != null && workspace.canManageChats) {
-                            DropdownMenuItem(
-                                text = { Text("Rename chat") },
-                                enabled = !workspace.chatActionBusy,
-                                onClick = {
-                                    actions = false
-                                    chatTitle = session.title
-                                    renaming = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Archive chat") },
-                                enabled = !workspace.chatActionBusy,
-                                onClick = {
-                                    actions = false
-                                    archiving = true
-                                },
-                            )
-                        }
-                        DropdownMenuItem(
-                            text = { Text("New chat") },
+                    ZuseMenu(actions, { actions = false }) {
+                        MenuItem(
+                            "New chat",
+                            Icons.Outlined.Edit,
                             enabled =
                                 workspace.connected ||
                                     workspace.signedIn ||
                                     (BuildConfig.DEBUG && session?.id == "preview-session"),
-                            onClick = {
-                                actions = false
-                                onNewChat()
-                            },
+                            onClick = onNewChat,
                         )
                         if (session != null)
-                            DropdownMenuItem(
-                                text = { Text("Review changes") },
+                            MenuItem(
+                                "Review changes",
+                                Icons.Outlined.Difference,
                                 enabled = workspace.connected,
-                                onClick = {
-                                    actions = false
-                                    onDiffs()
-                                },
+                                onClick = onDiffs,
                             )
                         if (workspace.source != null)
-                            DropdownMenuItem(
-                                text = { Text("Reconnect") },
-                                onClick = {
-                                    actions = false
-                                    workspace.reconnect()
-                                },
+                            MenuItem(
+                                "Reconnect",
+                                Icons.Outlined.Refresh,
+                                detail = workspace.sourceLabel,
+                                onClick = workspace::reconnect,
                             )
+                        if (session != null && workspace.canManageChats) {
+                            MenuDivider()
+                            MenuItem(
+                                "Rename chat",
+                                Icons.Outlined.DriveFileRenameOutline,
+                                enabled = !workspace.chatActionBusy,
+                            ) {
+                                chatTitle = session.title
+                                renaming = true
+                            }
+                            MenuItem(
+                                "Archive chat",
+                                Icons.Outlined.Archive,
+                                destructive = true,
+                                enabled = !workspace.chatActionBusy,
+                            ) {
+                                archiving = true
+                            }
+                        }
                     }
                 }
             },
@@ -896,7 +937,11 @@ private fun ConversationPane(
                     ) { item ->
                         PendingRow(workspace, item)
                     }
-                    if (workspace.activeTurnId != null)
+                    // A running activity line already says what's happening.
+                    if (
+                        workspace.activeTurnId != null &&
+                            groups.lastOrNull()?.let { it.isActivity && it.hasRunningTool } != true
+                    )
                         item("working") {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -978,6 +1023,112 @@ private fun PendingRow(workspace: WorkspaceViewModel, item: PendingMessage) {
             ) {
                 Text("Remove")
             }
+        }
+    }
+}
+
+
+/**
+ * Which chats the list shows, tucked into the search bar: an icon while showing active chats, and
+ * a small label when another filter is on so the list never looks mysteriously short.
+ */
+@Composable
+private fun ArchiveFilterButton(archive: ArchiveFilter, onArchive: (ArchiveFilter) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            Modifier.heightIn(min = 40.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(
+                    if (archive != ArchiveFilter.Active) MaterialTheme.colorScheme.surfaceContainerHighest
+                    else Color.Transparent
+                )
+                .clickable(onClickLabel = "Choose which chats to show") { open = true }
+                .semantics {
+                    contentDescription =
+                        when (archive) {
+                            ArchiveFilter.Active -> "Showing active chats"
+                            ArchiveFilter.Archived -> "Showing archived chats"
+                            ArchiveFilter.All -> "Showing all chats"
+                        }
+                }
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (archive != ArchiveFilter.Active)
+                Text(
+                    archive.label,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            Icon(
+                Icons.Outlined.FilterList,
+                null,
+                Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        ZuseMenu(open, { open = false }) {
+            MenuLabel("Show")
+            MenuItem("Active", Icons.Outlined.ChatBubbleOutline, selected = archive == ArchiveFilter.Active) {
+                onArchive(ArchiveFilter.Active)
+            }
+            MenuItem("Archived", Icons.Outlined.Archive, selected = archive == ArchiveFilter.Archived) {
+                onArchive(ArchiveFilter.Archived)
+            }
+            MenuItem("All chats", Icons.Outlined.AllInbox, selected = archive == ArchiveFilter.All) {
+                onArchive(ArchiveFilter.All)
+            }
+        }
+    }
+}
+
+/** An archived chat: quieter, and tapping offers to bring it back rather than opening it. */
+@Composable
+private fun ArchivedChatRow(workspace: WorkspaceViewModel, row: ChatRow, tagged: Boolean) {
+    var menu by remember { mutableStateOf(false) }
+    val time = ChatList.relativeTime(row.activityAt)
+    Box {
+        Row(
+            Modifier.fillMaxWidth()
+                .padding(horizontal = 8.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .clickable(onClickLabel = "Restore options", enabled = !workspace.chatActionBusy) { menu = true }
+                .semantics(mergeDescendants = true) {}
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(
+                Icons.Outlined.Archive,
+                null,
+                Modifier.size(15.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .7f),
+            )
+            Text(
+                row.title,
+                Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (tagged)
+                Text(
+                    "Archived",
+                    Modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(6.dp))
+                        .padding(horizontal = 6.dp, vertical = 1.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            if (time.isNotEmpty())
+                Text(time, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        ZuseMenu(menu, { menu = false }) {
+            MenuItem("Restore and open", Icons.Outlined.Unarchive) { workspace.restoreChat(row, open = true) }
+            MenuItem("Restore", Icons.Outlined.Restore) { workspace.restoreChat(row, open = false) }
         }
     }
 }

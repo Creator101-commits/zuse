@@ -44,6 +44,11 @@
             id: "preview-\(index)", projectId: "preview-project", title: title,
             providerId: "Preview", model: "sample-balanced", worktreeId: nil)
         }
+        archivedSessions = [
+          SessionRow(
+            id: "preview-archived", projectId: "preview-project", title: "Try the old sidebar",
+            providerId: "Preview", model: "sample-balanced", worktreeId: nil)
+        ]
       }
       projects = [ProjectRow(id: "preview-project", name: "Zuse · Preview")]
       selectedProject = projects.first

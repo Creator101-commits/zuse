@@ -50,6 +50,12 @@ pub struct Start {
     pub port: Option<u16>,
     #[serde(default)]
     pub tailscale_serve: bool,
+    /// Offer the local network. Absent keeps the saved choice (on by default).
+    #[serde(default)]
+    pub lan: Option<bool>,
+    /// Offer the tailnet (Tailscale or Headscale). Absent keeps the saved choice.
+    #[serde(default)]
+    pub tailnet: Option<bool>,
 }
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +65,9 @@ pub struct Status {
     pub port: Option<u16>,
     pub tailscale_available: bool,
     pub tailscale_serve: bool,
+    /// Which networks are offered when running.
+    pub lan: bool,
+    pub tailnet: bool,
     pub routes: Vec<Route>,
     pub browser_origin: Option<String>,
     pub browser_self_signed: bool,
@@ -72,6 +81,34 @@ struct Saved {
     port: u16,
     tailscale_serve: bool,
     enabled: bool,
+    #[serde(default = "offered")]
+    lan: bool,
+    #[serde(default = "offered")]
+    tailnet: bool,
+}
+/// Settings saved before networks could be chosen offered both.
+fn offered() -> bool {
+    true
+}
+impl Saved {
+    /// Whether a peer at `ip` reaches this host over a network the user offers.
+    fn admits(&self, ip: IpAddr) -> bool {
+        if ip.is_loopback() {
+            return true;
+        }
+        if is_tailnet_host(&ip.to_string()) {
+            self.tailnet
+        } else {
+            self.lan
+        }
+    }
+    fn offers(&self, kind: RouteKind) -> bool {
+        match kind {
+            RouteKind::Lan => self.lan,
+            RouteKind::Tailnet => self.tailnet,
+            _ => true,
+        }
+    }
 }
 fn read_saved(profile: &Path, device: &str) -> anyhow::Result<Option<Saved>> {
     let bytes = match std::fs::read(profile.join(FILE)) {
@@ -350,6 +387,8 @@ impl State {
                 .saved
                 .as_ref()
                 .is_some_and(|saved| saved.tailscale_serve),
+            lan: self.saved.as_ref().is_none_or(|saved| saved.lan),
+            tailnet: self.saved.as_ref().is_none_or(|saved| saved.tailnet),
             routes: self.routes.clone(),
             browser_origin: browser.as_ref().map(|(origin, _)| origin.clone()),
             browser_self_signed: browser.is_some_and(|(_, self_signed)| self_signed),
@@ -573,7 +612,12 @@ impl DirectAccess {
                 BrowserApp::default()
             });
         let signal = stop.clone();
-        let task = tokio::spawn(server.serve_paired_only(listener, signal.cancelled_owned()));
+        let admitted = saved.clone();
+        let task = tokio::spawn(server.serve_paired_only_from(
+            listener,
+            Arc::new(move |ip| admitted.admits(ip)),
+            signal.cancelled_owned(),
+        ));
         let serve_failed = saved.tailscale_serve
             && !enable_tailscale_serve(app.tailscale_target.unwrap_or(port)).await;
         state.running = Some(Running {
@@ -600,13 +644,24 @@ impl DirectAccess {
         options: Start,
         service: Arc<dyn zuse_rpc::RpcService>,
     ) -> anyhow::Result<Status> {
+        let previous = self.0.state.lock().await.saved.clone();
         self.halt().await;
+        let lan = options
+            .lan
+            .unwrap_or(previous.as_ref().is_none_or(|saved| saved.lan));
+        let tailnet = options
+            .tailnet
+            .unwrap_or(previous.as_ref().is_none_or(|saved| saved.tailnet));
+        anyhow::ensure!(lan || tailnet, "Choose at least one network to offer");
         let saved = Saved {
             version: 1,
             device_id: self.0.device.clone(),
             port: options.port.unwrap_or(DEFAULT_PORT),
-            tailscale_serve: options.tailscale_serve,
+            // Tailscale HTTPS is a tailnet route.
+            tailscale_serve: options.tailscale_serve && tailnet,
             enabled: true,
+            lan,
+            tailnet,
         };
         self.activate(saved, true, service).await
     }
@@ -744,6 +799,9 @@ impl DirectAccess {
                         .unwrap_or_default();
                     let mut routes =
                         interface_routes(&local_interfaces(), &addresses, running.port, cloud);
+                    if let Some(saved) = &state.saved {
+                        routes.retain(|route| saved.offers(route.kind));
+                    }
                     let serve = state
                         .saved
                         .as_ref()
@@ -782,6 +840,39 @@ impl DirectAccess {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saved_settings_from_before_network_choice_offer_both() {
+        let old: Saved = serde_json::from_str(
+            r#"{"version":1,"deviceId":"d","port":27660,"tailscaleServe":false,"enabled":true}"#,
+        )
+        .unwrap();
+        assert!(old.lan && old.tailnet);
+    }
+
+    #[test]
+    fn peers_are_admitted_only_over_offered_networks() {
+        let saved = |lan, tailnet| Saved {
+            version: 1,
+            device_id: "d".into(),
+            port: 1,
+            tailscale_serve: false,
+            enabled: true,
+            lan,
+            tailnet,
+        };
+        let wifi: IpAddr = "192.168.1.20".parse().unwrap();
+        let tailnet: IpAddr = "100.101.2.3".parse().unwrap();
+        let loopback: IpAddr = "127.0.0.1".parse().unwrap();
+        let only_tailnet = saved(false, true);
+        assert!(!only_tailnet.admits(wifi));
+        assert!(only_tailnet.admits(tailnet));
+        assert!(only_tailnet.admits(loopback));
+        assert!(!only_tailnet.offers(RouteKind::Lan));
+        let only_wifi = saved(true, false);
+        assert!(only_wifi.admits(wifi) && !only_wifi.admits(tailnet));
+        assert!(only_wifi.offers(RouteKind::Relay));
+    }
+
     use super::*;
     fn ip(text: &str) -> IpAddr {
         text.parse().unwrap()

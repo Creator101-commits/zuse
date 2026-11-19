@@ -30,6 +30,8 @@ enum Command {
         label: Option<String>,
         #[arg(long)]
         app: bool,
+        #[arg(long, conflicts_with = "app")]
+        json: bool,
     },
     Login,
     Logout,
@@ -97,7 +99,7 @@ pub fn main(arguments: Vec<OsString>, l10n: &Localizer) -> anyhow::Result<()> {
             crate::init_logging(crate::Logging::Stdio);
             return crate::mcp();
         }
-        Some(Command::Pair { label, app }) => remote::Action::Pair { label, app },
+        Some(Command::Pair { label, app, json }) => remote::Action::Pair { label, app, json },
         Some(Command::Login) => remote::Action::SignIn,
         Some(Command::Logout) => remote::Action::SignOut,
         Some(Command::Link { name }) => remote::Action::Link { name },
@@ -190,7 +192,8 @@ mod tests {
             args.command,
             Some(Command::Pair {
                 label: None,
-                app: true
+                app: true,
+                json: false,
             })
         ));
     }

@@ -8,12 +8,33 @@ import ZuseCore
   import AppKit
 #endif
 
+/// The profile the sign-in response carries; absent from credentials saved by older versions.
+struct AccountUser: Codable, Sendable {
+  let firstName: String?
+  let lastName: String?
+  let email: String?
+  enum CodingKeys: String, CodingKey {
+    case firstName = "first_name"
+    case lastName = "last_name"
+    case email
+  }
+}
+
 struct Credentials: Codable, Sendable {
   let accessToken: String
   let refreshToken: String
+  var user: AccountUser?
   enum CodingKeys: String, CodingKey {
     case accessToken = "access_token"
     case refreshToken = "refresh_token"
+    case user
+  }
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    accessToken = try container.decode(String.self, forKey: .accessToken)
+    refreshToken = try container.decode(String.self, forKey: .refreshToken)
+    // The profile is only for display; an unexpected shape must never block sign-in.
+    user = try? container.decodeIfPresent(AccountUser.self, forKey: .user)
   }
   var claims: JSONValue? {
     let parts = accessToken.split(separator: ".")
@@ -83,6 +104,18 @@ final class Account: NSObject, ASWebAuthenticationPresentationContextProviding {
   private var refresh: Task<Credentials, Error>?
   private(set) var generation = UUID()
   private let key = "account"
+  /// Shown in Settings; nil when neither the sign-in response nor the token carries a name.
+  var displayName: String? {
+    let user = credentials?.user
+    let name = [user?.firstName, user?.lastName].compactMap { $0 }.joined(separator: " ")
+      .trimmingCharacters(in: .whitespaces)
+    if !name.isEmpty { return name }
+    return credentials?.claims?["name"].string.flatMap { $0.isEmpty ? nil : $0 }
+  }
+  var email: String? {
+    let value = credentials?.user?.email ?? credentials?.claims?["email"].string
+    return value?.isEmpty == false ? value : nil
+  }
   var archiveIdentity: String? {
     guard let claims = credentials?.claims, let subject = claims["sub"].string else { return nil }
     return "\(apiURL.absoluteString)|\(subject)|\(claims["org_id"].string ?? "personal")"
@@ -196,6 +229,9 @@ final class Account: NSObject, ASWebAuthenticationPresentationContextProviding {
     reauthenticationRequired = false
   }
   private func save(_ value: Credentials) throws {
+    var value = value
+    // A refresh response may omit the profile; keep the one from sign-in.
+    if value.user == nil { value.user = credentials?.user }
     try Vault.write(JSONEncoder().encode(value), key: key)
     credentials = value
     signedIn = true

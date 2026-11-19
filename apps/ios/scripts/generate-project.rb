@@ -47,7 +47,12 @@ textual = project.new(Xcodeproj::Project::Object::XCRemoteSwiftPackageReference)
 textual.repositoryURL = 'https://github.com/gonzalezreal/textual.git'
 textual.requirement = { 'kind' => 'exactVersion', 'version' => '0.5.0' }
 project.root_object.package_references << textual
-[['ZuseCore', core], ['Textual', textual]].each do |name, package|
+# SSH sign-in and port forwarding for computers added over SSH.
+citadel = project.new(Xcodeproj::Project::Object::XCRemoteSwiftPackageReference)
+citadel.repositoryURL = 'https://github.com/orlandos-nl/Citadel.git'
+citadel.requirement = { 'kind' => 'upToNextMinorVersion', 'minimumVersion' => '0.12.1' }
+project.root_object.package_references << citadel
+[['ZuseCore', core], ['Textual', textual], ['Citadel', citadel]].each do |name, package|
   product = project.new(Xcodeproj::Project::Object::XCSwiftPackageProductDependency)
   product.product_name = name
   product.package = package
@@ -83,8 +88,7 @@ Xcodeproj::Plist.write_to_path({
   'LSRequiresIPhoneOS' => true,
   'UILaunchScreen' => {},
   'NSCameraUsageDescription' => 'Scan a pairing QR code to connect to your computer.',
-  'NSLocalNetworkUsageDescription' => 'Find and connect to your Zuse computer on the local network.',
-  'NSBonjourServices' => ['_zuse._tcp'],
+  'NSLocalNetworkUsageDescription' => 'Connect to your Zuse computer on the local network.',
   'NSAppTransportSecurity' => { 'NSAllowsLocalNetworking' => true },
   'UIApplicationSceneManifest' => { 'UIApplicationSupportsMultipleScenes' => false },
   'UISupportedInterfaceOrientations' => ['UIInterfaceOrientationPortrait', 'UIInterfaceOrientationLandscapeLeft', 'UIInterfaceOrientationLandscapeRight'],
@@ -115,7 +119,7 @@ mac.product_name = 'Zuse Native'
 mac.product_reference.path = 'Zuse Native.app'
 target.source_build_phase.files.each { |file| mac.source_build_phase.add_file_reference(file.file_ref) }
 target.resources_build_phase.files.each { |file| mac.resources_build_phase.add_file_reference(file.file_ref) }
-[['ZuseCore', core], ['Textual', textual]].each do |name, package|
+[['ZuseCore', core], ['Textual', textual], ['Citadel', citadel]].each do |name, package|
   product = project.new(Xcodeproj::Project::Object::XCSwiftPackageProductDependency)
   product.product_name = name
   product.package = package

@@ -65,6 +65,7 @@ cli-pair = 다른 기기용 비공개 링크를 만듭니다
 cli-pair_label = 연결된 기기에 표시할 이름
 
 cli-pair_app = 브라우저 대신 Zuse 앱용 QR 코드를 표시합니다
+cli-pair_json = 스크립트와 Zuse 앱을 위해 링크를 JSON으로 출력합니다
 
 cli-login = Zuse 계정에 로그인합니다
 

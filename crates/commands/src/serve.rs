@@ -165,6 +165,9 @@ async fn serve(
                 zuse_engine::direct_access::Start {
                     port: args.lan_port,
                     tailscale_serve: args.tailscale_serve,
+                    // `--lan` offers every private network this host is on.
+                    lan: Some(true),
+                    tailnet: Some(true),
                 },
                 runtime.core().rpc_service(),
             )
@@ -222,7 +225,7 @@ async fn serve(
             {
                 eprintln!("{error}");
             }
-            if let Err(error) = remote::invite(&client, None, false, &l10n).await {
+            if let Err(error) = remote::invite(&client, None, false, false, &l10n).await {
                 eprintln!("{error}");
             }
         }))
@@ -352,7 +355,7 @@ async fn reuse_engine(
     eprintln!(
         "Using the running Zuse engine on port {port}. Browser access stays available while that app or service is running."
     );
-    remote::invite(&client, None, false, l10n).await
+    remote::invite(&client, None, false, false, l10n).await
 }
 
 #[cfg(test)]

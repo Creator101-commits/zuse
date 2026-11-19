@@ -7,6 +7,7 @@ import Foundation
 /// What the interface shows about a paired connection. Contains no secrets.
 public struct PairedRouteStatus: Sendable, Equatable {
   public let state: String
+  public let kind: RouteKind?
   public let label: String?
   public let rttMs: Int?
   public let resumable: Bool
@@ -126,7 +127,8 @@ actor PairedTransport {
     if let state = status["state"].string {
       onRoute?(
         PairedRouteStatus(
-          state: state, label: status["label"].string, rttMs: status["rttMs"].int,
+          state: state, kind: status["kind"].string.flatMap(RouteKind.init(rawValue:)),
+          label: status["label"].string, rttMs: status["rttMs"].int,
           resumable: status["resumable"].bool))
     }
     if result["connected"].bool {

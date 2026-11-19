@@ -244,18 +244,9 @@ private fun SelectorRow(
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        DropdownMenu(open, { open = false }) {
+        ZuseMenu(open, { open = false }, alignEnd = false, minWidth = 240.dp) {
             options.forEach { (key, name) ->
-                DropdownMenuItem(
-                    text = { Text(name) },
-                    trailingIcon = {
-                        if (key == selected) Icon(Icons.Outlined.Check, "Selected", Modifier.size(18.dp))
-                    },
-                    onClick = {
-                        open = false
-                        onSelect(key)
-                    },
-                )
+                MenuItem(name, selected = key == selected) { onSelect(key) }
             }
         }
     }

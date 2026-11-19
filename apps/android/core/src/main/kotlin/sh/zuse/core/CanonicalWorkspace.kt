@@ -60,6 +60,13 @@ class CanonicalWorkspace(private val rpc: RpcClient) {
             .toMap()
     }
 
+    /** Active and archived top-level chats from one snapshot. */
+    suspend fun sessionsWithArchived(): Pair<List<Session>, List<Session>> {
+        val (archived, active) =
+            snapshot("WatchChats").filter { it.text("parentChatId") == null }.partition { it.flag("archived") }
+        return active.map(::session) to archived.map(::session)
+    }
+
     suspend fun archivedSessions(): List<Session> =
         snapshot("WatchChats")
             .filter { it.flag("archived") && it.text("parentChatId") == null }

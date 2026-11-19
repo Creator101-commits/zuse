@@ -25,6 +25,8 @@ class RpcClient(
     private val accountEnvironmentId: String? = null,
     private val cloudExpiresAt: Long? = null,
     private val onRoute: ((PairedRouteStatus) -> Unit)? = null,
+    /** Runs once when the connection ends, such as releasing an SSH tunnel. */
+    private val onClosed: (() -> Unit)? = null,
     val canonical: Boolean =
         accountGrant != null ||
             pairingLink != null ||
@@ -350,6 +352,7 @@ class RpcClient(
         paired?.close()
         account?.close()
         lifetime.cancel()
+        onClosed?.let { runCatching(it) }
     }
 
     override fun close() = fail(ClientException("Connection closed."))

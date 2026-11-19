@@ -29,10 +29,32 @@ class Account(private val vault: Vault) {
     var identity = "signed-out"
         private set
 
+    /** Shown in Settings; absent when the sign-in response didn't include them. */
+    var displayName: String? = null
+        private set
+
+    var email: String? = null
+        private set
+
+    private fun readProfile(credentials: JsonElement?) {
+        val user = credentials?.field("user")
+        val claims = claims(credentials?.text("access_token").orEmpty())
+        email = user?.text("email") ?: claims.text("email")
+        displayName =
+            listOfNotNull(user?.text("first_name"), user?.text("last_name"))
+                .joinToString(" ")
+                .trim()
+                .ifEmpty { claims.text("name") }
+    }
+
     suspend fun hydrate() {
         val credentials = vault.read("account")
         signedIn = credentials != null
-        if (credentials != null) identity = identityOf(WireJson.parseToJsonElement(credentials))
+        if (credentials != null) {
+            val parsed = WireJson.parseToJsonElement(credentials)
+            identity = identityOf(parsed)
+            readProfile(parsed)
+        }
     }
 
     private fun random(): String =
@@ -100,6 +122,7 @@ class Account(private val vault: Vault) {
             vault.write("account", credentials.toString())
             signedIn = true
             identity = identityOf(credentials)
+            readProfile(credentials)
         }
 
     suspend fun token(): String =
@@ -130,6 +153,7 @@ class Account(private val vault: Vault) {
             generation++
             signedIn = false
             identity = "signed-out"
+            readProfile(null)
             vault.write("account", null)
             vault.write("oauth", null)
         }
