@@ -182,7 +182,12 @@ pub(crate) async fn current_plan<'e, E: sqlx::Executor<'e, Database = Postgres>>
         .bind(owner)
         .bind(now)
         .fetch_optional(db)
-        .await?;
+        .await
+        .or_else(|e| match &e {
+            // Deployments without billing (no periods table) have no plan.
+            sqlx::Error::Database(d) if d.code().as_deref() == Some("42P01") => Ok(None),
+            _ => Err(e),
+        })?;
     Ok(period.as_ref().and_then(period_plan))
 }
 
