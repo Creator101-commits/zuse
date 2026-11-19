@@ -26,6 +26,7 @@ mod onboarding;
 mod overview;
 mod plan;
 mod presentation;
+mod repository_palette;
 mod secrets;
 pub use onboarding::StartChat;
 gpui::actions!(
@@ -96,20 +97,31 @@ pub struct RepositoryPanel {
     picker: bool,
     /// The open overflow ("…") menu, by its trigger id.
     overflow: Option<SharedString>,
+    /// The open menu's trigger and items, for keyboard focus.
+    menu_trigger: FocusHandle,
+    menu_focus: Vec<FocusHandle>,
     /// The window's size at the last render, to place the unsaved bar.
     viewport: Size<Pixels>,
     usage_only: bool,
     storage_usage: Option<i64>,
     picker_focus: FocusHandle,
     picker_trigger: FocusHandle,
-    picker_refresh: FocusHandle,
-    picker_add: FocusHandle,
-    picker_manage: FocusHandle,
-    picker_install: FocusHandle,
-    choice_focus: BTreeMap<String, FocusHandle>,
+    /// The palette's highlighted entry, and whether to scroll it into view.
+    palette_active: Option<repository_palette::Item>,
+    palette_reveal: bool,
+    palette_scroll: ScrollHandle,
     search: Entity<TextInput>,
     selected: BTreeSet<String>,
     queue: Vec<GithubRepository>,
+    /// Repositories being added, by lowercase name, shown before they land.
+    adding: BTreeSet<String>,
+    /// Every repository the last GitHub catalog listed (lowercase); `None`
+    /// until the first arrives. Later arrivals are announced.
+    known_repos: Option<BTreeSet<String>>,
+    /// Repositories that arrived while the panel was open, marked "new".
+    fresh_repos: BTreeSet<String>,
+    toast: Option<SharedString>,
+    toast_timer: Option<Task<()>>,
     keys: BTreeMap<String, String>,
     onboarding: onboarding::Onboarding,
     /// The host's settled answer to "is this account subscribed?"; `None`
@@ -136,7 +148,9 @@ impl RepositoryPanel {
             KeyBinding::new("escape", CloseImageHistory, Some("CloudImageHistory")),
             KeyBinding::new("secondary-s", SaveChanges, Some("CloudSettingsPanel")),
         ]);
-        let search = cx.new(|cx| TextInput::new("Search repositories…", window, cx));
+        let search = cx.new(|cx| {
+            TextInput::new("Search repositories", window, cx).with_single_line_metrics(13., 18.)
+        });
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
         let github_code = cx.new(|cx| TextInput::new("Code from your browser", window, cx));
         cx.observe(&github_code, |_, _, cx| cx.notify()).detach();
@@ -163,19 +177,24 @@ impl RepositoryPanel {
             notice: None,
             picker: false,
             overflow: None,
+            menu_trigger: cx.focus_handle(),
+            menu_focus: (0..8).map(|_| cx.focus_handle()).collect(),
             viewport: Size::default(),
             usage_only: false,
             storage_usage: None,
             picker_focus: cx.focus_handle(),
             picker_trigger: cx.focus_handle(),
-            picker_refresh: cx.focus_handle(),
-            picker_add: cx.focus_handle(),
-            picker_manage: cx.focus_handle(),
-            picker_install: cx.focus_handle(),
-            choice_focus: BTreeMap::new(),
+            palette_active: None,
+            palette_reveal: false,
+            palette_scroll: ScrollHandle::new(),
             search,
             selected: BTreeSet::new(),
             queue: vec![],
+            adding: BTreeSet::new(),
+            known_repos: None,
+            fresh_repos: BTreeSet::new(),
+            toast: None,
+            toast_timer: None,
             keys: BTreeMap::new(),
             onboarding: Default::default(),
             host_subscribed: None,
@@ -234,9 +253,14 @@ impl RepositoryPanel {
         self.notice = None;
         self.picker = false;
         self.overflow = None;
-        self.choice_focus.clear();
+        self.palette_active = None;
         self.selected.clear();
         self.queue.clear();
+        self.adding.clear();
+        self.known_repos = None;
+        self.fresh_repos.clear();
+        self.toast = None;
+        self.toast_timer = None;
         self.keys.clear();
         self.search
             .update(cx, |s, cx| s.set_value(String::new(), cx));
@@ -395,6 +419,7 @@ impl RepositoryPanel {
                 }
                 self.error = Some(e);
                 self.queue.clear();
+                self.adding.clear();
                 cx.notify();
                 return;
             }
@@ -404,6 +429,7 @@ impl RepositoryPanel {
         {
             self.error = Some("Your account changed. Refresh repositories.".into());
             self.queue.clear();
+            self.adding.clear();
             cx.notify();
             return;
         }
@@ -460,7 +486,10 @@ impl RepositoryPanel {
                     data["connectionState"].as_str().unwrap_or("").to_owned();
                 self.github_disconnect_confirm = false;
                 match serde_json::from_value::<GithubCatalog>(data) {
-                    Ok(github) => self.github = Some(github),
+                    Ok(github) => {
+                        self.note_catalog(&github, cx);
+                        self.github = Some(github);
+                    }
                     Err(_) => {
                         self.error = Some(
                             "GitHub repository list is unavailable. Refresh and try again.".into(),
@@ -476,12 +505,12 @@ impl RepositoryPanel {
                         self.notice =
                             Some("Repository removed. Existing chats are preserved.".into());
                     } else {
-                        self.keys.remove(
-                            &project
-                                .repository_identity
-                                .replace("github.com/", "")
-                                .to_lowercase(),
-                        );
+                        let identity = project
+                            .repository_identity
+                            .replace("github.com/", "")
+                            .to_lowercase();
+                        self.keys.remove(&identity);
+                        self.adding.remove(&identity);
                         self.projects.retain(|p| p.project_id != project.project_id);
                         self.projects.push(project);
                         self.notice = Some("Repository added.".into());
@@ -495,6 +524,7 @@ impl RepositoryPanel {
                             .into(),
                     );
                     self.queue.clear();
+                    self.adding.clear();
                 }
             },
             _ => {}
@@ -504,6 +534,7 @@ impl RepositoryPanel {
     pub fn interrupted(&mut self, cx: &mut Context<Self>) {
         self.pending.clear();
         self.queue.clear();
+        self.adding.clear();
         self.image.interrupted();
         self.error =
             Some("Account connection interrupted. Refresh to check repository changes.".into());

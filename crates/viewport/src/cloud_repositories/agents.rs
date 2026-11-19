@@ -834,33 +834,31 @@ fn codex_mark() -> &'static std::sync::Arc<Image> {
     })
 }
 
-/// Row tile size, and the indent that lines nested content up with names.
-const TILE: f32 = 28.;
+/// Row avatar size, and the indent that lines nested content up with names.
+const TILE: f32 = 26.;
 const NESTED: f32 = s::ROW_PAD_X + TILE + s::ROW_GAP;
 
-/// The agent's own mark in a row tile.
+/// The agent's own mark in a round avatar, like account avatars elsewhere.
 fn agent_tile(agent: AgentId) -> Div {
     let mark = match agent {
         AgentId::Codex => img(codex_mark().clone())
-            .size(px(16.))
+            .size(px(14.))
             .flex_none()
             .into_any_element(),
         AgentId::Claude => icon("claude-mark")
-            .size(px(16.))
+            .size(px(14.))
             .text_color(gpui::rgb(0xD97757))
             .into_any_element(),
         AgentId::Grok => icon("grok-mark")
-            .size(px(16.))
+            .size(px(14.))
             .text_color(palette::rgb(TEXT))
             .into_any_element(),
     };
     div()
         .flex_none()
         .size(px(TILE))
-        .rounded(px(7.))
+        .rounded_full()
         .bg(s::frame_bg())
-        .border_1()
-        .border_color(palette::rgb(BORDER).opacity(0.6))
         .flex()
         .items_center()
         .justify_center()

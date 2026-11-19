@@ -11,7 +11,10 @@
 //! `FIXTURE_ACCOUNT=signed-out` starts signed out. `FIXTURE_ARCHIVED=1`
 //! archives the first chat. `FIXTURE_CLICKS="x,y;x,y"` clicks those window
 //! points (via XTest, under Xvfb) before the capture, and
-//! `FIXTURE_TYPE=text` then types into the focused field.
+//! `FIXTURE_TYPE=text` then types into the focused field, and
+//! `FIXTURE_KEYS=Down,space` then presses those X keysyms.
+//! `FIXTURE_NEW_INSTALL=1` adds the organization's repositories on the
+//! second GitHub read, as a fresh installation would.
 //! `FIXTURE_AGENTS=multi` adds a second Codex account. Device sign-in hands
 //! out a code and keeps waiting; `FIXTURE_LOGIN=connect` finishes it after a
 //! few status checks.
@@ -39,22 +42,37 @@ fn iso(days_ago: i64) -> String {
     (Utc::now() - Duration::days(days_ago)).to_rfc3339()
 }
 
-fn repositories() -> Value {
-    let repos = [
-        ("swarajbachu/zuse", 1, true),
-        ("swarajbachu/spacekey", 63, false),
-        ("swarajbachu/framezero", 21, false),
-        ("swarajbachu/userbubble", 30, true),
-        ("swarajbachu/www", 49, false),
-        ("opcodehq/zuse", 0, true),
-        ("opcodehq/zkit", 2, true),
-        ("opcodehq/web", 8, true),
-        ("opcodehq/computer-use", 9, false),
-        ("opcodehq/postkit", 35, true),
-    ];
+/// About twenty repositories across a user and an organization. Avatar URLs
+/// don't resolve here, so rows show their initials tiles.
+const REPOSITORIES: [(&str, i64, bool); 21] = [
+    ("swarajbachu/zuse", 1, true),
+    ("swarajbachu/framezero", 21, false),
+    ("swarajbachu/userbubble", 30, true),
+    ("swarajbachu/swarajbachu", 42, false),
+    ("swarajbachu/lint", 49, false),
+    ("swarajbachu/www", 50, false),
+    ("swarajbachu/spacekey", 63, false),
+    ("swarajbachu/omake", 77, false),
+    ("swarajbachu/botdirectory.ai", 80, false),
+    ("opcodehq/zuse", 0, true),
+    ("opcodehq/zkit", 2, true),
+    ("opcodehq/computer-use", 7, false),
+    ("opcodehq/brokeboy", 8, true),
+    ("opcodehq/web", 9, true),
+    ("opcodehq/delulu", 10, false),
+    ("opcodehq/postkit", 35, true),
+    ("opcodehq/agent-stuff", 49, true),
+    ("opcodehq/morningpage", 105, false),
+    ("opcodehq/design-tokens", 140, false),
+    ("opcodehq/edge", 190, true),
+    ("opcodehq/runbooks", 400, true),
+];
+
+fn repositories(owners: &[&str]) -> Value {
     json!(
-        repos
+        REPOSITORIES
             .iter()
+            .filter(|(name, _, _)| owners.iter().any(|o| name.starts_with(&format!("{o}/"))))
             .map(|(name, ago, private)| json!({
                 "nameWithOwner": name,
                 "description": null,
@@ -63,6 +81,7 @@ fn repositories() -> Value {
                 "isPrivate": private,
                 "defaultBranch": "main",
                 "updatedAt": iso(*ago),
+                "ownerAvatarUrl": format!("https://avatars.invalid/{}", name.split('/').next().unwrap()),
             }))
             .collect::<Vec<_>>()
     )
@@ -354,6 +373,9 @@ struct Controller {
     no_repos: bool,
     /// Device sign-in status checks so far.
     polls: std::sync::atomic::AtomicU32,
+    /// An organization installation arrives after the first GitHub read.
+    new_install: bool,
+    github_reads: std::sync::atomic::AtomicU32,
 }
 impl Controller {
     fn login(&self, state: &str) -> Result<RpcReply, RpcError> {
@@ -383,6 +405,11 @@ impl RpcService for Controller {
             }
             methods::CLOUD_AGENT_LOGIN_CANCEL => return self.login("cancelled"),
             methods::CLOUD_AGENT_DISCONNECT => return bound(json!({})),
+            // Connecting takes a while, so "Adding…" rows can be captured.
+            methods::CLOUD_PROJECT_CONNECT => {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                return Err(RpcError::Failed("Fixture connect timed out.".into()));
+            }
             methods::CLOUD_AGENT_CONNECTIONS if self.fresh && self.signed_in() => {
                 return bound(json!({"connections": [
                     {"connectionId": "codex-new", "agent": "codex", "method": "device-code", "state": "connected", "accountLabel": "you@example.com", "expiresAt": null, "version": 1, "errorCode": null}
@@ -437,15 +464,28 @@ impl RpcService for Controller {
                 &json!({"deviceId":"fixture-local","workspaceScope":"local","capabilities":[]}),
             ),
             methods::CLOUD_PROJECTS => bound(projects()),
-            methods::CLOUD_GITHUB => bound(json!({
-                "configured": true, "canManageInstallations": true,
-                "user": {"login": "swarajbachu", "name": "Swaraj", "email": "you@example.com"},
-                "installations": [
-                    {"installationId": 101, "accountLogin": "swarajbachu", "accountType": "User", "repositorySelection": "all", "suspended": false},
-                    {"installationId": 202, "accountLogin": "opcodehq", "accountType": "Organization", "repositorySelection": "selected", "suspended": false}
-                ],
-                "repositories": repositories(),
-            })),
+            methods::CLOUD_GITHUB => {
+                // `FIXTURE_NEW_INSTALL=1`: the organization's installation
+                // lands on the second read, as after installing it.
+                let reads = self
+                    .github_reads
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let owners: &[&str] = if self.new_install && reads == 0 {
+                    &["swarajbachu"]
+                } else {
+                    &["swarajbachu", "opcodehq"]
+                };
+                let installations = [
+                    json!({"installationId": 101, "accountLogin": "swarajbachu", "accountType": "User", "repositorySelection": "all", "suspended": false, "avatarUrl": "https://avatars.invalid/swarajbachu"}),
+                    json!({"installationId": 202, "accountLogin": "opcodehq", "accountType": "Organization", "repositorySelection": "selected", "suspended": false, "avatarUrl": "https://avatars.invalid/opcodehq"}),
+                ];
+                bound(json!({
+                    "configured": true, "canManageInstallations": true,
+                    "user": {"login": "swarajbachu", "name": "Swaraj", "email": "you@example.com"},
+                    "installations": installations[..owners.len()],
+                    "repositories": repositories(owners),
+                }))
+            }
             methods::CLOUD_AGENT_CONNECTIONS => bound(json!({"connections": [
                 {"connectionId": "codex", "agent": "codex", "method": "device-code", "state": "connected", "accountLabel": "you@example.com", "expiresAt": null, "version": 1, "errorCode": null},
                 {"connectionId": "claude", "agent": "claude", "method": "setup-token", "state": "connected", "accountLabel": "Claude Max", "expiresAt": null, "version": 1, "errorCode": null}
@@ -507,6 +547,8 @@ fn main() {
         fresh,
         no_repos: std::env::var("FIXTURE_NO_REPOS").is_ok(),
         polls: Default::default(),
+        new_install: std::env::var("FIXTURE_NEW_INSTALL").is_ok(),
+        github_reads: Default::default(),
     }));
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().to_path_buf();
@@ -602,6 +644,14 @@ fn main() {
                 assert!(status.success(), "typing failed");
                 cx.background_executor().timer(std::time::Duration::from_millis(900)).await;
             }
+            for key in std::env::var("FIXTURE_KEYS").unwrap_or_default().split(',').filter(|k| !k.is_empty()) {
+                let status = std::process::Command::new("python3")
+                    .args(["-c", XTEST, "key", key])
+                    .status()
+                    .expect("key");
+                assert!(status.success(), "key press failed");
+                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+            }
             let Some(out) = out else { return };
             let any: gpui::AnyWindowHandle = window.into();
             any.update(cx, |_, window, cx| {
@@ -636,6 +686,9 @@ if sys.argv[1]=='click':
     a,b=map(int,sys.argv[2].split(','))
     t.XTestFakeMotionEvent(d,-1,a,b,0);x.XFlush(d);time.sleep(.3)
     t.XTestFakeButtonEvent(d,1,1,0);t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d)
+elif sys.argv[1]=='key':
+    code=x.XKeysymToKeycode(d,x.XStringToKeysym(sys.argv[2].encode()));assert code
+    t.XTestFakeKeyEvent(d,code,1,0);t.XTestFakeKeyEvent(d,code,0,0);x.XFlush(d)
 else:
     def key(name,down):
         code=x.XKeysymToKeycode(d,x.XStringToKeysym(name.encode()));assert code
