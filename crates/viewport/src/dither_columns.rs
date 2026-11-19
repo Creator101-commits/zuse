@@ -166,7 +166,7 @@ pub fn columns(
 mod tests {
     use super::*;
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn columns_light_to_their_value_and_cap_the_top() {
         assert_eq!(lit_rows(0.0, 60), 0);
         assert_eq!(lit_rows(0.001, 60), 1);
