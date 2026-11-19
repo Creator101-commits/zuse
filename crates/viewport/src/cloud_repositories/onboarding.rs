@@ -334,7 +334,7 @@ impl RepositoryPanel {
             .when(current.optional(), |v| {
                 v.child(kit::pill("Optional", Tone::Neutral))
             });
-        s::frame()
+        kit::container()
             .child(
                 column()
                     .px(px(10.))
@@ -366,7 +366,12 @@ impl RepositoryPanel {
                     .child(kit::step_progress(&marks))
                     .child(labels),
             )
-            .child(s::card().child(intro))
+            .child(
+                div()
+                    .border_t_1()
+                    .border_color(kit::hairline())
+                    .child(intro),
+            )
     }
 
     fn onboarding_plan_card(&self) -> Div {
@@ -496,7 +501,7 @@ impl RepositoryPanel {
     ) -> Div {
         match current {
             Step::Welcome => column().gap(px(kit::SECTION_GAP)).child(
-                s::frame().child(s::card().child(self.onboarding_plan_card())),
+                kit::container().child(self.onboarding_plan_card()),
             )
             .child(kit::section(
                 "What's next",
@@ -530,8 +535,8 @@ impl RepositoryPanel {
                     self.onboarding_checklist(progress, cx),
                 ))
                 .child(
-                    s::frame().child(
-                        s::card().child(
+                    kit::container().child(
+                        div().child(
                             row()
                                 .items_center()
                                 .justify_between()
@@ -552,45 +557,57 @@ impl RepositoryPanel {
         }
     }
 
+    /// One minimal row: "Finish later" on the left; Back and Skip as quiet
+    /// text and the primary Continue on the right. No card around it. On the
+    /// setup step, unsaved script edits are saved by Continue ("Save and
+    /// continue") instead of a second save bar.
     fn onboarding_footer(&self, current: Step, progress: &Progress, cx: &mut Context<Self>) -> Div {
         let done = progress.done(current);
+        let unsaved = current == Step::Setup && self.machine_dirty(cx) && self.can_manage();
         let (label, enabled): (&'static str, bool) = match current {
             Step::Welcome => ("Get started", true),
             Step::Start if progress.ready() => ("Start your first cloud chat", true),
             Step::Start => ("Finish setup", true),
+            Step::Setup if unsaved => ("Save and continue", true),
             _ => ("Continue", done || current.optional()),
         };
-        let mut actions = row().gap(px(8.)).items_center();
+        let mut actions = row().gap(px(4.)).items_center();
         if current.previous().is_some() {
-            actions = actions.child(
-                cs::button("onboarding-back", "Back", false, false, false).on_click(
-                    cx.listener(|this, _, _, cx| this.onboarding_update(cx, |o, p| o.back(p))),
-                ),
-            );
+            actions = actions.child(kit::quiet_button("onboarding-back", "Back").on_click(
+                cx.listener(|this, _, _, cx| this.onboarding_update(cx, |o, p| o.back(p))),
+            ));
         }
         if current.skippable() && !done {
             actions = actions.child(
-                cs::button("onboarding-skip", "Skip for now", false, false, false).on_click(
+                kit::quiet_button("onboarding-skip", "Skip for now").on_click(
                     cx.listener(|this, _, _, cx| this.onboarding_update(cx, |o, p| o.skip(p))),
                 ),
             );
         }
         actions = actions.child(
-            kit::primary_button("onboarding-continue", label, enabled).when(enabled, |b| {
-                b.on_click(cx.listener(move |this, _, _, cx| match current {
-                    Step::Start => {
-                        let progress = this.onboarding_progress();
-                        if let Some(missing) = progress.first_missing() {
-                            this.onboarding.go(missing);
-                        } else {
-                            this.onboarding.finish();
-                            cx.emit(StartChat);
+            kit::primary_button("onboarding-continue", label, enabled)
+                .ml(px(4.))
+                .when(enabled, |b| {
+                    b.on_click(cx.listener(move |this, _, _, cx| match current {
+                        Step::Start => {
+                            let progress = this.onboarding_progress();
+                            if let Some(missing) = progress.first_missing() {
+                                this.onboarding.go(missing);
+                            } else {
+                                this.onboarding.finish();
+                                cx.emit(StartChat);
+                            }
+                            cx.notify();
                         }
-                        cx.notify();
-                    }
-                    _ => this.onboarding_update(cx, |o, p| o.advance(p)),
-                }))
-            }),
+                        Step::Setup => {
+                            if this.machine_dirty(cx) && this.can_manage() {
+                                this.save_machine(cx);
+                            }
+                            this.onboarding_update(cx, |o, p| o.advance(p));
+                        }
+                        _ => this.onboarding_update(cx, |o, p| o.advance(p)),
+                    }))
+                }),
         );
         let waiting = match current {
             Step::Repositories if !done => "Add a repository to continue, or skip for now",
@@ -601,12 +618,8 @@ impl RepositoryPanel {
             .items_center()
             .justify_between()
             .gap(px(12.))
-            .px(px(14.))
-            .py(px(10.))
-            .rounded(px(10.))
-            .border_1()
-            .border_color(palette::rgb(BORDER))
-            .bg(s::frame_bg())
+            .px(px(4.))
+            .pt(px(4.))
             .child(
                 row()
                     .items_center()

@@ -329,80 +329,6 @@ pub(super) fn minutes_block(p: &PlanUsage, trailing: Option<AnyElement>) -> Div 
                 .children(trailing),
         )
 }
-/// The $1 trial: shown only when the catalog offers it.
-pub(super) fn trial_offer<T: 'static>(
-    data: &Data<'_>,
-    cx: &mut Context<T>,
-    act: impl Fn(&mut T, Action, &mut Window, &mut Context<T>) + Copy + 'static,
-) -> Option<Stateful<Div>> {
-    let catalog = catalog(data.catalog);
-    if !catalog.trial_available || data.subscribed != Some(false) {
-        return None;
-    }
-    let disabled = data.pending.subscription;
-    Some(
-        div()
-            .id("cloud-trial-offer")
-            .relative()
-            .overflow_hidden()
-            .rounded(px(s::FRAME_RADIUS))
-            .border_1()
-            .border_color(lime().opacity(0.45))
-            .bg(s::card_bg())
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(px(16.))
-                    .px(px(16.))
-                    .py(px(14.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        div()
-                                            .text_size(px(14.))
-                                            .line_height(px(18.))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(palette::rgb(TEXT))
-                                            .child("Try Cloud for $1"),
-                                    )
-                                    .child(badge("First week", false, false)),
-                            )
-                            .child(s::description_text(TRIAL_COPY)),
-                    )
-                    .child(
-                        crate::cloud_settings::kit::primary_button(
-                            "cloud-plan-trial",
-                            "Try for $1",
-                            !disabled,
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                if !disabled {
-                                    act(
-                                        this,
-                                        Action::Checkout(plans::CLOUD_TRIAL_OFFER),
-                                        window,
-                                        cx,
-                                    )
-                                }
-                            },
-                        )),
-                    ),
-            ),
-    )
-}
 /// What a plan card's control does for this account.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanControl {
@@ -446,10 +372,15 @@ pub fn plan_control(offer: &PlanOffer, current: Option<PlanId>, subscribed: bool
             offer: id,
             primary: false,
         },
-        _ => PlanControl::Checkout {
-            label: "Subscribe",
+        (_, PlanId::CloudMax) => PlanControl::Checkout {
+            label: "Get Cloud Max",
             offer: id,
-            primary: offer.plan_id == PlanId::Cloud,
+            primary: true,
+        },
+        _ => PlanControl::Checkout {
+            label: "Get Cloud",
+            offer: id,
+            primary: true,
         },
     }
 }
@@ -457,7 +388,7 @@ pub fn plan_control(offer: &PlanOffer, current: Option<PlanId>, subscribed: bool
 pub fn plan_features(offer: &PlanOffer) -> Vec<String> {
     let rate = plans::DEFAULT_RATE;
     let mut lines = vec![format!(
-        "{} on 4 vCPU / 16 GB",
+        "{} on a 4 vCPU / 16 GB computer",
         about_hours(offer.included_machine_minutes, rate)
     )];
     lines.push(if offer.max_vcpus > plans::DEFAULT_VCPUS {
@@ -474,79 +405,222 @@ pub fn plan_features(offer: &PlanOffer) -> Vec<String> {
     lines.push("Asleep computers use nothing".into());
     lines
 }
+/// The icon beside a feature line.
+fn feature_glyph(line: &str) -> &'static str {
+    if line.starts_with("about") {
+        "clock-circle"
+    } else if line.starts_with("Asleep") {
+        "moon"
+    } else if line.contains("vCPU") || line.contains("computers") {
+        "monitor"
+    } else if line.starts_with("Pay as you go") {
+        "dashboard-speed"
+    } else if line.starts_with("Asleep") {
+        "moon"
+    } else {
+        "check"
+    }
+}
+/// A plan card's header tint: (plate, dither ink).
+fn tint(plan: Option<PlanId>) -> (Hsla, Hsla) {
+    match plan {
+        Some(PlanId::CloudMax) => (
+            hsla(268. / 360., 0.32, 0.15, 1.),
+            hsla(268. / 360., 0.62, 0.62, 1.),
+        ),
+        Some(_) => (
+            hsla(150. / 360., 0.32, 0.12, 1.),
+            hsla(140. / 360., 0.5, 0.48, 1.),
+        ),
+        None => (
+            hsla(214. / 360., 0.34, 0.15, 1.),
+            hsla(214. / 360., 0.62, 0.6, 1.),
+        ),
+    }
+}
+/// The price block of a plan card.
+pub struct Price {
+    pub was: Option<String>,
+    pub amount: String,
+    pub unit: &'static str,
+    pub note: String,
+}
+/// One plan: a dithered header in its tint with the name, price, minutes
+/// pill and action, then the feature list.
 fn plan_card(
+    plan: Option<PlanId>,
     name: String,
-    price: (String, &'static str),
-    allowance: String,
-    features: Vec<String>,
-    highlight: bool,
+    price: Price,
+    usage: String,
     control: AnyElement,
+    today: Option<String>,
+    intro: Option<&'static str>,
+    features: Vec<String>,
+    current: bool,
 ) -> Div {
-    let mut list = div().flex().flex_col().gap(px(6.));
+    let (plate, ink) = tint(plan);
+    let white_text = |size: f32| div().text_size(px(size)).text_color(hsla(0., 0., 1., 0.96));
+    let mut header = div()
+        .relative()
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .p(px(16.))
+        .bg(plate)
+        .child(crate::dither::fill_color(ink.opacity(0.32), 0.))
+        .child(
+            div()
+                .relative()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(white_text(13.).font_weight(FontWeight::MEDIUM).child(name))
+                .when(current, |v| {
+                    v.child(
+                        div()
+                            .px(px(8.))
+                            .h(px(18.))
+                            .flex()
+                            .items_center()
+                            .rounded_full()
+                            .bg(hsla(0., 0., 0., 0.35))
+                            .text_size(px(10.))
+                            .text_color(hsla(0., 0., 1., 0.9))
+                            .child("Current plan"),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().h(px(14.)).when_some(price.was, |v, was| {
+                    v.child(
+                        white_text(11.)
+                            .line_through()
+                            .text_color(hsla(0., 0., 1., 0.55))
+                            .child(was),
+                    )
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_baseline()
+                        .gap(px(5.))
+                        .child(
+                            white_text(28.)
+                                .line_height(px(32.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(price.amount),
+                        )
+                        .child(
+                            white_text(12.)
+                                .text_color(hsla(0., 0., 1., 0.75))
+                                .child(price.unit),
+                        ),
+                )
+                .child(
+                    white_text(11.)
+                        .text_color(hsla(0., 0., 1., 0.7))
+                        .child(price.note),
+                ),
+        )
+        .child(
+            div()
+                .relative()
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.))
+                .bg(hsla(0., 0., 0., 0.4))
+                .text_size(px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(hsla(0., 0., 1., 0.92))
+                .child(usage),
+        )
+        .child(div().relative().flex().flex_col().child(control));
+    header = header.child(
+        div()
+            .relative()
+            .h(px(14.))
+            .flex()
+            .justify_center()
+            .when_some(today, |v, t| {
+                v.child(white_text(11.).text_color(hsla(0., 0., 1., 0.75)).child(t))
+            }),
+    );
+    let mut list = div().flex().flex_col().gap(px(8.)).p(px(16.));
+    if let Some(intro) = intro {
+        list = list.child(s::description_text(intro));
+    }
     for line in features {
         list = list.child(
             div()
                 .flex()
                 .items_start()
                 .gap(px(8.))
-                .child(div().mt(px(6.)).size(px(4.)).flex_none().bg(if highlight {
-                    lime()
-                } else {
-                    palette::rgb(MUTED).into()
-                }))
-                .child(div().flex_1().min_w_0().child(s::description_text(line))),
+                .child(
+                    crate::assets::icon(feature_glyph(&line))
+                        .mt(px(2.))
+                        .size(px(12.))
+                        .text_color(palette::rgb(MUTED)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .line_height(px(16.))
+                        .text_color(palette::rgb(TEXT))
+                        .child(line),
+                ),
         );
     }
     div()
         .flex_1()
-        .min_w(px(180.))
+        .min_w(px(200.))
         .flex()
         .flex_col()
-        .gap(px(12.))
-        .p(px(14.))
         .rounded(px(s::CARD_RADIUS))
+        .overflow_hidden()
         .border_1()
-        .border_color(if highlight {
+        .border_color(if current {
             lime().opacity(0.6)
         } else {
             s::card_border()
         })
         .bg(s::card_bg())
+        .child(header)
+        .child(list)
+}
+/// The hero above the plans for an account without a plan.
+pub(super) fn plans_hero() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(8.))
+        .pt(px(8.))
+        .pb(px(4.))
+        .child(crate::cloud_settings::kit::icon_tile("dither-cloud", 56.))
         .child(
             div()
-                .flex()
-                .flex_col()
-                .gap(px(4.))
-                .child(s::title_text(name))
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap(px(3.))
-                        .child(
-                            div()
-                                .text_size(px(22.))
-                                .line_height(px(28.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(palette::rgb(TEXT))
-                                .child(price.0),
-                        )
-                        .child(s::description_text(price.1)),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .line_height(px(16.))
-                        .text_color(palette::rgb(TEXT))
-                        .child(allowance),
-                ),
+                .mt(px(6.))
+                .text_size(px(20.))
+                .line_height(px(26.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(palette::rgb(TEXT))
+                .child("Put Zuse to work in the cloud"),
         )
-        .child(div().h(px(1.)).bg(s::card_border()))
-        .child(list.flex_1())
-        .child(div().flex().child(control))
+        .child(s::description_text(
+            "Plans include machine minutes every month. Asleep computers use none.",
+        ))
 }
-/// Cloud, Cloud Max and Enterprise side by side, with the trial offer above
-/// them when available.
+/// Cloud, Cloud Max and Enterprise side by side. While the $1 trial is
+/// offered it lives in the Cloud card.
 pub(super) fn plans_group<T: 'static>(
     data: &Data<'_>,
     cx: &mut Context<T>,
@@ -555,33 +629,48 @@ pub(super) fn plans_group<T: 'static>(
     let catalog = catalog(data.catalog);
     let current = plan_id(data.summary);
     let subscribed = data.subscribed == Some(true);
+    let trial = catalog.trial_available && data.subscribed == Some(false);
     let busy = data.pending.subscription;
-    let mut cards = div().flex().flex_wrap().gap(px(8.)).p(px(4.));
+    let mut cards = div().flex().flex_wrap().gap(px(12.));
+    let mut previous: Option<String> = None;
     for offer in catalog
         .plans
         .iter()
         .filter(|o| matches!(o.plan_id, PlanId::Cloud | PlanId::CloudMax))
     {
         let control = plan_control(offer, current, subscribed);
-        let highlight = match &control {
-            PlanControl::Current(_) => true,
-            PlanControl::Checkout { primary, .. } => *primary && !subscribed,
-        };
+        let is_current = matches!(control, PlanControl::Current(_));
+        let cloud_trial = trial && offer.plan_id == PlanId::Cloud;
         let element = match control {
-            PlanControl::Current(label) => badge(label, false, false).into_any_element(),
+            PlanControl::Current(label) => div()
+                .h(px(28.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(7.))
+                .border_1()
+                .border_color(hsla(0., 0., 1., 0.25))
+                .text_size(px(11.))
+                .text_color(hsla(0., 0., 1., 0.85))
+                .child(label)
+                .into_any_element(),
             PlanControl::Checkout {
                 label,
                 offer: offer_id,
-                primary,
+                ..
             } => {
+                let (label, offer_id) = if cloud_trial {
+                    ("Start for $1", plans::CLOUD_TRIAL_OFFER)
+                } else {
+                    (label, offer_id)
+                };
                 let disabled = busy || !offer.available || data.subscribed.is_none();
-                button(
+                crate::cloud_settings::kit::primary_button(
                     SharedString::from(format!("cloud-plan-{offer_id}")),
                     label,
-                    primary,
-                    disabled,
-                    busy,
+                    !disabled,
                 )
+                .w_full()
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if !disabled {
                         act(this, Action::Checkout(offer_id), window, cx)
@@ -590,43 +679,68 @@ pub(super) fn plans_group<T: 'static>(
                 .into_any_element()
             }
         };
+        let monthly_price = dollars(offer.price_micros);
+        let price = if cloud_trial {
+            Price {
+                was: Some(monthly_price.clone()),
+                amount: "$1".into(),
+                unit: "/ first 7 days",
+                note: format!("then {monthly_price}/mo"),
+            }
+        } else {
+            Price {
+                was: None,
+                amount: monthly_price.clone(),
+                unit: "/mo",
+                note: "billed monthly".into(),
+            }
+        };
+        let (intro, features) = match &previous {
+            Some(_) if offer.plan_id == PlanId::CloudMax => (
+                Some("Everything in Cloud, plus"),
+                plan_features(offer).into_iter().take(2).collect::<Vec<_>>(),
+            ),
+            _ => (None, plan_features(offer)),
+        };
+        previous = Some(offer.name.clone());
         cards = cards.child(plan_card(
+            Some(offer.plan_id),
             offer.name.clone(),
-            (dollars(offer.price_micros), "/month"),
-            machine_minutes(offer.included_machine_minutes),
-            plan_features(offer),
-            highlight,
+            price,
+            format!("{} / mo", machine_minutes(offer.included_machine_minutes)),
             element,
+            cloud_trial.then(|| format!("Today: $1, then {monthly_price}/mo")),
+            intro,
+            features,
+            is_current,
         ));
     }
     let url = catalog.enterprise_contact_url.clone();
     let valid = url.starts_with("https://") || url.starts_with("mailto:");
     cards = cards.child(plan_card(
+        None,
         "Enterprise".into(),
-        ("Custom".into(), ""),
+        Price {
+            was: None,
+            amount: "Custom".into(),
+            unit: "",
+            note: "for your team".into(),
+        },
         "Machine minutes for your team".into(),
-        vec![ENTERPRISE_COPY.into(), "Larger computers on request".into()],
-        false,
-        button("cloud-plan-enterprise", "Contact us", false, !valid, false)
+        crate::cloud_settings::kit::primary_button("cloud-plan-enterprise", "Contact us", valid)
+            .w_full()
             .on_click(cx.listener(move |_, _, _, cx| {
                 if valid {
                     cx.open_url(&url)
                 }
             }))
             .into_any_element(),
+        None,
+        Some("Everything in Cloud Max, plus"),
+        vec![ENTERPRISE_COPY.into(), "Larger computers on request".into()],
+        false,
     ));
-    let mut root = div().flex().flex_col().gap(px(12.));
-    if let Some(trial) = trial_offer(data, cx, act) {
-        root = root.child(trial);
-    }
-    root.child(
-        s::frame()
-            .child(s::header(
-                "Plans",
-                "A machine minute is one minute of a 1 vCPU / 4 GB machine. A 4 vCPU / 16 GB computer uses 4 per awake minute.",
-            ))
-            .child(cards),
-    )
+    cards
 }
 
 #[cfg(test)]
@@ -737,7 +851,8 @@ mod tests {
         let label = |offer, current, subscribed| match plan_control(offer, current, subscribed) {
             PlanControl::Current(l) | PlanControl::Checkout { label: l, .. } => l,
         };
-        assert_eq!(label(cloud, None, false), "Subscribe");
+        assert_eq!(label(cloud, None, false), "Get Cloud");
+        assert_eq!(label(max, None, false), "Get Cloud Max");
         assert_eq!(label(cloud, Some(PlanId::Legacy), true), "Current plan");
         assert_eq!(
             label(max, Some(PlanId::Cloud), true),
@@ -755,7 +870,7 @@ mod tests {
         assert_eq!(
             plan_features(max),
             [
-                "about 350 h on 4 vCPU / 16 GB",
+                "about 350 h on a 4 vCPU / 16 GB computer",
                 "Computers up to 8 vCPU / 32 GB",
                 "Pay as you go after, up to your cap",
                 "Asleep computers use nothing"

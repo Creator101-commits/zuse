@@ -340,9 +340,10 @@ impl RepositoryPanel {
                 if let Some(error) = &self.environment.error {
                     root = root.child(form::message(error, true));
                 }
+                let _ = version;
                 return root.child(form::save_bar(
                     "cloud-environment",
-                    format!("Version {}", version.revision),
+                    self.viewport,
                     dirty,
                     busy,
                     |this, cx| this.discard_environment(cx),

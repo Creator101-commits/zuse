@@ -215,9 +215,7 @@ fn section(
     action: Option<AnyElement>,
     body: impl IntoElement,
 ) -> Div {
-    s::frame()
-        .child(s::header_with_action(title, description, action))
-        .child(s::card().child(body))
+    crate::cloud_settings::kit::section(title, description, action, body)
 }
 /// One figure of the usage header: label, big value and a hint.
 fn stat(label: &'static str, value: String, unit: &'static str, hint: String) -> Div {
@@ -918,6 +916,12 @@ pub fn billing<T: 'static>(
             ),
         );
     }
+    if data.subscribed == Some(false) {
+        return root
+            .child(plans::plans_hero())
+            .child(plans::plans_group(data, cx, act))
+            .child(billing_footnote(cx, act));
+    }
     let mut card = div().flex().flex_col().child(
         div()
             .flex()
@@ -1029,7 +1033,7 @@ pub fn billing<T: 'static>(
     if pay_as_you_go {
         card = card.child(cap_row(data, cap, cx, act));
     }
-    root = root.child(s::frame().child(s::card().child(card)));
+    root = root.child(crate::cloud_settings::kit::container().child(card));
     if data.subscribed.is_some() {
         root = root.child(plans::plans_group(data, cx, act));
     }
@@ -1037,44 +1041,20 @@ pub fn billing<T: 'static>(
         .credits
         .is_some_and(|b| b.available || b.credit_cents > 0 || b.debit_cents > 0)
     {
-        root = root.child(group(
+        root = root.child(crate::cloud_settings::kit::section(
             "Buy more minutes",
-            None,
+            "",
             None,
             credits_body(data, focus, cx, act),
         ));
     }
-    let sources = div()
-        .flex()
-        .flex_col()
-        .child(setting_row(
-            true,
-            "Billed by Zuse",
-            "Cloud computers use your plan's machine minutes, then pay as you go up to your cap. Storage for asleep computers is included.",
-            None,
-        ))
-        .child(setting_row(
-            false,
-            "Billed by your agent providers",
-            "Codex, Claude and Grok run on the subscription you sign in with, locally and in Cloud. Zuse never charges for their tokens.",
-            Some(
-                button("billing-open-agents", "Agent accounts", false, false, false)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        act(this, Action::OpenAgents, window, cx)
-                    }))
-                    .into_any_element(),
-            ),
-        ));
-    root = root.child(section("Who bills what", "", None, sources));
     let disabled = !subscribed || busy;
-    root.child(section(
-        "Invoices and payment method",
-        "",
-        None,
-        setting_row(
+    root.child(
+        crate::cloud_settings::kit::container().child(crate::cloud_settings::kit::row_item(
             true,
-            "Billing portal",
-            "Download invoices, change your card, switch plans or cancel.",
+            None,
+            "Invoices and payment method",
+            "",
             Some(
                 icon_label_button(
                     "manage-cloud-subscription",
@@ -1091,8 +1071,43 @@ pub fn billing<T: 'static>(
                 }))
                 .into_any_element(),
             ),
-        ),
-    ))
+        )),
+    )
+    .child(billing_footnote(cx, act))
+}
+
+/// Who bills what, in one quiet line: Zuse bills cloud computers; agents run
+/// on the user's own subscriptions.
+fn billing_footnote<T: 'static>(
+    cx: &mut Context<T>,
+    act: impl Fn(&mut T, Action, &mut Window, &mut Context<T>) + Copy + 'static,
+) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.))
+        .child(crate::cloud_settings::kit::info_tip(
+            "Who bills what",
+            "Zuse bills cloud computers: your plan's machine minutes, then pay as you go up to your cap. Storage for asleep computers is included. Codex, Claude and Grok run on the subscription you sign in with, locally and in Cloud; Zuse never charges for their tokens.",
+        ))
+        .child(caption(
+            "Zuse bills cloud computers. Agents run on your own subscriptions.",
+        ))
+        .child(
+            div()
+                .id("billing-open-agents")
+                .role(Role::Button)
+                .tab_index(0)
+                .cursor_pointer()
+                .text_size(px(11.))
+                .text_color(palette::rgb(TEXT))
+                .hover(|v| v.underline())
+                .child("Agent accounts")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    act(this, Action::OpenAgents, window, cx)
+                })),
+        )
 }
 
 #[cfg(test)]

@@ -38,6 +38,75 @@ pub fn fill(rgb: [u8; 3], radius: f32) -> impl IntoElement {
     fill_color(color.into(), radius)
 }
 
+/// The texture behind a labelled button: the same ordered dither, but the
+/// band where the label sits stays calm (sparse, faint cells) and the
+/// density gathers at the ends and the bottom edge, so the label always reads
+/// on the plate while the key keeps the app's dithered look.
+pub fn label_fill(rgb: [u8; 3], radius: f32) -> impl IntoElement {
+    let color: Hsla = gpui::Rgba {
+        r: rgb[0] as f32 / 255.0,
+        g: rgb[1] as f32 / 255.0,
+        b: rgb[2] as f32 / 255.0,
+        a: 1.0,
+    }
+    .into();
+    gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            let columns = (width / DITHER_CELL).round().max(4.0) as usize;
+            let rows = (height / DITHER_CELL).round().max(4.0) as usize;
+            let cell_w = width / columns as f32;
+            let cell_h = height / rows as f32;
+            for y in 0..rows {
+                for x in 0..columns {
+                    let cx = (x as f32 + 0.5) * cell_w;
+                    let cy = (y as f32 + 0.5) * cell_h;
+                    let dx = (radius - cx).max(cx - (width - radius)).max(0.0);
+                    let dy = (radius - cy).max(cy - (height - radius)).max(0.0);
+                    if dx * dx + dy * dy > radius * radius {
+                        continue;
+                    }
+                    let edge = x == 0 || y == 0 || x + 1 == columns || y + 1 == rows;
+                    let alpha = if edge {
+                        0.35
+                    } else {
+                        label_cell_alpha(cx / width, (y as f32 + 0.5) / rows as f32, x, y)
+                    };
+                    if alpha <= 0.0 {
+                        continue;
+                    }
+                    window.paint_quad(gpui::fill(
+                        gpui::Bounds::new(
+                            bounds.origin
+                                + gpui::point(px(x as f32 * cell_w), px(y as f32 * cell_h)),
+                            gpui::size(px(cell_w), px(cell_h)),
+                        ),
+                        color.opacity(alpha),
+                    ));
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+}
+
+/// Alpha of an interior cell of [`label_fill`] at relative position
+/// `(u, v)`: dense toward the left and right ends and the bottom edge, calm
+/// across the label band.
+pub fn label_cell_alpha(u: f32, v: f32, x: usize, y: usize) -> f32 {
+    let ends = ((u - 0.5).abs() * 2.0 - 0.55).max(0.0) / 0.45;
+    let bottom = ((v - 0.7) / 0.3).max(0.0);
+    let density = (0.12 + 0.88 * ends.max(bottom * 0.8)).clamp(0.0, 1.0);
+    if density > threshold(x, y) {
+        (0.25 + density * 0.6).min(0.85)
+    } else {
+        0.0
+    }
+}
+
 /// [`fill`] in a theme color.
 pub fn fill_color(color: Hsla, radius: f32) -> impl IntoElement {
     gpui::canvas(
@@ -1147,5 +1216,28 @@ mod tests {
             assert_eq!(DitherColor::ALL[i], *color);
             assert_eq!(DitherColor::from_name(color.name()), Some(*color));
         }
+    }
+}
+
+#[cfg(test)]
+mod label_fill_tests {
+    use super::label_cell_alpha;
+
+    /// Lit cells in a 16x16 patch at relative position `(u, v)`.
+    fn lit(u: f32, v: f32) -> usize {
+        (0..16)
+            .flat_map(|x| (0..16).map(move |y| (x, y)))
+            .filter(|&(x, y)| label_cell_alpha(u, v, x, y) > 0.0)
+            .count()
+    }
+
+    #[test]
+    fn the_label_band_stays_calm_while_the_ends_carry_the_texture() {
+        let centre = lit(0.5, 0.45);
+        let end = lit(0.98, 0.45);
+        let bottom = lit(0.5, 0.98);
+        assert!(centre * 4 <= end, "centre {centre} vs end {end}");
+        assert!(centre < bottom, "centre {centre} vs bottom {bottom}");
+        assert!(centre > 0 && end > 0);
     }
 }

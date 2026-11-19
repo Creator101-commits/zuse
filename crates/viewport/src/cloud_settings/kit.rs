@@ -26,6 +26,11 @@ pub fn accent() -> Hsla {
     )
 }
 
+/// The label colour on an [`accent`] fill.
+pub fn on_accent() -> Hsla {
+    hsla(132. / 360., 0.3, 0.07, 1.)
+}
+
 /// What a status pill says about the thing it labels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -166,15 +171,14 @@ pub fn quantity(
         })
 }
 
-/// The solid primary action: accent fill, high-contrast label, hover and
-/// pressed states. Dither stays on meters, progress and charts.
+/// The primary action: the app's dithered key with a crisp label, plus
+/// hover, pressed and disabled states.
 pub fn primary_button(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     enabled: bool,
 ) -> Stateful<Div> {
-    crate::cloud_settings::style::button(id, label, true, !enabled, false)
-        .when(enabled, |v| v.active(|v| v.opacity(0.82)))
+    crate::styling::dither_action(id, label, enabled, true).tab_index(if enabled { 0 } else { -1 })
 }
 
 /// Where one step of a sequence stands.
@@ -186,21 +190,17 @@ pub enum StepMark {
     Upcoming,
 }
 
-/// Segmented step progress: the current step is a solid accent bar, done
-/// steps a full dithered accent fill, skipped ones a full muted fill and
-/// upcoming ones only the dotted track.
+/// Segmented step progress: thin solid segments. Done and current steps are
+/// the accent, skipped ones a muted fill and upcoming ones a subtle track.
 pub fn step_progress(marks: &[StepMark]) -> Div {
     let mut bar = div().flex().items_center().gap(px(4.)).w_full();
     for mark in marks {
-        let segment = match mark {
-            StepMark::Current => div().w_full().h(px(4.)).rounded(px(1.)).bg(accent()),
-            StepMark::Done => meter_colored(1.0, 4., accent()),
-            StepMark::Skipped => {
-                meter_colored(1.0, 4., Hsla::from(palette::rgb(MUTED)).opacity(0.45))
-            }
-            StepMark::Upcoming => meter_colored(0.0, 4., accent()),
+        let color: Hsla = match mark {
+            StepMark::Done | StepMark::Current => accent(),
+            StepMark::Skipped => Hsla::from(palette::rgb(MUTED)).opacity(0.45),
+            StepMark::Upcoming => Hsla::from(palette::rgb(BORDER)),
         };
-        bar = bar.child(div().flex_1().child(segment));
+        bar = bar.child(div().flex_1().h(px(3.)).rounded_full().bg(color));
     }
     bar
 }
@@ -288,9 +288,9 @@ pub fn menu_item(
         .child(label)
 }
 
-/// A titled card. The description is help text behind an info glyph next
-/// to the title, so pages stay short. The standard section on every Cloud
-/// computer page.
+/// A titled section in one [`container`]. The description is help text
+/// behind an info glyph next to the title, so pages stay short. The
+/// standard section on every Cloud page.
 pub fn section(
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
@@ -325,7 +325,128 @@ pub fn section(
                     .child(action),
             )
         });
-    s::frame().child(header).child(s::card().child(body))
+    container()
+        .child(header)
+        .child(div().border_t_1().border_color(hairline()).child(body))
+}
+
+/// One section container: a subtle surface, hairline border and one radius.
+/// Rows inside are separated by hairlines; no card sits inside another.
+pub fn container() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .rounded(px(s::CARD_RADIUS))
+        .border_1()
+        .border_color(hairline())
+        .bg(s::card_bg())
+        .overflow_hidden()
+}
+
+/// The hairline between rows and around containers.
+pub fn hairline() -> Hsla {
+    s::card_border()
+}
+
+/// The floating "unsaved changes" bar, centred near the bottom of the
+/// window: an info glyph, "Unsaved changes", then the caller's Reset and
+/// Save. Callers render it only while there are edits.
+pub fn unsaved_bar(
+    viewport: Size<Pixels>,
+    reset: impl IntoElement,
+    save: impl IntoElement,
+) -> impl IntoElement {
+    const WIDTH: f32 = 360.;
+    const HEIGHT: f32 = 44.;
+    let x = (f32::from(viewport.width) - WIDTH) / 2.;
+    let y = f32::from(viewport.height) - HEIGHT - 24.;
+    deferred(
+        anchored()
+            .position_mode(AnchoredPositionMode::Window)
+            .position(point(px(x.max(8.)), px(y.max(8.))))
+            .child(
+                div()
+                    .id("unsaved-changes-bar")
+                    .role(Role::Status)
+                    .aria_label("Unsaved changes")
+                    .occlude()
+                    .w(px(WIDTH))
+                    .h(px(HEIGHT))
+                    .pl(px(14.))
+                    .pr(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(hairline())
+                    .bg(palette::tone(hsla(0., 0., 0.13, 1.), hsla(0., 0., 1., 1.)))
+                    .shadow_lg()
+                    .child(
+                        icon("info-circle")
+                            .size(px(14.))
+                            .text_color(palette::rgb(MUTED)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(palette::rgb(TEXT))
+                            .child("Unsaved changes"),
+                    )
+                    .child(reset)
+                    .child(save),
+            ),
+    )
+    .with_priority(2)
+}
+
+/// A quiet, destructive-tinted text button ("Reset").
+pub fn reset_button(id: impl Into<ElementId>, enabled: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label("Reset")
+        .tab_index(if enabled { 0 } else { -1 })
+        .h(px(28.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .rounded(px(7.))
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(s::destructive_text())
+        .when(!enabled, |v| v.opacity(0.5))
+        .when(enabled, |v| {
+            v.cursor_pointer()
+                .hover(|v| v.bg(s::destructive_text().opacity(0.1)))
+        })
+        .child("Reset")
+}
+
+/// A quiet text button ("Back", "Skip for now").
+pub fn quiet_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Stateful<Div> {
+    let label = label.into();
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(label.clone())
+        .tab_index(0)
+        .h(px(28.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .rounded(px(7.))
+        .cursor_pointer()
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(palette::rgb(MUTED))
+        .hover(|v| {
+            v.text_color(palette::rgb(TEXT))
+                .bg(s::frame_bg().opacity(0.6))
+        })
+        .child(label)
 }
 
 /// A rounded square holding one glyph, for row and step leaders.

@@ -25,6 +25,24 @@ struct Controller {
 impl RpcService for Controller {
     async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
         self.calls.lock().unwrap().push(method.into());
+        // Review captures (`FIXTURE_REVIEW=1`): an opened cloud chat's
+        // computer is awake, and nothing is asserted about the call order.
+        if review() && method == methods::CLOUD_BILLING_ENTITLEMENTS {
+            return RpcReply::value(&json!({"accountId":"fixture-owner","organizationId":null,
+                "data":{"entitlements":[{"offerId":"cloud-starter-v1","status":"active"}]}}));
+        }
+        if review() && method == methods::CLOUD_ENVIRONMENT {
+            let mut frames = vec![json!({"state":"connecting","message":"Waking…"})];
+            if !matches!(
+                std::env::var("FIXTURE_COMPUTER_STATE").as_deref(),
+                Ok("starting" | "asleep")
+            ) {
+                frames.push(json!({"state":"ready","epoch":1}));
+            }
+            return Ok(RpcReply::Stream(Box::pin(
+                stream::iter(frames).chain(stream::pending()),
+            )));
+        }
         match method {
             methods::LOCAL_DEVICE if self.new_chat && !self.mixed => Err(RpcError::Capability(
                 "fixture.local-device-unavailable".into(),
@@ -296,6 +314,9 @@ fn main() -> anyhow::Result<()> {
                 let actual_window=if mixed&&!inspect {cx.update(|cx|cx.active_window().unwrap_or(window))}else{window};
                 let result = actual_window.update(cx, |_, window, cx| capture(window, cx, &output));
                 result.expect("fixture window").expect("native render");
+                if review() {
+                    std::process::exit(0);
+                }
                 if new_chat {
                     cx.background_executor().timer(Duration::from_millis(300)).await;
                     actual_window.update(cx,|_,window,cx|capture(window,cx,&output)).unwrap().unwrap();
@@ -374,8 +395,22 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn computer_seed() -> Value {
-    let workspace = json!({"workspaceId":"fixture-computer","chatId":"fixture-thread","initialSessionId":"fixture-session","title":"Improve cloud startup","branch":"cloud/startup","state":"paused","desiredState":"paused","statusCode":"paused","revision":3});
-    let chat = json!({"id":"fixture-session","threadId":"fixture-thread","deviceId":"cloud:fixture-computer","title":"Improve cloud startup","archived":false,"cwd":".","branch":"cloud/startup","createdAt":"2026-10-30T12:00:00Z","config":{"harness":"codex","model":"gpt-5.3-codex","sandbox":"workspace-write"}});
+    let mut workspace = json!({"workspaceId":"fixture-computer","chatId":"fixture-thread","initialSessionId":"fixture-session","title":"Improve cloud startup","branch":"cloud/startup","state":"paused","desiredState":"paused","statusCode":"paused","revision":3});
+    // Review captures show a running computer; the flow checks a sleeping one.
+    if review() {
+        // `FIXTURE_COMPUTER_STATE=starting` shows a computer still booting.
+        // `FIXTURE_COMPUTER_STATE=starting|asleep` shows a booting or
+        // sleeping computer instead of a running one.
+        let (state, desired, code) = match std::env::var("FIXTURE_COMPUTER_STATE").as_deref() {
+            Ok("starting") => ("provisioning", "ready", "allocating"),
+            Ok("asleep") => ("paused", "paused", "paused"),
+            _ => ("ready", "ready", "ready"),
+        };
+        workspace["state"] = json!(state);
+        workspace["desiredState"] = json!(desired);
+        workspace["statusCode"] = json!(code);
+    }
+    let chat = json!({"id":"fixture-session","threadId":"fixture-thread","deviceId":"cloud:fixture-computer","title":"Improve cloud startup","archived":false,"cwd":".","branch":"cloud/startup","createdAt":"2026-10-30T12:00:00Z","config":{"harness":"codex","model":"gpt-5.5","sandbox":"workspace-write"}});
     let messages = json!([
         {"id":"fixture-user","role":"user","parts":[{"id":"fixture-text","kind":"text","text":"Inspect the startup path and reduce redundant repository fetches."}],"createdAt":1793361600000_i64,"deviceId":"cloud:fixture-computer"},
         {"id":"fixture-assistant","role":"assistant","parts":[{"id":"fixture-result","kind":"text","text":"The clone step fetched every branch on each start. It now does a shallow fetch of the task branch only, and the setup cache is keyed by the lockfile, so a warm start skips the install. Startup went from 48 s to 19 s in three runs."}],"createdAt":1793361601000_i64,"deviceId":"cloud:fixture-computer","status":"complete"}
@@ -384,8 +419,8 @@ fn computer_seed() -> Value {
 }
 
 fn new_chat_context() -> Value {
-    let catalog = json!({"providers":[{"id":"codex","name":"Codex","defaultModel":"fixture-model","models":[{"id":"fixture-model","label":"GPT-5.5"}]}]});
-    json!({"accountId":"fixture-owner","ownerId":"fixture-owner","organizationId":null,"apiOrigin":"https://fixture-api.example.test","projects":[{"projectId":"cloud-only-project","accountId":"fixture-owner","displayName":"opcodehq/web","repositoryIdentity":"github.com/example/cloud-only","defaultBranch":"main","providerId":"boxd","supportsModelConfiguration":true}],"agentConnections":[{"connectionId":"fixture-codex","agent":"codex","state":"connected","accountLabel":"Fixture Codex"}],"agentCatalog":catalog,"providerAgentCatalogs":{"boxd":catalog},"computerCapabilities":{"providers":[{"id":"boxd","configured":true,"managedBaseReady":true,"preservesDisk":true,"sizes":[{"id":"small","label":"4 vCPU · 16 GB"}]}]}})
+    let catalog = json!({"providers":[{"id":"codex","name":"Codex","defaultModel":"gpt-5.5","models":[{"id":"gpt-5.5","label":"GPT-5.5"}]}]});
+    json!({"accountId":"fixture-owner","ownerId":"fixture-owner","organizationId":null,"apiOrigin":"https://fixture-api.example.test","projects":[{"projectId":"cloud-only-project","accountId":"fixture-owner","displayName":"opcodehq/web","repositoryIdentity":"github.com/example/cloud-only","defaultBranch":"main","providerId":"boxd","supportsModelConfiguration":true}],"agentConnections":[{"connectionId":"fixture-codex","agent":"codex","state":"connected","accountLabel":"Fixture Codex"}],"agentCatalog":catalog,"providerAgentCatalogs":{"boxd":catalog},"computerCapabilities":{"defaultProvider":"boxd","providers":[{"id":"boxd","configured":true,"managedBaseReady":true,"commandAdmissionVersion":2,"preservesDisk":true,"preservesMemory":true,"supportsSnapshots":true,"supportsDocker":false,"sizes":[{"id":"default","label":"Standard","vcpus":4,"memoryMib":16384,"diskGib":32}]}],"computerSizes":[{"id":"default","label":"Standard · 4 vCPU · 16 GB","vcpus":4,"memoryMib":16384,"machineRate":4,"available":true},{"id":"large","label":"Large · 8 vCPU · 32 GB","vcpus":8,"memoryMib":32768,"machineRate":8,"available":false,"requiresPlan":"cloud-max"}]}})
 }
 
 const TYPE_AND_SEND: &str = r#"
@@ -445,8 +480,8 @@ fn native_mixed_window(
         s.connection=if offline{zuse_protocol::view::ConnectionStatus::Failed("Local engine is offline".into())}else{zuse_protocol::view::ConnectionStatus::Ready};
         s.workspace_scope=Some(zuse_protocol::WorkspaceScope::Local);s.local_device_id=Some("fixture-local".into());s.devices=vec![serde_json::from_value(json!({"id":"fixture-local","name":"Offline local computer","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()];s.auto_selected=true;s.spaces_synced=true;s.chats_synced=true;
         s.apply_cloud_account(json!({"user":{"id":"fixture-owner","email":"alex@example.test"},"orgId":null}));
-        s.spaces=vec![serde_json::from_value(json!({"id":"mixed-space","deviceId":"fixture-local","path":"/fixture/mixed-workspace","remoteRepository":"github.com/example/cloud-only","createdAt":"2026-10-30T12:00:00Z"})).unwrap()];
-        s.chats=vec![serde_json::from_value(json!({"id":"mixed-local-chat","deviceId":"fixture-local","spaceId":"mixed-space","title":"Local checkout conversation","archived":false,"createdAt":"2026-10-30T12:00:00Z","config":{"harness":"codex","model":"fixture-model","sandbox":"workspace-write"}})).unwrap()];s.selected_chat=Some("mixed-local-chat".into());s.selected_space=Some("mixed-space".into());
+        s.spaces=vec![serde_json::from_value(json!({"id":"mixed-space","deviceId":"fixture-local","path":"/Users/alex/code/web","remoteRepository":"github.com/example/cloud-only","createdAt":"2026-10-30T12:00:00Z"})).unwrap()];
+        s.chats=vec![serde_json::from_value(json!({"id":"mixed-local-chat","deviceId":"fixture-local","spaceId":"mixed-space","title":"Tidy the settings layout","archived":false,"createdAt":"2026-10-30T12:00:00Z","config":{"harness":"codex","model":"gpt-5.5","sandbox":"workspace-write"}})).unwrap()];s.selected_chat=Some("mixed-local-chat".into());s.selected_space=Some("mixed-space".into());
         let mut workspace=computer_seed()["workspace"].clone();workspace["projectId"]=json!("cloud-only-project");
         assert!(s.fixture_cloud_sidebar_catalog(client,&context,&json!({"accountId":"fixture-owner","organizationId":null,"workspaces":[workspace]})));
         s
@@ -510,10 +545,10 @@ assert result.returncode==0,'visible transcript anchor changed across account fe
 "#;
 
 fn mixed_space() -> Value {
-    json!({"id":"mixed-space","deviceId":"fixture-controller","path":"/fixture/mixed-workspace","remoteRepository":"github.com/example/cloud-only","createdAt":"2026-10-30T12:00:00Z"})
+    json!({"id":"mixed-space","deviceId":"fixture-controller","path":"/Users/alex/code/web","remoteRepository":"github.com/example/cloud-only","createdAt":"2026-10-30T12:00:00Z"})
 }
 fn mixed_chat() -> Value {
-    json!({"id":"mixed-local-chat","deviceId":"fixture-controller","spaceId":"mixed-space","cwd":"/fixture/mixed-workspace","title":"Local checkout conversation","archived":false,"createdAt":"2026-10-30T12:00:00Z","config":{"harness":"codex","model":"fixture-model","sandbox":"workspace-write"}})
+    json!({"id":"mixed-local-chat","deviceId":"fixture-controller","spaceId":"mixed-space","cwd":"/Users/alex/code/web","title":"Tidy the settings layout","archived":false,"createdAt":"2026-10-30T12:00:00Z","config":{"harness":"codex","model":"gpt-5.5","sandbox":"workspace-write"}})
 }
 fn shared_mixed_window(client: zuse_rpc::RpcClient, cx: &mut gpui::App) -> gpui::AnyWindowHandle {
     use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
@@ -582,4 +617,10 @@ fn shared_mixed_window(client: zuse_rpc::RpcClient, cx: &mut gpui::App) -> gpui:
         .unbounded_send(json!({"connection":"connected","epoch":1}))
         .unwrap();
     window.into()
+}
+
+/// `FIXTURE_REVIEW=1`: capture the real app for review screenshots without
+/// the flow assertions the other modes check.
+fn review() -> bool {
+    std::env::var("FIXTURE_REVIEW").is_ok()
 }
