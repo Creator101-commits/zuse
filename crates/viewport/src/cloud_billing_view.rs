@@ -436,7 +436,7 @@ pub fn usage<T: 'static>(
         };
         root = root.child(body);
     }
-    let credits = credits_body(data, focus, cx, act);
+    let credits = credits_body(data, focus, true, cx, act);
     let portal_busy = data.pending.subscription;
     let disabled = portal_busy;
     let billing=div().flex().flex_col().child(credits).child(setting_row(false,"Manage subscription","Manage or cancel your Zuse subscription, payment details, and invoices in the billing portal.",Some(button("manage-cloud-subscription","Manage subscription",false,disabled,portal_busy).on_click(cx.listener(move|this,_,window,cx|if !disabled{act(this,Action::ManageSubscription,window,cx)})).into_any_element())));
@@ -517,152 +517,132 @@ fn usage_amount(item: &BillingUsageItem, by_minutes: bool) -> String {
 fn credit_minutes(cents: i64) -> i64 {
     zuse_protocol::cloud_billing::plans::credit_machine_minutes(cents.saturating_mul(10_000))
 }
-/// "Buy more minutes": balance, pack picker and purchase, in machine minutes
-/// with the price underneath. Shared by both layouts.
+/// "21,000 minutes of credit", or why the balance is missing.
+fn credit_balance_line(data: &Data<'_>) -> String {
+    data.credits
+        .map(|b| {
+            format!(
+                "{} minutes of credit",
+                crate::cloud_settings::kit::thousands(credit_minutes(b.credit_cents))
+            )
+        })
+        .unwrap_or_else(|| "Balance unavailable".into())
+}
+/// The "Buy more minutes" header meta: the balance as a quiet line and a
+/// refresh icon.
+pub(super) fn credits_header<T: 'static>(
+    data: &Data<'_>,
+    cx: &mut Context<T>,
+    act: impl Fn(&mut T, Action, &mut Window, &mut Context<T>) + Copy + 'static,
+) -> AnyElement {
+    let busy = data.pending.credits;
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(palette::rgb(MUTED))
+                .child(credit_balance_line(data)),
+        )
+        .child(
+            crate::cloud_settings::style::icon_button(
+                "refresh-prepaid-credits",
+                "refresh",
+                "Refresh balance",
+                busy,
+                busy,
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if !busy {
+                    act(this, Action::RefreshCredits, window, cx)
+                }
+            })),
+        )
+        .into_any_element()
+}
+/// "Buy more minutes": four equal packs (price first, minutes under it),
+/// the purchase button and one quiet line. `balance` puts the balance line
+/// in the body for layouts without a header meta.
 fn credits_body<T: 'static>(
     data: &Data<'_>,
     focus: &[FocusHandle; 4],
+    balance: bool,
     cx: &mut Context<T>,
     act: impl Fn(&mut T, Action, &mut Window, &mut Context<T>) + Copy + 'static,
 ) -> Div {
+    use crate::cloud_settings::kit;
     let busy = data.pending.credits;
     let enabled = data.credits.is_some_and(|b| b.available) && !busy;
-    let mut credits = div().flex().flex_col().gap(px(12.)).p(px(12.));
-    credits = credits.child(
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(12.))
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(s::title_text("Minutes credit".to_owned()))
-                    .child(
-                        div()
-                            .rounded(px(7.))
-                            .bg(s::frame_bg())
-                            .px(px(8.))
-                            .py(px(4.))
-                            .text_size(px(12.))
-                            .line_height(px(16.))
-                            .text_color(palette::rgb(TEXT))
-                            .child(SharedString::from(
-                                data.credits
-                                    .map(|b| {
-                                        format!(
-                                            "about {} machine minutes of credit",
-                                            crate::cloud_settings::kit::thousands(credit_minutes(
-                                                b.credit_cents
-                                            ))
-                                        )
-                                    })
-                                    .unwrap_or_else(|| "Balance unavailable".into()),
-                            )),
-                    ),
-            )
-            .child(
-                button(
-                    "refresh-prepaid-credits",
-                    "Refresh balance",
-                    false,
-                    busy,
-                    false,
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if !busy {
-                        act(this, Action::RefreshCredits, window, cx)
-                    }
-                })),
-            ),
-    );
-    if let Some(balance) = data.credits.filter(|b| b.debit_cents > 0) {
-        credits = credits.child(
-            div()
-                .text_size(px(12.))
-                .line_height(px(16.))
-                .text_color(palette::rgb(MUTED))
-                .child(format!(
-                    "{} owed on future invoices",
-                    cents(balance.debit_cents)
-                )),
-        );
-    }
-    if let Some(credit) = data.credits.and_then(|b| b.invoice_credit_cents) {
-        credits = credits.child(
-            div()
-                .text_size(px(12.))
-                .text_color(palette::rgb(MUTED))
-                .child(format!(
-                    "{} in legacy invoice credit, applied by Stripe to subscription invoices.",
-                    cents(credit)
-                )),
-        );
+    let mut credits = div().flex().flex_col().gap(px(12.)).p(px(kit::INSET));
+    if balance {
+        credits = credits.child(s::description_text(credit_balance_line(data)));
     }
     let mut options = div()
         .flex()
-        .flex_wrap()
-        .gap(px(6.))
+        .gap(px(8.))
+        .w_full()
         .id("cloud-credit-amounts")
         .role(Role::RadioGroup)
         .aria_label(tr(cx, msg::settings::prepaid_amount));
     for (i, amount) in [1000, 2500, 5000, 10000].into_iter().enumerate() {
         let handles = focus.clone();
         let selected = data.credit_amount == amount;
-        let minutes = format!(
-            "{} minutes",
-            crate::cloud_settings::kit::thousands(credit_minutes(amount))
-        );
+        let minutes = format!("{} minutes", kit::thousands(credit_minutes(amount)));
         let price = format!("${}", amount / 100);
-        let label = format!("{minutes} · {price}");
-        let mut fill = s::frame_bg().opacity(0.5);
-        if selected {
-            fill = palette::tone(
-                hsla(130. / 360., 0.06, 0.165, 1.),
-                hsla(106. / 360., 0.18, 0.89, 1.),
-            );
-        }
+        let label = format!("{price} · {minutes}");
         options = options.child(
             div()
                 .id(("credit-amount", i))
                 .role(Role::RadioButton)
-                .aria_label(SharedString::from(label.clone()))
+                .aria_label(SharedString::from(label))
                 .aria_selected(selected)
                 .track_focus(&focus[i].clone().tab_stop(enabled && selected))
                 .tab_index(if enabled && selected { 0 } else { -1 })
-                .py(px(6.))
-                .px(px(12.))
-                .rounded(px(7.))
+                .flex_1()
+                .flex_basis(px(0.))
+                .min_w_0()
                 .flex()
                 .flex_col()
-                .items_center()
-                .justify_center()
-                .bg(fill)
-                .text_size(px(12.))
-                .line_height(px(16.))
-                .text_color(palette::rgb(TEXT))
-                .when(selected, |v| {
-                    v.font_weight(FontWeight::MEDIUM)
-                        .border_1()
-                        .border_color(palette::rgb(TEXT).opacity(0.2))
-                        .px(px(11.))
+                .gap(px(4.))
+                .p(px(kit::INSET))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(if selected {
+                    kit::accent()
+                } else {
+                    palette::rgb(BORDER).into()
                 })
+                .when(selected, |v| v.bg(kit::accent().opacity(0.06)))
                 .when(!enabled, |v| v.opacity(0.5))
-                .when(enabled, |v| {
-                    v.cursor_pointer().hover(|v| v.bg(s::frame_bg()))
+                .when(enabled && !selected, |v| {
+                    v.cursor_pointer()
+                        .hover(|v| v.bg(s::frame_bg().opacity(0.5)))
                 })
-                .focus_visible(|v| v.border_2().border_color(palette::rgb(0x89ca21)))
-                .child(SharedString::from(minutes))
+                .focus_visible(|v| v.border_color(kit::accent()))
                 .child(
                     div()
-                        .text_size(px(11.))
-                        .line_height(px(14.))
-                        .text_color(palette::rgb(MUTED))
-                        .child(SharedString::from(price)),
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .line_height(px(18.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(palette::rgb(TEXT))
+                                .child(SharedString::from(price)),
+                        )
+                        .when(selected, |v| {
+                            v.child(
+                                crate::assets::icon("check")
+                                    .size(px(12.))
+                                    .text_color(kit::accent()),
+                            )
+                        }),
                 )
+                .child(s::description_text(minutes))
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     if !enabled {
                         return;
@@ -694,25 +674,20 @@ fn credits_body<T: 'static>(
                 })),
         );
     }
-    credits = credits.child(
+    credits = credits.child(options).child(
         div()
             .flex()
-            .flex_wrap()
-            .items_end()
+            .items_center()
+            .justify_between()
             .gap(px(12.))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(
-                        div()
-                            .mb(px(6.))
-                            .text_size(px(12.))
-                            .line_height(px(16.))
-                            .text_color(palette::rgb(MUTED))
-                            .child("Minutes pack"),
-                    )
-                    .child(options),
+                    .text_size(px(11.))
+                    .line_height(px(16.))
+                    .text_color(palette::rgb(MUTED))
+                    .child("Credit rolls over and applies to future Zuse invoices."),
             )
             .child(
                 button("buy-prepaid-credits", "Buy minutes", true, !enabled, busy).on_click(
@@ -724,21 +699,20 @@ fn credits_body<T: 'static>(
                 ),
             ),
     );
-    credits = credits.child(
-        div()
-            .text_size(px(12.))
-            .line_height(px(19.5))
-            .text_color(palette::rgb(MUTED))
-            .child(if data.credits.is_some_and(|b|b.funding=="shared-credits") { "Your subscription adds credits each month. Cloud compute and models billed by Zuse use this balance. Top-ups add to it. Your own agent subscriptions are billed separately.".to_owned() } else { tr(cx, msg::settings::prepaid_description) }),
-    );
+    if let Some(balance) = data.credits.filter(|b| b.debit_cents > 0) {
+        credits = credits.child(s::description_text(format!(
+            "{} owed on future invoices",
+            cents(balance.debit_cents)
+        )));
+    }
+    if let Some(credit) = data.credits.and_then(|b| b.invoice_credit_cents) {
+        credits = credits.child(s::description_text(format!(
+            "{} in earlier invoice credit, applied to subscription invoices.",
+            cents(credit)
+        )));
+    }
     if data.credits.is_some_and(|b| !b.available) {
-        credits = credits.child(
-            div()
-                .text_size(px(12.))
-                .line_height(px(16.))
-                .text_color(palette::rgb(MUTED))
-                .child(tr(cx, msg::settings::prepaid_disabled)),
-        );
+        credits = credits.child(s::description_text(tr(cx, msg::settings::prepaid_disabled)));
     }
     if let Some(error) = data.credit_error {
         credits = credits.child(note(error, true));

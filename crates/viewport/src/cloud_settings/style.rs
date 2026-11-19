@@ -170,16 +170,26 @@ fn button_base(
         .px(px(11.))
         .rounded(px(7.))
         .border_1()
-        .border_color(if primary { lime } else { transparent_black() })
+        .border_color(if primary {
+            lime.opacity(0.45)
+        } else {
+            transparent_black()
+        })
         .text_size(px(10.))
         .line_height(px(13.3333))
         .font_weight(FontWeight::MEDIUM)
         .text_color(if primary {
-            hsla(132. / 360., 0.3, 0.07, 1.)
+            white()
         } else {
             palette::rgb(TEXT).into()
         })
-        .when(primary, |v| v.bg(lime))
+        // Primary keys use the app's existing dithered action
+        // (`styling::dither_action`): same plate, same texture.
+        .when(primary, |v| {
+            v.overflow_hidden()
+                .bg(rgb(0x13150f))
+                .child(crate::styling::dither_background(true, !disabled && !busy))
+        })
         .when(disabled, |v| v.opacity(0.64))
         .when(!disabled && !busy, |v| {
             v.cursor_pointer().hover(move |v| {
@@ -200,7 +210,7 @@ fn button_base(
                 cx.stop_propagation();
             }
         })
-        .child(div().when(busy, |v| v.opacity(0.)).child(text));
+        .child(div().relative().when(busy, |v| v.opacity(0.)).child(text));
     if busy {
         view = view.child(
             div()
@@ -213,7 +223,7 @@ fn button_base(
                     icon("loading")
                         .size(px(12.))
                         .text_color(if primary {
-                            hsla(132. / 360., 0.3, 0.07, 1.)
+                            white()
                         } else {
                             palette::rgb(TEXT).into()
                         })
@@ -268,7 +278,7 @@ pub(crate) fn icon_label_button(
         .child(
             icon(glyph)
                 .size(px(14.))
-                .when(primary, |v| v.text_color(hsla(132. / 360., 0.3, 0.07, 1.)))
+                .when(primary, |v| v.text_color(white()))
                 .when(busy, |v| v.opacity(0.)),
         )
 }

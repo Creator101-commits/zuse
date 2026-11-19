@@ -214,7 +214,7 @@ impl RepositoryPanel {
                 "",
             )));
         }
-        s::frame().child(s::card().child(card))
+        kit::container().child(card)
     }
 
     pub(super) fn render_overview(&self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
