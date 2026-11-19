@@ -840,6 +840,17 @@ impl ChatDocHandle {
         rx
     }
 
+    /// Whether Stop holds the queue: its rows wait until the user sends again
+    /// or resumes it ([`Self::watch_queue_pause`] says when this changes).
+    pub fn queue_paused(&self) -> bool {
+        self.queue_paused.load(Ordering::Acquire)
+    }
+
+    /// Ticks on every change to this chat, including the queue's pause.
+    pub fn watch_queue_pause(&self) -> watch::Receiver<u64> {
+        self.queue_changes.subscribe()
+    }
+
     /// Where a newly steered row goes: after the rows already steered, ahead
     /// of every ordinary row. Records `id` as steered.
     fn steer_slot(&self, id: &str) -> Result<usize, DocError> {

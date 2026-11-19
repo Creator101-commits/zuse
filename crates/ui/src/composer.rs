@@ -10385,7 +10385,9 @@ impl Composer {
         if self.pickers.read(cx).preparing_source(cx) {
             return false;
         }
-        if self.send_cloud_task(text.clone(), queue, cx) || self.send_cloud(text.clone(), cx) {
+        if self.send_cloud_task_as(text.clone(), queue, steer, cx)
+            || self.send_cloud(text.clone(), cx)
+        {
             return true;
         }
         if self

@@ -1476,6 +1476,17 @@ impl Composer {
                         }))
                         .into_any_element(),
                 ]
+            } else if self.cloud_send_unsent() {
+                // The message is still in the chat: send it again as is, or
+                // take it back into the draft.
+                vec![
+                    tray_text_action("retry-cloud-send", "Retry", None, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.retry_unsent_cloud_send(cx)))
+                        .into_any_element(),
+                    tray_text_action("edit-cloud-send", "Edit", None, theme)
+                        .on_click(cx.listener(|this, _, _, cx| this.edit_unsent_cloud_send(cx)))
+                        .into_any_element(),
+                ]
             } else if cloud_launch {
                 vec![
                     tray_text_action("retry-cloud-launch", "Retry", None, theme)
@@ -1513,6 +1524,9 @@ impl Composer {
                 actions,
                 theme,
                 cx.listener(|this, _, _, cx| {
+                    // Dismissing an unsent message's notice returns it to the
+                    // draft rather than leaving it in the chat unsent.
+                    this.edit_unsent_cloud_send(cx);
                     this.failure = None;
                     this.failure_key = None;
                     cx.notify();

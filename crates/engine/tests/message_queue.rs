@@ -1997,6 +1997,69 @@ async fn a_send_during_a_turn_boundary_turn_waits_for_the_turn_end() {
     core.shutdown().await;
 }
 
+/// Stop holds the queue, and the queue says so: every `WatchQueue` frame
+/// carries `paused`, so the tray can show it with Resume. Resuming (sending
+/// the first row) clears it and the rest drain as usual.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_reports_a_stop_pause_until_it_is_resumed() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+    let client = zuse_rpc::memory_client(core.rpc_service());
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the first turn to start",
+    )
+    .await;
+    let mut rx = client
+        .subscribe(
+            zuse_rpc::methods::WATCH_QUEUE,
+            serde_json::json!({ "chatId": CHAT }),
+        )
+        .await
+        .expect("WatchQueue");
+    let first = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .expect("first queue frame")
+        .expect("stream open");
+    assert_eq!(first["paused"], false);
+    let held = core
+        .doc_host
+        .queue_message(CHAT, "held", Vec::new())
+        .expect("queue follow-up");
+    core.doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .expect("queue interrupt");
+    let mut frame = first;
+    while !(frame["paused"] == true && frame["items"].as_array().map(Vec::len) == Some(1)) {
+        frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a paused frame")
+            .expect("stream open");
+    }
+    assert_eq!(frame["items"][0]["id"], held);
+    assert!(
+        core.doc_host
+            .send_queued_now(CHAT, &held)
+            .await
+            .expect("resume sends the first row")
+    );
+    while frame["paused"] != false {
+        frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("a resumed frame")
+            .expect("stream open");
+    }
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "held"),
+        "the resumed row to start",
+    )
+    .await;
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
 /// An agent that reads input mid-turn still gets a plain send immediately.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_send_during_a_mid_turn_steerable_turn_steers_it_immediately() {
