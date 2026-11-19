@@ -210,6 +210,13 @@ impl Shell {
         }
         let workspace = workspace.to_owned();
         self.cloud_archiving.insert(workspace.clone());
+        // The row leaves at once and stays out of every list, including one
+        // read before the server records the archive, until it is confirmed.
+        self.state.update(cx, |state, cx| {
+            if state.begin_cloud_sidebar_archive(&workspace) {
+                cx.notify();
+            }
+        });
         let command = uuid::Uuid::new_v4().to_string();
         cx.spawn(async move |this, cx| {
             let result = target.archive(&command).await;
@@ -218,9 +225,8 @@ impl Shell {
                 match result {
                     Ok(_) => {
                         this.state.update(cx, |state, cx| {
-                            if state.hide_cloud_sidebar_workspace(&workspace) {
-                                cx.notify();
-                            }
+                            state.acknowledge_cloud_sidebar_archive(&workspace, cx);
+                            cx.notify();
                         });
                         this.show_notice(
                             crate::toast::ToastKind::Success,
@@ -229,6 +235,11 @@ impl Shell {
                         );
                     }
                     Err(error) => {
+                        this.state.update(cx, |state, cx| {
+                            if state.fail_cloud_sidebar_archive(&workspace) {
+                                cx.notify();
+                            }
+                        });
                         this.show_notice(
                             crate::toast::ToastKind::Error,
                             format!("Couldn’t archive this cloud chat. {error}"),
@@ -458,6 +469,8 @@ mod tests {
     #[derive(Default)]
     struct Archiver {
         calls: std::sync::Mutex<Vec<Value>>,
+        /// Refuse every archive, like a controller that could not reach Cloud.
+        fail: bool,
     }
     #[async_trait::async_trait]
     impl zuse_rpc::RpcService for Archiver {
@@ -468,6 +481,9 @@ mod tests {
         ) -> Result<zuse_rpc::RpcReply, zuse_rpc::RpcError> {
             if method == zuse_rpc::methods::CLOUD_ARCHIVE {
                 self.calls.lock().unwrap().push(params.clone());
+                if self.fail {
+                    return Err(zuse_rpc::RpcError::Failed("Cloud is unreachable.".into()));
+                }
                 return zuse_rpc::RpcReply::value(&json!({
                     "accountId":"owner","organizationId":null,
                     "workspace":{"workspaceId":params["workspaceId"],"state":"archiving","desiredState":"archived"}
@@ -691,6 +707,85 @@ mod tests {
                 shell.cloud_conversation.is_none(),
                 "archiving does not open the task"
             );
+        });
+    }
+    #[gpui::test]
+    fn a_failed_cloud_archive_brings_the_row_back_with_an_error(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(UiSettings::default(), directory.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let archiver = std::sync::Arc::new(Archiver {
+            fail: true,
+            ..Default::default()
+        });
+        let controller =
+            crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(archiver.clone()));
+        let (host,cx)=cx.add_window_view(|_,cx| {
+            let shell=cx.new(|cx| {
+                let state=cx.new(|_| {
+                    let mut state=AppState::new();
+                    state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+                    assert!(state.apply_cloud_sidebar_catalog(
+                        &json!({"accountId":"owner","organizationId":null,"ownerId":"owner","projects":[{"projectId":"project","displayName":"Cloud repo","repositoryIdentity":"github.com/owner/repo","canCreate":true}]}),
+                        &json!({"accountId":"owner","organizationId":null,"workspaces":[{
+                            "workspaceId":"task-1","projectId":"project","providerId":"boxd",
+                            "chatId":"session-1","initialSessionId":"session-1",
+                            "title":"Cloud chat 1","state":"paused","desiredState":"paused",
+                            "createdAt":1,"updatedAt":1
+                        }]})));
+                    state
+                });
+                state.update(cx,|state,_|state.set_test_engine(controller));
+                let mut shell=Shell::new(state,EngineBootConfig {
+                    target:None,data_dir:directory.path().into(),ipc_port:0,edge_url:"http://127.0.0.1:1".into(),
+                    edge_token:None,org_id:None,workos_client_id:None,default_harness:zuse_protocol::HarnessId::Mock,
+                },cx);
+                shell.reduced_motion=true;
+                shell.settings.sidebar_organization=SidebarOrganization::ByProject;
+                shell.sidebar_collapsed_groups.clear();
+                shell
+            });
+            ProjectList {shell,_directory:directory}
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        cx.update(|window, cx| window.draw(cx).clear());
+        // The row leaves the moment Archive is clicked, before any reply.
+        shell.update(cx, |shell, cx| {
+            shell.archive_cloud_sidebar_row("cloud:task-1", cx);
+            assert!(shell.state.read(cx).cloud_sidebar_workspaces().is_empty());
+        });
+        settle(&runtime, &archiver, 1, cx);
+        assert_eq!(archiver.calls.lock().unwrap().len(), 1);
+        shell.read_with(cx, |shell, cx| {
+            let rows = shell.state.read(cx).cloud_sidebar_workspaces();
+            assert_eq!(rows.len(), 1, "a failed archive puts the row back");
+            assert_eq!(rows[0]["workspaceId"], "task-1");
+            assert!(
+                shell
+                    .sidebar_notice
+                    .as_deref()
+                    .is_some_and(|notice| notice.starts_with("Couldn’t archive this cloud chat.")),
+                "the failure is reported: {:?}",
+                shell.sidebar_notice
+            );
+            assert!(shell.cloud_archiving.is_empty());
         });
     }
 
