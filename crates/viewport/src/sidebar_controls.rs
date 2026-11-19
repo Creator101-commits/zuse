@@ -658,11 +658,9 @@ impl Render for SidebarControls {
                     .font_weight(FontWeight::MEDIUM)
             })
             .when(upgrade, |v| {
-                // The dithered key, calm behind the label so it reads.
                 v.relative()
                     .overflow_hidden()
-                    .bg(hsla(80. / 360., 0.18, 0.075, 1.))
-                    .child(crate::dither::label_fill([151, 183, 76], 7.))
+                    .child(crate::dither::fill([151, 183, 76], 7.))
                     .text_color(white())
                     .px(px(10.))
                     .text_size(px(11.))

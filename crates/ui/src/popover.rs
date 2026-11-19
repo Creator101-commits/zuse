@@ -1382,12 +1382,12 @@ pub fn btn_ghost(theme: &Theme, label: &str, fade_key: impl Into<SharedString>) 
 pub(crate) const DITHER_KEY_RGB: [u8; 3] = [151, 183, 76];
 pub(crate) const DITHER_KEY_RADIUS: f32 = 7.0;
 
-/// Primary button: the dithered olive key with a crisp white label.
+/// Primary button: the send key's dithered olive plate with a white label.
 pub fn btn_primary(theme: &Theme, label: &str) -> gpui::Div {
     dither_button(theme, DitherKey::Primary, label)
 }
 
-/// Destructive button (`btnDestructive`): the dithered key in red.
+/// Destructive button (`btnDestructive`): the send key's texture in red.
 pub fn btn_danger(theme: &Theme, label: &str) -> gpui::Div {
     dither_button(theme, DitherKey::Danger, label)
 }
@@ -1420,25 +1420,26 @@ pub enum DitherKey {
     Danger,
 }
 
-/// Give a button the send key's ordered-dither face, with the texture
-/// calm behind the label (`dither::label_fill`) so the white label always
-/// reads. Call before adding the label; `radius` must match the button's.
+/// Give a button the send key's ordered-dither face. Call before adding the
+/// label so it paints over the texture; `radius` must match the button's.
 pub fn dither_key<E: Styled + ParentElement>(
     el: E,
     theme: &Theme,
     key: DitherKey,
     radius: f32,
 ) -> E {
+    // The texture is tuned for a dark plate; light cards get a deep base so
+    // the white label keeps its contrast.
     let light = theme.appearance == crate::theme::Appearance::Light;
     let (plate, ink, edge): (gpui::Hsla, [u8; 3], gpui::Hsla) = match key {
         DitherKey::Primary => (
             if light {
                 gpui::hsla(80.0 / 360.0, 0.28, 0.2, 1.0)
             } else {
-                gpui::hsla(80.0 / 360.0, 0.18, 0.075, 1.0)
+                gpui::rgb(0x13150f).into()
             },
             DITHER_KEY_RGB,
-            theme.accent.opacity(0.45),
+            theme.accent.opacity(0.4),
         ),
         DitherKey::Danger => (
             if light {
@@ -1447,7 +1448,7 @@ pub fn dither_key<E: Styled + ParentElement>(
                 gpui::rgb(0x1c0f0e).into()
             },
             [208, 85, 78],
-            theme.danger.opacity(0.45),
+            theme.danger.opacity(0.4),
         ),
     };
     el.relative()
@@ -1455,7 +1456,7 @@ pub fn dither_key<E: Styled + ParentElement>(
         .border_1()
         .border_color(edge)
         .text_color(gpui::white())
-        .child(zuse_viewport::dither::label_fill(ink, radius))
+        .child(zuse_viewport::dither::fill(ink, radius))
 }
 
 /// Pulsing skeleton rows shown while a list loads (zuse:

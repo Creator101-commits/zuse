@@ -183,14 +183,12 @@ fn button_base(
         } else {
             palette::rgb(TEXT).into()
         })
-        // Primary keys are the app's dithered key, calm behind the label.
+        // Primary keys use the app's existing dithered action
+        // (`styling::dither_action`): same plate, same texture.
         .when(primary, |v| {
             v.overflow_hidden()
-                .bg(palette::tone(
-                    hsla(80. / 360., 0.18, 0.075, 1.),
-                    hsla(80. / 360., 0.28, 0.2, 1.),
-                ))
-                .child(crate::dither::label_fill([151, 183, 76], 7.))
+                .bg(rgb(0x13150f))
+                .child(crate::styling::dither_background(true, !disabled && !busy))
         })
         .when(disabled, |v| v.opacity(0.64))
         .when(!disabled && !busy, |v| {

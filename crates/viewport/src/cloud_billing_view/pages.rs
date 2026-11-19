@@ -215,7 +215,9 @@ fn section(
     action: Option<AnyElement>,
     body: impl IntoElement,
 ) -> Div {
-    crate::cloud_settings::kit::section(title, description, action, body)
+    s::frame()
+        .child(s::header_with_action(title, description, action))
+        .child(s::card().child(body))
 }
 /// One figure of the usage header: label, big value and a hint.
 fn stat(label: &'static str, value: String, unit: &'static str, hint: String) -> Div {
@@ -918,7 +920,7 @@ pub fn billing<T: 'static>(
     }
     if data.subscribed == Some(false) {
         return root
-            .child(plans::plans_hero())
+            .child(plans::plans_intro())
             .child(plans::plans_group(data, cx, act))
             .child(billing_footnote(cx, act));
     }
@@ -1033,7 +1035,7 @@ pub fn billing<T: 'static>(
     if pay_as_you_go {
         card = card.child(cap_row(data, cap, cx, act));
     }
-    root = root.child(crate::cloud_settings::kit::container().child(card));
+    root = root.child(s::frame().child(s::card().child(card)));
     if data.subscribed.is_some() {
         root = root.child(plans::plans_group(data, cx, act));
     }
@@ -1041,7 +1043,7 @@ pub fn billing<T: 'static>(
         .credits
         .is_some_and(|b| b.available || b.credit_cents > 0 || b.debit_cents > 0)
     {
-        root = root.child(crate::cloud_settings::kit::section(
+        root = root.child(section(
             "Buy more minutes",
             "",
             None,
@@ -1050,28 +1052,30 @@ pub fn billing<T: 'static>(
     }
     let disabled = !subscribed || busy;
     root.child(
-        crate::cloud_settings::kit::container().child(crate::cloud_settings::kit::row_item(
-            true,
-            None,
-            "Invoices and payment method",
-            "",
-            Some(
-                icon_label_button(
-                    "manage-cloud-subscription",
-                    "arrow-up-right",
-                    "Open billing portal",
-                    false,
-                    disabled,
-                    busy,
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    if !disabled {
-                        act(this, Action::ManageSubscription, window, cx)
-                    }
-                }))
-                .into_any_element(),
-            ),
-        )),
+        s::frame().child(
+            s::card().child(crate::cloud_settings::kit::row_item(
+                true,
+                None,
+                "Invoices and payment method",
+                "",
+                Some(
+                    icon_label_button(
+                        "manage-cloud-subscription",
+                        "arrow-up-right",
+                        "Open billing portal",
+                        false,
+                        disabled,
+                        busy,
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if !disabled {
+                            act(this, Action::ManageSubscription, window, cx)
+                        }
+                    }))
+                    .into_any_element(),
+                ),
+            )),
+        ),
     )
     .child(billing_footnote(cx, act))
 }

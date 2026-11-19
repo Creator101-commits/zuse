@@ -1,11 +1,76 @@
 //! Shared application action treatment for native and browser surfaces.
 use gpui::{prelude::*, *};
 
-/// Corner radius of a labelled action.
+/// Two-pixel ordered dither, with a bottom-weighted fill and pointer emphasis.
+/// Painted as GPU quads; there is no bitmap allocation or idle animation loop.
+/// Corner radius shared by dithered actions and their painted pattern.
 const DITHER_RADIUS: f32 = 6.;
 
-/// The app's dithered key with a label: olive when `primary`, grey
-/// otherwise. The texture stays calm behind the label so it always reads.
+pub fn dither_background(primary: bool, enabled: bool) -> AnyElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let width = f32::from(bounds.size.width);
+            let height = f32::from(bounds.size.height);
+            let columns = (width / 2.).ceil() as usize;
+            let rows = (height / 2.).ceil() as usize;
+            let intensity = if enabled && bounds.contains(&window.mouse_position()) {
+                1.0
+            } else {
+                0.0
+            };
+            let seed = if primary { 0x97b74c } else { 0x5c6068 };
+            let bayer = [
+                0., 8., 2., 10., 12., 4., 14., 6., 3., 11., 1., 9., 15., 7., 13., 5.,
+            ];
+            for y in 0..rows {
+                let density = 0.25 + 0.75 * (y as f32 + 0.5) / rows.max(1) as f32;
+                for x in 0..columns {
+                    let threshold = (bayer[(y & 3) * 4 + (x & 3)] + 0.5) / 16.;
+                    let lit = density > threshold - intensity * 0.1;
+                    // Clip to the button's rounded rectangle: canvas cells
+                    // are not masked by the parent's corner radius.
+                    let (cx, cy) = (x as f32 * 2. + 1., y as f32 * 2. + 1.);
+                    let dx = (DITHER_RADIUS - cx)
+                        .max(cx - (width - DITHER_RADIUS))
+                        .max(0.);
+                    let dy = (DITHER_RADIUS - cy)
+                        .max(cy - (height - DITHER_RADIUS))
+                        .max(0.);
+                    let edge = if dx > 0. && dy > 0. {
+                        DITHER_RADIUS - (dx * dx + dy * dy).sqrt()
+                    } else {
+                        cx.min(cy).min(width - cx).min(height - cy)
+                    };
+                    if edge < 0. {
+                        continue;
+                    }
+                    let border = edge < 2.;
+                    let tier = if lit { 1. } else { 0.4 };
+                    let alpha = if border {
+                        0.5 + 0.25 * intensity
+                    } else {
+                        ((0.3 + density * 0.7) * tier * (1. + intensity * 0.22)).clamp(0., 1.)
+                    };
+                    let origin = bounds.origin + point(px(x as f32 * 2.), px(y as f32 * 2.));
+                    let cell = Bounds::new(
+                        origin,
+                        size(
+                            px(2f32.min(width - x as f32 * 2.)),
+                            px(2f32.min(height - y as f32 * 2.)),
+                        ),
+                    );
+                    window.paint_quad(fill(cell, rgba((seed << 8) | ((alpha * 255.) as u32))));
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .size_full()
+    .into_any_element()
+}
+
 pub fn dither_action(
     id: impl Into<ElementId>,
     name: impl Into<SharedString>,
@@ -28,39 +93,12 @@ pub fn dither_action(
         .gap_2()
         .text_size(px(11.))
         .font_weight(FontWeight::MEDIUM)
-        // The dark plate keeps the white label crisp; the texture stays calm
-        // behind it (see `dither::label_fill`).
         .text_color(rgb(0xffffff))
-        .bg(crate::palette::tone(
-            hsla(80. / 360., 0.18, 0.075, 1.),
-            hsla(80. / 360., 0.28, 0.2, 1.),
-        ))
-        .border_1()
-        .border_color(if primary {
-            hsla(83. / 360., 0.5, 0.45, 0.45)
-        } else {
-            hsla(0., 0., 0.6, 0.25)
-        })
+        .bg(rgb(0x13150f))
         .when(!enabled, |d| d.opacity(0.45))
-        .when(enabled, |d| {
-            d.cursor_pointer()
-                .hover(|d| d.opacity(0.92))
-                .active(|d| d.opacity(0.8))
-        })
-        .child(crate::dither::label_fill(
-            if primary {
-                [151, 183, 76]
-            } else {
-                [120, 124, 130]
-            },
-            DITHER_RADIUS,
-        ))
-        .child(
-            div()
-                .relative()
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(name),
-        )
+        .when(enabled, |d| d.cursor_pointer().hover(|d| d.opacity(0.95)))
+        .child(dither_background(primary, enabled))
+        .child(div().relative().child(name))
 }
 
 pub fn round_icon_action(

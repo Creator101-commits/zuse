@@ -421,23 +421,6 @@ fn feature_glyph(line: &str) -> &'static str {
         "check"
     }
 }
-/// A plan card's header tint: (plate, dither ink).
-fn tint(plan: Option<PlanId>) -> (Hsla, Hsla) {
-    match plan {
-        Some(PlanId::CloudMax) => (
-            hsla(268. / 360., 0.32, 0.15, 1.),
-            hsla(268. / 360., 0.62, 0.62, 1.),
-        ),
-        Some(_) => (
-            hsla(150. / 360., 0.32, 0.12, 1.),
-            hsla(140. / 360., 0.5, 0.48, 1.),
-        ),
-        None => (
-            hsla(214. / 360., 0.34, 0.15, 1.),
-            hsla(214. / 360., 0.62, 0.6, 1.),
-        ),
-    }
-}
 /// The price block of a plan card.
 pub struct Price {
     pub was: Option<String>,
@@ -445,10 +428,13 @@ pub struct Price {
     pub unit: &'static str,
     pub note: String,
 }
-/// One plan: a dithered header in its tint with the name, price, minutes
-/// pill and action, then the feature list.
+/// One plan as a double card, like the other settings sections: the outer
+/// frame holds the inner card (name, price, minutes, action) and, below it,
+/// the feature list. Neutral theme colours; only the recommended or current
+/// plan gets the accent, on its marker and the inner card's border.
+#[allow(clippy::too_many_arguments)]
 fn plan_card(
-    plan: Option<PlanId>,
+    tag: Option<&'static str>,
     name: String,
     price: Price,
     usage: String,
@@ -456,103 +442,86 @@ fn plan_card(
     today: Option<String>,
     intro: Option<&'static str>,
     features: Vec<String>,
-    current: bool,
+    accent: bool,
 ) -> Div {
-    let (plate, ink) = tint(plan);
-    let white_text = |size: f32| div().text_size(px(size)).text_color(hsla(0., 0., 1., 0.96));
-    let mut header = div()
-        .relative()
+    let inner = div()
         .flex()
         .flex_col()
-        .gap(px(10.))
+        .gap(px(14.))
         .p(px(16.))
-        .bg(plate)
-        .child(crate::dither::fill_color(ink.opacity(0.32), 0.))
         .child(
             div()
-                .relative()
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(white_text(13.).font_weight(FontWeight::MEDIUM).child(name))
-                .when(current, |v| {
-                    v.child(
-                        div()
-                            .px(px(8.))
-                            .h(px(18.))
-                            .flex()
-                            .items_center()
-                            .rounded_full()
-                            .bg(hsla(0., 0., 0., 0.35))
-                            .text_size(px(10.))
-                            .text_color(hsla(0., 0., 1., 0.9))
-                            .child("Current plan"),
-                    )
+                .gap(px(8.))
+                .h(px(20.))
+                .child(s::title_text(name))
+                .when_some(tag, |v, tag| {
+                    v.child(crate::cloud_settings::kit::pill(
+                        tag,
+                        if accent {
+                            crate::cloud_settings::kit::Tone::Ready
+                        } else {
+                            crate::cloud_settings::kit::Tone::Neutral
+                        },
+                    ))
                 }),
         )
         .child(
             div()
-                .relative()
                 .flex()
                 .flex_col()
-                .gap(px(2.))
-                .child(div().h(px(14.)).when_some(price.was, |v, was| {
-                    v.child(
-                        white_text(11.)
-                            .line_through()
-                            .text_color(hsla(0., 0., 1., 0.55))
-                            .child(was),
-                    )
-                }))
+                .gap(px(4.))
                 .child(
                     div()
                         .flex()
                         .items_baseline()
-                        .gap(px(5.))
+                        .gap(px(6.))
                         .child(
-                            white_text(28.)
-                                .line_height(px(32.))
-                                .font_weight(FontWeight::SEMIBOLD)
+                            div()
+                                .text_size(px(26.))
+                                .line_height(px(30.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(palette::rgb(TEXT))
                                 .child(price.amount),
                         )
-                        .child(
-                            white_text(12.)
-                                .text_color(hsla(0., 0., 1., 0.75))
-                                .child(price.unit),
-                        ),
+                        .child(s::description_text(price.unit))
+                        .when_some(price.was, |v, was| {
+                            v.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .line_through()
+                                    .text_color(palette::rgb(MUTED))
+                                    .child(was),
+                            )
+                        }),
                 )
-                .child(
-                    white_text(11.)
-                        .text_color(hsla(0., 0., 1., 0.7))
-                        .child(price.note),
-                ),
+                .child(s::description_text(price.note)),
         )
         .child(
             div()
-                .relative()
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(7.))
-                .bg(hsla(0., 0., 0., 0.4))
-                .text_size(px(11.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(hsla(0., 0., 1., 0.92))
+                .text_size(px(12.))
+                .line_height(px(16.))
+                .text_color(palette::rgb(TEXT))
                 .child(usage),
         )
-        .child(div().relative().flex().flex_col().child(control));
-    header = header.child(
-        div()
-            .relative()
-            .h(px(14.))
-            .flex()
-            .justify_center()
-            .when_some(today, |v, t| {
-                v.child(white_text(11.).text_color(hsla(0., 0., 1., 0.75)).child(t))
-            }),
-    );
-    let mut list = div().flex().flex_col().gap(px(8.)).p(px(16.));
+        .child(
+            div().flex().flex_col().gap(px(8.)).child(control).child(
+                div()
+                    .h(px(16.))
+                    .flex()
+                    .justify_center()
+                    .when_some(today, |v, t| v.child(s::description_text(t))),
+            ),
+        );
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap(px(9.))
+        .px(px(14.))
+        .pt(px(12.))
+        .pb(px(12.));
     if let Some(intro) = intro {
         list = list.child(s::description_text(intro));
     }
@@ -579,45 +548,21 @@ fn plan_card(
                 ),
         );
     }
-    div()
+    s::frame()
         .flex_1()
         .min_w(px(200.))
-        .flex()
-        .flex_col()
-        .rounded(px(s::CARD_RADIUS))
-        .overflow_hidden()
-        .border_1()
-        .border_color(if current {
-            lime().opacity(0.6)
-        } else {
-            s::card_border()
-        })
-        .bg(s::card_bg())
-        .child(header)
+        .child(
+            s::card()
+                .when(accent, |v| v.border_color(lime().opacity(0.55)))
+                .child(inner),
+        )
         .child(list)
 }
-/// The hero above the plans for an account without a plan.
-pub(super) fn plans_hero() -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .items_center()
-        .gap(px(8.))
-        .pt(px(8.))
-        .pb(px(4.))
-        .child(crate::cloud_settings::kit::icon_tile("dither-cloud", 56.))
-        .child(
-            div()
-                .mt(px(6.))
-                .text_size(px(20.))
-                .line_height(px(26.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(palette::rgb(TEXT))
-                .child("Put Zuse to work in the cloud"),
-        )
-        .child(s::description_text(
-            "Plans include machine minutes every month. Asleep computers use none.",
-        ))
+/// One line under the page header for an account without a plan.
+pub(super) fn plans_intro() -> Div {
+    s::description_text(
+        "Choose a plan. Every plan includes machine minutes each month, and asleep computers use none.",
+    )
 }
 /// Cloud, Cloud Max and Enterprise side by side. While the $1 trial is
 /// offered it lives in the Cloud card.
@@ -631,7 +576,7 @@ pub(super) fn plans_group<T: 'static>(
     let subscribed = data.subscribed == Some(true);
     let trial = catalog.trial_available && data.subscribed == Some(false);
     let busy = data.pending.subscription;
-    let mut cards = div().flex().flex_wrap().gap(px(12.));
+    let mut cards = div().flex().flex_wrap().gap(px(10.));
     let mut previous: Option<String> = None;
     for offer in catalog
         .plans
@@ -649,9 +594,9 @@ pub(super) fn plans_group<T: 'static>(
                 .justify_center()
                 .rounded(px(7.))
                 .border_1()
-                .border_color(hsla(0., 0., 1., 0.25))
+                .border_color(s::card_border())
                 .text_size(px(11.))
-                .text_color(hsla(0., 0., 1., 0.85))
+                .text_color(palette::rgb(MUTED))
                 .child(label)
                 .into_any_element(),
             PlanControl::Checkout {
@@ -684,7 +629,7 @@ pub(super) fn plans_group<T: 'static>(
             Price {
                 was: Some(monthly_price.clone()),
                 amount: "$1".into(),
-                unit: "/ first 7 days",
+                unit: "first 7 days",
                 note: format!("then {monthly_price}/mo"),
             }
         } else {
@@ -703,8 +648,17 @@ pub(super) fn plans_group<T: 'static>(
             _ => (None, plan_features(offer)),
         };
         previous = Some(offer.name.clone());
+        let recommended = !subscribed && offer.plan_id == PlanId::Cloud;
         cards = cards.child(plan_card(
-            Some(offer.plan_id),
+            if is_current {
+                Some("Current plan")
+            } else if cloud_trial {
+                Some("$1 first week")
+            } else if recommended {
+                Some("Recommended")
+            } else {
+                None
+            },
             offer.name.clone(),
             price,
             format!("{} / mo", machine_minutes(offer.included_machine_minutes)),
@@ -712,7 +666,7 @@ pub(super) fn plans_group<T: 'static>(
             cloud_trial.then(|| format!("Today: $1, then {monthly_price}/mo")),
             intro,
             features,
-            is_current,
+            is_current || recommended,
         ));
     }
     let url = catalog.enterprise_contact_url.clone();
