@@ -387,6 +387,7 @@ impl RepositoryPanel {
                     return;
                 }
                 if pending.kind.starts_with("agent") {
+                    self.agents.request_failed(pending.kind);
                     self.agents.error = Some(e);
                     self.agents.poll = None;
                     cx.notify();
