@@ -5303,7 +5303,10 @@ mod tests {
         let early = deferred
             .handle(methods::CLOUD_PROJECTS, serde_json::json!({}))
             .await;
-        assert!(early.is_err(), "before assembly only the workspace session answers");
+        assert!(
+            early.is_err(),
+            "before assembly only the workspace session answers"
+        );
 
         let _ = service.set(Arc::new(Assembled) as Arc<dyn RpcService>);
         state_tx.send_replace(DeferredEngineState::Ready);
