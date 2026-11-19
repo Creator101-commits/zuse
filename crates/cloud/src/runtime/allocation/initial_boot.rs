@@ -39,7 +39,7 @@ pub(in crate::runtime) fn request(
     }
     Ok(Some(r))
 }
-fn saved(row: &Value, request: &Request, source: &str) -> bool {
+pub(super) fn saved(row: &Value, request: &Request, source: &str) -> bool {
     let value = &row["request_config"]["initialRuntimeBootstrapReceipt"];
     value["sourceArtifactId"] == source && request.saved(&value["proof"])
 }
@@ -49,7 +49,7 @@ pub(super) fn positive_create_source(request: &Request, source: &str, name: &str
         "sourceArtifactId":source,"machineName":name,"machineId":request.source_machine_id,
         "storageIncarnationId":request.storage_incarnation_id,"imagePins":request.image_pins})
 }
-fn verified_create_source(
+pub(super) fn verified_create_source(
     row: &Value,
     request: &Request,
     source: &str,
@@ -67,7 +67,7 @@ fn verified_create_source(
 }
 impl RuntimeControl {
     #[tracing::instrument(name="cloud_allocation_stage", skip_all, fields(workspace=%job.resource_id, operation="bootstrap_fence", has_proof=proof.is_some()))]
-    async fn initial_boot_allocation_fence(
+    pub(super) async fn initial_boot_allocation_fence(
         &self,
         job: &jobs::Job,
         request: &Request,

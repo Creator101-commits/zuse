@@ -321,6 +321,39 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether the turn a Stop was aimed at (`turn_id`, the chat's last entry
+/// when the Stop was sent) is over, which makes the Stop moot. It is over
+/// once a newer turn began: a user message after it that was not sent
+/// before this Stop. The turn's own later entries (its reply, the segment a
+/// steer opens) and the messages sent before the Stop (a steer into the
+/// turn, a send the Stop acts on too) never make it moot: treating any newer
+/// entry as "past" silently dropped a Stop sent right after a steer, leaving
+/// the turn running.
+fn stop_target_is_past(
+    stop: &SessionCommandEntry,
+    commands: &[SessionCommandEntry],
+    messages: &[SessionMessageEntry],
+    turn_id: &str,
+) -> bool {
+    let Some(at) = messages.iter().position(|m| m.id == turn_id) else {
+        return false;
+    };
+    let sent_before: HashSet<String> = commands
+        .iter()
+        .take_while(|c| c.id != stop.id)
+        .filter_map(|c| match &c.payload {
+            SessionCommandPayload::Run { message_id, .. } => Some(message_id.clone()),
+            SessionCommandPayload::Steer { message_id, .. } => {
+                Some(message_id.clone().unwrap_or_else(|| c.id.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    messages[at + 1..]
+        .iter()
+        .any(|m| m.role == MessageRole::User && !sent_before.contains(&m.id))
+}
+
 /// The queued-attachment transfers a command's `pending://` refs imply —
 /// shared by the retry escort and the retry re-issue.
 fn command_transfers(entry: &SessionCommandEntry) -> Vec<crate::uploads::AttachmentTransfer> {
@@ -5453,7 +5486,8 @@ impl DocHost {
         let commands = handle.doc.read_commands()?;
         let messages = handle.doc.read_entries().unwrap_or_default();
         let current_turn_id = messages.last().map(|m| m.id.clone());
-        let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
+        let turn_is_past =
+            |turn_id: &str| stop_target_is_past(&entry, &commands, &messages, turn_id);
         let is_processed = |id: &str| self.inner.store.is_processed(id).unwrap_or(false);
         let disposition = evaluate_command(
             &entry,
@@ -6017,7 +6051,8 @@ impl DocHost {
                 skipped.insert(entry.id.clone());
                 continue;
             }
-            let turn_is_past = |turn_id: &str| messages.iter().any(|m| m.id == turn_id);
+            let turn_is_past =
+                |turn_id: &str| stop_target_is_past(&entry, &commands, &messages, turn_id);
             let disposition = evaluate_command(
                 &entry,
                 &EvaluationContext {
@@ -8366,5 +8401,106 @@ mod consumed_pending_tests {
                 .starts_with("Outcome unknown")
         );
         host.shutdown_workers().await;
+    }
+}
+
+#[cfg(test)]
+mod stop_target_tests {
+    use super::stop_target_is_past;
+    use zuse_doc::{
+        MessageRole, SessionCommandEntry, SessionCommandPayload, SessionCommandStatus,
+        SessionMessageEntry,
+    };
+
+    fn command(id: &str, payload: SessionCommandPayload) -> SessionCommandEntry {
+        SessionCommandEntry {
+            id: id.into(),
+            payload,
+            issued_by: "dev".into(),
+            issued_at: 0,
+            based_on: None,
+            expires_at: None,
+            status: SessionCommandStatus::Pending,
+            resolution: None,
+        }
+    }
+
+    fn send(id: &str, message_id: Option<&str>) -> SessionCommandEntry {
+        command(
+            id,
+            SessionCommandPayload::Steer {
+                prompt: "p".into(),
+                message_id: message_id.map(Into::into),
+            },
+        )
+    }
+
+    fn message(id: &str, role: MessageRole) -> SessionMessageEntry {
+        SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: Vec::new(),
+            created_at: 0,
+            device_id: "dev".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn messages_sent_before_the_stop_keep_its_turn_stoppable() {
+        let stop = command("stop", SessionCommandPayload::Interrupt {});
+        let commands = vec![
+            send("first", Some("u1")),
+            send("steer", Some("u2")),
+            send("u3", None),
+            stop.clone(),
+        ];
+        let messages = vec![
+            message("u1", MessageRole::User),
+            message("a1", MessageRole::Assistant),
+            message("u2", MessageRole::User),
+            message("a2", MessageRole::Assistant),
+            message("u3", MessageRole::User),
+        ];
+        assert!(!stop_target_is_past(&stop, &commands, &messages, "a1"));
+    }
+
+    #[test]
+    fn the_turns_own_reply_keeps_it_stoppable() {
+        let stop = command("stop", SessionCommandPayload::Interrupt {});
+        let commands = vec![send("first", Some("u1")), stop.clone()];
+        let messages = vec![
+            message("u1", MessageRole::User),
+            message("a1", MessageRole::Assistant),
+        ];
+        assert!(!stop_target_is_past(&stop, &commands, &messages, "u1"));
+    }
+
+    #[test]
+    fn a_turn_started_by_anything_sent_after_the_stop_makes_it_moot() {
+        let stop = command("stop", SessionCommandPayload::Interrupt {});
+        let commands = vec![
+            send("first", Some("u1")),
+            stop.clone(),
+            send("later", Some("u3")),
+        ];
+        let messages = vec![
+            message("u1", MessageRole::User),
+            message("a1", MessageRole::Assistant),
+            message("u3", MessageRole::User),
+            message("a3", MessageRole::Assistant),
+        ];
+        assert!(stop_target_is_past(&stop, &commands, &messages, "a1"));
+        // A queued row (no command) that started the next turn does too.
+        let messages = vec![
+            message("u1", MessageRole::User),
+            message("a1", MessageRole::Assistant),
+            message("queued-row", MessageRole::User),
+        ];
+        assert!(stop_target_is_past(&stop, &commands, &messages, "a1"));
+        // An unknown target is never past.
+        assert!(!stop_target_is_past(&stop, &commands, &messages, "gone"));
     }
 }

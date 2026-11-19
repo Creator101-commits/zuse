@@ -377,7 +377,10 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("runtime", calls[0])
 
     def test_release_version_rejects_wrong_base_and_path_characters_before_building(self):
-        for version in ("0.27.0-preview.1", "0.26.0-../../escape", "0.26.0-", "0.26.0-preview\n"):
+        workspace = tomllib.loads((package.ROOT / "Cargo.toml").read_text())
+        major, minor, _ = workspace["workspace"]["package"]["version"].split(".")
+        wrong_base = f"{major}.{int(minor) + 1}.0-preview.1"
+        for version in (wrong_base, "0.26.0-../../escape", "0.26.0-", "0.26.0-preview\n"):
             with self.subTest(version=version), patch.object(sys, "argv", ["package.py", "--version", version]), \
                     patch.object(package.subprocess, "run") as run, self.assertRaises(SystemExit):
                 package.main()

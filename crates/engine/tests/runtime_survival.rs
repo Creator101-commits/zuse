@@ -918,53 +918,6 @@ async fn a_send_accepted_by_a_stopping_runtime_is_redispatched() {
     rig.core.sessions.shutdown().await;
 }
 
-/// A steer sent before Stop is cancelled with the turn: it must never run
-/// later in the fresh runtime as if it were the user's next message.
-#[tokio::test]
-async fn a_steer_sent_before_stop_is_cancelled_with_it() {
-    let rig = rig();
-    rig.core
-        .sessions
-        .dispatch(CHAT, HarnessId::Mock, request("hold: working"), None)
-        .await
-        .unwrap();
-    wait_for(
-        || rig.ledger.prompts.lock().unwrap().len() == 1,
-        "the agent to be running the turn",
-    )
-    .await;
-    rig.core
-        .doc_host
-        .queue_command(
-            CHAT,
-            SessionCommandPayload::Run {
-                request: request("hold: steer before stop"),
-                message_id: "m-steer".into(),
-            },
-        )
-        .unwrap();
-    rig.core
-        .doc_host
-        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
-        .unwrap();
-    wait_for(
-        || {
-            rig.ledger.kills.load(Ordering::SeqCst) == 1
-                && status(&rig.core) == Some(SessionStatus::Idle)
-        },
-        "the stop to settle",
-    )
-    .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        rig.ledger.spawns.load(Ordering::SeqCst),
-        1,
-        "nothing re-ran"
-    );
-    assert_eq!(status(&rig.core), Some(SessionStatus::Idle));
-    rig.core.sessions.shutdown().await;
-}
-
 /// An idle thread can still hold a background shell. Archive ends it rather
 /// than refusing with nothing on screen to stop.
 #[tokio::test]

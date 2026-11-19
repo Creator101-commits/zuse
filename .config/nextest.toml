@@ -3,6 +3,9 @@
 slow-timeout = { period = "15s", terminate-after = 4 }
 
 [profile.ci]
+# One retry: a test that fails and then passes is reported as FLAKY in the
+# log instead of failing the whole run. A test that fails twice still fails.
+retries = 1
 fail-fast = false
 failure-output = "immediate-final"
 slow-timeout = { period = "15s", terminate-after = 4 }

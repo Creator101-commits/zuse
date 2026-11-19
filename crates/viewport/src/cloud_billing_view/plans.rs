@@ -428,10 +428,9 @@ pub struct Price {
     pub unit: &'static str,
     pub note: String,
 }
-/// One plan as a double card, like the other settings sections: the outer
-/// frame holds the inner card (name, price, minutes, action) and, below it,
-/// the feature list. Neutral theme colours; only the recommended or current
-/// plan gets the accent, on its marker and the inner card's border.
+/// One plan as the shared settings double card: the plan's name (and its
+/// marker) in the frame header; price, minutes, the action and the feature
+/// list as rows of the inner card. Neutral colours throughout.
 #[allow(clippy::too_many_arguments)]
 fn plan_card(
     tag: Option<&'static str>,
@@ -444,30 +443,37 @@ fn plan_card(
     features: Vec<String>,
     accent: bool,
 ) -> Div {
-    let inner = div()
-        .flex()
-        .flex_col()
-        .gap(px(14.))
-        .p(px(16.))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(8.))
-                .h(px(20.))
-                .child(s::title_text(name))
-                .when_some(tag, |v, tag| {
-                    v.child(crate::cloud_settings::kit::pill(
+    // The marker sits in the title row rather than the 28px action slot, so
+    // every plan's header keeps the plain title height.
+    let header = s::header_bar(
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .child(s::title_text(name))
+            .when_some(tag, |v, tag| {
+                v.child(
+                    crate::cloud_settings::kit::pill(
                         tag,
                         if accent {
                             crate::cloud_settings::kit::Tone::Ready
                         } else {
                             crate::cloud_settings::kit::Tone::Neutral
                         },
-                    ))
-                }),
-        )
+                    )
+                    .my(px(-1.)),
+                )
+            }),
+        None,
+    );
+    let inner = div()
+        .flex()
+        .flex_col()
+        .gap(px(14.))
+        .px(px(s::ROW_PAD_X))
+        .pt(px(14.))
+        .pb(px(10.))
         .child(
             div()
                 .flex()
@@ -519,9 +525,10 @@ fn plan_card(
         .flex()
         .flex_col()
         .gap(px(9.))
-        .px(px(14.))
-        .pt(px(12.))
-        .pb(px(12.));
+        .px(px(s::ROW_PAD_X))
+        .py(px(s::ROW_PAD_Y))
+        .border_t_1()
+        .border_color(palette::rgb(BORDER));
     if let Some(intro) = intro {
         list = list.child(s::description_text(intro));
     }
@@ -548,15 +555,13 @@ fn plan_card(
                 ),
         );
     }
+    // `s::section`, with the inner card stretched so side-by-side plans
+    // share one height.
     s::frame()
         .flex_1()
         .min_w(px(200.))
-        .child(
-            s::card()
-                .when(accent, |v| v.border_color(lime().opacity(0.55)))
-                .child(inner),
-        )
-        .child(list)
+        .child(header)
+        .child(s::card().flex_grow(1.).child(inner).child(list))
 }
 /// One line under the page header for an account without a plan.
 pub(super) fn plans_intro() -> Div {

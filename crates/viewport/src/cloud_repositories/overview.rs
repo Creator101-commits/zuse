@@ -173,48 +173,42 @@ impl RepositoryPanel {
                     b.on_click(cx.listener(|this, _, _, cx| this.onboarding_reopen(cx)))
                 })
         };
-        let mut card = column().child(
+        // The shared settings double card: the title in the frame header,
+        // the computer and the plan's minutes as rows of the inner card.
+        let header = s::header_bar(
             row()
                 .items_center()
-                .gap(px(12.))
-                .p(px(16.))
-                .child(kit::icon_tile("dither-cloud", 36.))
-                .child(
-                    row()
-                        .flex_1()
-                        .min_w_0()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .text_size(px(15.))
-                                .line_height(px(20.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(palette::rgb(TEXT))
-                                .child("Your cloud computer"),
-                        )
-                        .child(kit::info_tip(
-                            "How a cloud chat starts",
-                            "Every chat gets a fresh computer from your machine image, checks out only its repository and starts your agent on your own account. It sleeps when quiet and keeps working after you close Zuse.",
-                        ))
-                        .child(if ready {
-                            kit::pill("Ready", Tone::Ready)
-                        } else {
-                            kit::pill("Setup isn't finished", Tone::Attention)
-                        }),
-                )
+                .gap(px(2.))
+                .child(s::title_text("Your cloud computer"))
+                .child(kit::info_tip(
+                    "How a cloud chat starts",
+                    "Every chat gets a fresh computer from your machine image, checks out only its repository and starts your agent on your own account. It sleeps when quiet and keeps working after you close Zuse.",
+                )),
+            None,
+        );
+        let mut body = column().child(
+            s::row(true)
+                .flex_nowrap()
+                .child(kit::icon_tile("dither-cloud", 28.))
+                .child(row().flex_1().min_w_0().items_center().child(if ready {
+                    kit::pill("Ready", Tone::Ready)
+                } else {
+                    kit::pill("Setup isn't finished", Tone::Attention)
+                }))
                 .child(kit::spec_chip(DEFAULT_MACHINE))
                 .child(action),
         );
         if let Some(plan) = self.plan_glance() {
-            card = card.child(div().px(px(16.)).pb(px(16.)).child(kit::quantity(
-                format!("{} · machine minutes", plan.label()),
-                plan.minutes_line(),
-                plan.fraction_left(),
-                "",
-            )));
+            body = body.child(
+                s::row(false).child(div().flex_1().min_w_0().child(kit::quantity(
+                    format!("{} · machine minutes", plan.label()),
+                    plan.minutes_line(),
+                    plan.fraction_left(),
+                    "",
+                ))),
+            );
         }
-        kit::container().child(card)
+        s::section(header, body)
     }
 
     pub(super) fn render_overview(&self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
