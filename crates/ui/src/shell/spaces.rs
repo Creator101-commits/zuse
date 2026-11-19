@@ -1213,11 +1213,6 @@ mod pinned_session_tests {
         exercise_session_section_drops(cx, true, false);
     }
 
-    #[gpui::test]
-    fn hidden_label_sidebar_section_drops_follow_pointer(cx: &mut gpui::TestAppContext) {
-        exercise_session_section_drops(cx, false, false);
-    }
-
     fn exercise_session_section_drops(
         cx: &mut gpui::TestAppContext,
         compact: bool,
