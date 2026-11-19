@@ -619,6 +619,13 @@ pub struct CloudCapabilities {
     pub can_configure: bool,
     pub can_allocate: bool,
     pub allocation_blockers: Vec<String>,
+    /// Internal id of the provider the server runs new cloud computers on.
+    /// Clients send it back when creating; it is never shown to people.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<ProviderId>,
+    /// Sizes for new cloud computers, with the account's plan limits.
+    #[serde(default)]
+    pub computer_sizes: Vec<crate::cloud_billing::plans::SizeOption>,
 }
 
 #[cfg(test)]
