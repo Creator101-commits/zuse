@@ -21,15 +21,50 @@ fn workspace_wait_cli_is_local_fenced_and_usable_while_the_runtime_owns_storage(
                 .as_nanos()
         )));
     std::fs::create_dir(&root.0).unwrap();
-    for (state, generation, succeeds, error) in [
-        ("ready", "1", true, ""),
-        ("failed", "1", false, "workspace_preparation_failed"),
-        ("ready", "2", false, "workspace_preparation_fenced"),
-        ("cancelled", "1", false, "workspace_preparation_cancelled"),
+    // (published workspace, published generation, state, command generation, ...)
+    for (workspace, published, state, generation, succeeds, error) in [
+        ("task", 1, "ready", "1", true, ""),
+        (
+            "task",
+            1,
+            "failed",
+            "1",
+            false,
+            "workspace_preparation_failed",
+        ),
+        // The status predates the command's runtime: wait, then time out.
+        (
+            "task",
+            1,
+            "ready",
+            "2",
+            false,
+            "workspace_preparation_timeout",
+        ),
+        // A recreated computer: the agent reruns its generation-1 command.
+        ("task", 2, "ready", "1", true, ""),
+        (
+            "other",
+            1,
+            "ready",
+            "1",
+            false,
+            "workspace_preparation_fenced",
+        ),
+        (
+            "task",
+            1,
+            "cancelled",
+            "1",
+            false,
+            "workspace_preparation_cancelled",
+        ),
     ] {
         std::fs::write(
             root.0.join("workspace-preparation.json"),
-            format!(r#"{{"workspace":"task","generation":1,"disk":"disk","state":"{state}"}}"#),
+            format!(
+                r#"{{"workspace":"{workspace}","generation":{published},"disk":"disk","state":"{state}"}}"#
+            ),
         )
         .unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_zuse-cloud-runtime"))
