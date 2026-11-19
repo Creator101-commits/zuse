@@ -1849,6 +1849,21 @@ impl CloudApi {
                         &[],
                     )
                     .await?;
+                // The saved sidebar list must agree with the server now, so a
+                // restart cannot paint an archived task back into Threads.
+                #[cfg(not(target_arch = "wasm32"))]
+                if !self.hosted {
+                    if method == UNARCHIVE {
+                        sidebar_cache::unarchived(id);
+                    } else {
+                        sidebar_cache::archived(
+                            self.origin.as_str(),
+                            &account,
+                            organization.as_deref(),
+                            id,
+                        );
+                    }
+                }
                 let mut value = value;
                 let mut workspace: Workspace = serde_json::from_value(value.clone())?;
                 if organization.is_none() {

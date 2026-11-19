@@ -89,6 +89,9 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         sleep_wait_secs: u64,
     },
+    /// Print the curated Claude Code catalogue every managed base carries
+    /// (`infra/cloud/managed-base-claude-catalog.json`).
+    PrintClaudeBaseCatalog,
     /// Register an already certified immutable platform base using an operator database role.
     RegisterManagedBase {
         #[arg(long)]
@@ -403,6 +406,12 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e.code))?;
             println!("{}", serde_json::to_string(&receipt)?);
+        }
+        Command::PrintClaudeBaseCatalog => {
+            print!(
+                "{}",
+                zuse_cloud::model_catalog::claude_code_base_catalog_json()
+            );
         }
         Command::ObjectStoreCheck => {
             let report = zuse_cloud::objects::probe::staging().await?;

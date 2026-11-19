@@ -130,6 +130,11 @@ print(json.dumps(dict(runId=r['runId'],provider=r['provider'],releaseSha256=r['r
         args=SimpleNamespace(build_report=build,proof=proof,bundle=bundle,capabilities=caps,catalogs=catalogs,output=self.root/'candidate.json')
         self.assertEqual(tool.candidate(args)['status'],'uncertified-staging-candidate')
         result=tool.load(args.output);self.assertNotIn('certificationReportSha256',result)
+        # A placeholder Claude row never reaches a base: Claude always carries the
+        # curated catalogue, while reviewed Codex/Grok rows pass through unchanged.
+        by_agent={h['agent']:h['catalog'] for h in result['harnesses']}
+        self.assertEqual(by_agent['claude'],tool.load(tool.CLAUDE_CATALOG))
+        self.assertEqual(by_agent['codex'],dict(id='codex',models=[dict(id='fixture')]))
         # New stopped-memory images require the actual shared restored-machine
         # bootstrap proof. An optional source flag alone cannot promote them.
         original_bundle=tool.load(bundle/'bundle.json');original_build=tool.load(build);original_proof=tool.load(proof)
@@ -185,6 +190,31 @@ print(json.dumps(dict(runId=r['runId'],provider=r['provider'],releaseSha256=r['r
         with self.assertRaisesRegex(ValueError,'retained_candidate'):tool.candidate(args)
         value['artifactRetained']=True;tool.write(proof,value);(bundle/'codex').write_text('changed-native-bits')
         with self.assertRaisesRegex(ValueError,'integrity'):tool.candidate(args)
+
+    def test_curated_claude_catalog_offers_every_family_with_effort_levels(self):
+        catalog=tool.claude_catalog()
+        self.assertEqual(catalog['id'],'claude-code')
+        for family in ('claude-opus-','claude-sonnet-','claude-haiku-','claude-fable-'):
+            self.assertTrue(any(m['id'].startswith(family) for m in catalog['models']),family)
+        for model in catalog['models']:
+            if not model['id'].startswith('claude-haiku-'):
+                self.assertTrue({'low','medium','high','max'}<=set(model['reasoningLevels']),model['id'])
+        self.assertTrue(any(m['id']==catalog['defaultModel'] for m in catalog['models']))
+
+    def test_claude_catalog_sql_is_idempotent_and_backs_up_first(self):
+        sql=tool.claude_catalog_sql(SimpleNamespace(schema='zuse_staging',backup_table='zz_backup_claude_catalog'))
+        statements=sql.splitlines()
+        self.assertEqual((statements[0],statements[-1]),('BEGIN;','COMMIT;'))
+        # Lock, backup and update share one statement and one target set.
+        change=next(l for l in statements if l.startswith('WITH targets AS'))
+        self.assertLess(change.index('FOR UPDATE'),change.index('INSERT INTO zz_backup_claude_catalog'))
+        self.assertLess(change.index('INSERT INTO zz_backup_claude_catalog'),change.index('UPDATE cloud_managed_bases'))
+        self.assertIn('FROM targets t WHERE',change);self.assertIn("state='verified'",change);self.assertIn('IS DISTINCT FROM',change)
+        self.assertNotIn('candidate_manifest',sql)
+        self.assertIn(json.dumps(tool.claude_catalog(),sort_keys=True,separators=(',',':')),sql)
+        for schema,table in (('bad;schema','zz_backup_x'),('zuse_staging','cloud_managed_bases'),('zuse_staging','zz_backup_x;drop')):
+            with self.subTest(schema=schema,table=table),self.assertRaisesRegex(ValueError,'zz_backup'):
+                tool.claude_catalog_sql(SimpleNamespace(schema=schema,backup_table=table))
 
     def test_disabled_parent_candidate_uses_distinct_verified_receipt(self):
         import copy

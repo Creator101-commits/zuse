@@ -270,7 +270,34 @@ still require the actual freshly authenticated staging owner.
 Generate the candidate document from the retained report and exact native pins.
 `catalogs.json` contains a nonempty reviewed subset keyed `claude`, `codex`,
 `grok`; start with Claude only when other accounts have not supplied their actual
-model catalog yet. Never invent Codex/Grok IDs to populate a picker.
+model catalog yet. Never invent Codex/Grok IDs to populate a picker. A `claude`
+entry only opts the agent in: the tool always writes the curated Claude Code
+catalogue from `managed-base-claude-catalog.json` (the desktop's own list, kept
+equal to `zuse_cloud::model_catalog::claude_code` by a test; regenerate with
+`zuse-cloud-api print-claude-base-catalog`), because Claude Code cannot list
+models on an unauthenticated base.
+
+To bring already verified bases to the current curated catalogue, print the
+idempotent SQL and run it with the operator role. One statement locks the verified
+rows whose Claude catalogue differs, copies them into the named `zz_backup_*` table
+and updates exactly those rows. It never touches staging candidates: their pins
+carry a candidate digest, so they need new candidate metadata and a new pin.
+
+Runtime admission stays valid: it matches release ID, artifact, architecture and
+capabilities, and no admission digest covers model metadata. Certification bindings
+are different. A `zuse-cloud-api certify-managed-base` report binds provider,
+release, artifact and runtime only, so it still describes the updated row. A report
+from this tool's `certify` binds `releaseSha256` over the whole release, catalogues
+included, so it no longer matches the updated row and `publication` with that report
+fails. For such releases the backup row is the exact certified release: keep it with
+the report as the record of the catalogue override, and to republish, run
+`publication` against the backed-up release or certify the updated release again to
+get a new report.
+
+```sh
+python3 infra/cloud/managed-base-release.py claude-catalog-sql \
+  --schema zuse_staging --backup-table zz_backup_claude_catalog_YYYYMMDD | psql "$OPERATOR_URL" -X -v ON_ERROR_STOP=1
+```
 `capabilities.json` describes only the actual tested provider/size. These are
 acceptance choices, not compatibility approvals. The tool rehashes every
 allowlisted bundle file and matches all installed agent versions/digests.
