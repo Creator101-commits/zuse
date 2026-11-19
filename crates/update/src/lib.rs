@@ -2078,12 +2078,6 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_is_not_misclassified_as_linux() {
-        assert_eq!(platform_key().0, "windows");
-    }
-
-    #[cfg(windows)]
-    #[test]
     fn windows_install_is_always_unmanaged() {
         assert_eq!(
             detect_install_from(

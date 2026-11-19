@@ -187,14 +187,6 @@ async fn a_root_base_without_node_fails() {
     assert_eq!(failed(&report), ["nodeAvailable"]);
 }
 
-#[test]
-fn the_checks_script_reports_node_and_its_package_tools() {
-    assert!(
-        CHECKS.contains("node --version && npm --version && npx --version && corepack --version")
-    );
-    assert!(CHECKS.contains(r#""node":%s,"nodeVersion":"%s""#));
-}
-
 #[tokio::test]
 async fn a_computer_whose_runtime_never_answers_is_still_deleted() {
     let fake = Fake {

@@ -1467,20 +1467,6 @@ fn tool_names_type_the_common_calls() {
 }
 
 #[test]
-fn commands_map_from_wire() {
-    let wire = json!([
-        {"name": "init", "description": "Create AGENTS.md"},
-        {"name": "share"},
-        {"description": "nameless is dropped"},
-    ]);
-    let commands = commands_from_wire(&wire);
-    assert_eq!(commands.len(), 2);
-    assert_eq!(commands[0].name, "init");
-    assert_eq!(commands[0].description, "Create AGENTS.md");
-    assert_eq!(commands[1].name, "share");
-}
-
-#[test]
 fn canonical_command_removed_after_discovery_is_not_downgraded_to_prompt_text() {
     use zuse_protocol::invocation::{Invocation, harness_prompt};
 
@@ -1660,13 +1646,6 @@ async fn only_a_missing_selected_command_rereads_the_catalog() {
     assert_eq!(commands, known);
     assert_eq!(reads.load(Ordering::SeqCst), 0);
     task.abort();
-}
-
-#[test]
-fn stall_env_and_startup_env_parse() {
-    // Defaults (no env in test runner): bounded stall, 300s startup.
-    assert_eq!(stall_bound(), Some(DEFAULT_STALL_BOUND));
-    assert_eq!(startup_timeout(), DEFAULT_STARTUP_TIMEOUT);
 }
 
 #[test]

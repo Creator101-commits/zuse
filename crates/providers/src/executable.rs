@@ -657,7 +657,13 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
             let started = std::time::Instant::now();
             assert_eq!(binary_version(&path), None);
-            assert!(started.elapsed() < std::time::Duration::from_secs(3));
+            // The probe gives up after 2s; the hung script would hold it for
+            // 30s. Leave room for fork/exec latency on a loaded CI machine.
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "{name} probe took {:?}",
+                started.elapsed()
+            );
             assert_eq!(newest_candidate(vec![path.clone()]), Some(path));
         }
     }

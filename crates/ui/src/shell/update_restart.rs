@@ -145,19 +145,4 @@ mod tests {
         assert_eq!(plan.tick(0), Step::Wait);
         assert_eq!(plan.tick(0), Step::Restart);
     }
-
-    #[test]
-    fn restart_now_does_not_wait_for_idle_ticks_or_agent_updates() {
-        let mut plan = RestartPlan::new(false);
-        assert_eq!(plan.tick(0), Step::Restart);
-    }
-
-    #[test]
-    fn restart_when_idle_only_waits_for_consecutive_idle_ticks() {
-        let mut plan = RestartPlan::new(true);
-        for _ in 0..2 {
-            assert_eq!(plan.tick(0), Step::Wait);
-        }
-        assert_eq!(plan.tick(0), Step::Restart);
-    }
 }

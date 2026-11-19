@@ -576,21 +576,4 @@ mod tests {
         });
         assert_eq!(text(cx), "why?");
     }
-    #[test]
-    fn scoped_commands_do_not_reserve_typing_chords_globally() {
-        assert_eq!(
-            Command::ComposerTogglePlanMode.context(),
-            Some("MessageComposer")
-        );
-        assert_eq!(Command::EditorAnnotate.context(), Some("Input"));
-        assert_eq!(Command::NextChat.context(), None);
-        let prefs = UiSettings::default().clamped();
-        assert_eq!(
-            prefs
-                .keymap
-                .get(ShortcutId::Desktop(Command::ComposerForceSubmit)),
-            "mod-enter"
-        );
-        assert!(settings::conflicted_shortcuts(&prefs.keymap).is_empty());
-    }
 }

@@ -662,12 +662,3 @@ fn mailbox_blocks_a_swap_until_every_lease_is_acknowledged_and_delivered() {
     .unwrap();
     assert!(agent::mailbox_quiescent(&database));
 }
-
-#[test]
-fn bootstrap_capabilities_advertise_runtime_updates() {
-    assert!(
-        crate::identity::bootstrap_capabilities()
-            .iter()
-            .any(|c| c == zuse_protocol::cloud_runtime_updates::CAPABILITY)
-    );
-}

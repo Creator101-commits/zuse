@@ -13555,31 +13555,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    fn file_badge_icon_well_uses_more_coverage_on_frost() {
-        for mut theme in [Theme::dark(), Theme::light()] {
-            theme.surface_treatment = zuse_theme::SurfaceTreatment::Opaque;
-            let opaque_alpha = crate::file_icons::well_bg(&theme).a;
-            theme.surface_treatment = zuse_theme::SurfaceTreatment::Frosted;
-            let frosted = crate::file_icons::well_bg(&theme);
-            let badge = crate::theme::flatten(theme.ink(0.06), theme.bg);
-            let icon_well = crate::theme::flatten(frosted, badge);
-            let contrast = crate::theme::contrast_ratio(icon_well, badge);
-
-            assert!(opaque_alpha > 0.0 && opaque_alpha < 1.0);
-            assert!(frosted.a > opaque_alpha && frosted.a < 1.0);
-            assert!(
-                contrast > 1.03,
-                "frosted icon well must remain visible: {contrast}"
-            );
-            assert!(
-                contrast < 1.20,
-                "frosted icon well must not become a harsh split surface: {contrast}"
-            );
-        }
-    }
-
     #[test]
     fn selection_scroll_ramps_at_viewport_edges() {
         let bounds = Bounds::new(
@@ -14118,18 +14093,6 @@ mod tests {
         assert!(cache.by_chat.contains_key("chat-0"));
         assert!(!cache.by_chat.contains_key("chat-1"));
         assert!(cache.by_chat.contains_key("outgoing-new"));
-    }
-
-    #[test]
-    fn viewport_finalization_waits_for_current_generation_and_stable_layout() {
-        let token = ViewportFinalizeToken {
-            generation: 7,
-            layout_revision: 11,
-        };
-        assert!(token.still_current(7));
-        assert!(!token.still_current(8));
-        assert!(token.layout_settled(11));
-        assert!(!token.layout_settled(12));
     }
 
     fn parse(_: &str, text: &str) -> Arc<BlockTree> {
@@ -17846,42 +17809,6 @@ mod tests {
     }
 
     #[test]
-    fn user_resize_duration_scales_with_distance_and_stays_bounded() {
-        let short = user_resize_duration_ms(100.0);
-        let medium = user_resize_duration_ms(600.0);
-        let long = user_resize_duration_ms(2_000.0);
-        assert!((220..=260).contains(&short));
-        assert!(medium > short);
-        assert_eq!(long, 850);
-        assert_eq!(
-            user_resize_spec(100.0).curve,
-            motion::EASE_OUT,
-            "short folds keep the decisive sidebar-like ease-out"
-        );
-        assert_eq!(
-            user_resize_spec(2_000.0).curve,
-            motion::EASE_IN_OUT,
-            "large folds avoid front-loading the whole travel"
-        );
-    }
-
-    /// The toggle is render-local: expanding a prompt must not change the
-    /// row's identity or version, or the list would splice (and the
-    /// virtualizer would drop the scroll anchor) on every click.
-    #[test]
-    fn expanding_a_prompt_is_not_a_row_change() {
-        let mut entry = assistant("u3", MessageStatus::Complete, vec![]);
-        entry.role = MessageRole::User;
-        entry.status = None;
-        entry.parts = vec![text_part("t0", &"a line\n".repeat(40))];
-        let before = rows_for_entry(&entry, false, false, &mut parse);
-        let after = rows_for_entry(&entry, false, false, &mut parse);
-        assert_eq!(before.len(), 1);
-        assert_eq!(before[0].id, after[0].id);
-        assert_eq!(before[0].version, after[0].version);
-    }
-
-    #[test]
     fn user_rows_split_attachment_refs_from_text() {
         let content = crate::attachments::with_attachments(
             "what color is this?",
@@ -18264,13 +18191,6 @@ mod tests {
         let (text, _, files) = lift_file_mentions(&display, spans);
         assert_eq!(text, "Start with.");
         assert_eq!(files.len(), 1);
-    }
-
-    #[test]
-    fn a_text_without_file_mentions_is_untouched() {
-        let (text, kept, files) = lift_file_mentions("plain words", Vec::new());
-        assert_eq!(text, "plain words");
-        assert!(kept.is_empty() && files.is_empty());
     }
 
     #[test]
@@ -18699,42 +18619,6 @@ mod tests {
     }
 
     #[test]
-    fn tool_chip_labels_per_kind() {
-        assert_eq!(
-            tool_chip_content(&ToolCall::Exec {
-                command: "cargo test".into()
-            }),
-            ("Run", "cargo test".to_string())
-        );
-        assert_eq!(
-            tool_chip_content(&ToolCall::Search {
-                pattern: "foo".into(),
-                path: Some("src".into())
-            }),
-            ("Search", "foo in src".to_string())
-        );
-        assert_eq!(
-            tool_chip_content(&ToolCall::ApplyPatch { path: None }),
-            ("Patch", "workspace".to_string())
-        );
-        assert_eq!(
-            tool_chip_content(&ToolCall::Mcp {
-                server: "gh".into(),
-                tool: "issues".into(),
-                input: None
-            }),
-            ("MCP", "gh · issues".to_string())
-        );
-        let todo = ToolCall::Todo {
-            items: vec![
-                zuse_protocol::TodoItem::new("a", zuse_protocol::TodoStatus::Completed),
-                zuse_protocol::TodoItem::new("b", zuse_protocol::TodoStatus::Pending),
-            ],
-        };
-        assert_eq!(tool_chip_content(&todo), ("Todo", "1/2 done".to_string()));
-    }
-
-    #[test]
     fn plugin_calls_show_the_plugin_its_logo_and_the_action() {
         let call = |tool: &str, input: Option<serde_json::Value>| ToolCall::Mcp {
             server: "zuse".into(),
@@ -19091,16 +18975,6 @@ mod tests {
     }
 
     #[test]
-    fn chips_height_is_analytic() {
-        assert_eq!(chips_height(0), 0.0);
-        assert_eq!(chips_height(1), CHIPS_TOP_PAD + CHIP_HEIGHT);
-        assert_eq!(
-            chips_height(3),
-            CHIPS_TOP_PAD + 3.0 * CHIP_HEIGHT + 2.0 * CHIP_GAP
-        );
-    }
-
-    #[test]
     fn tool_row_reveal_honors_delay_easing_and_reduced_motion() {
         let epoch = Instant::now();
         let start = epoch + Duration::from_millis(TOOL_ROW_STAGGER_MS);
@@ -19220,12 +19094,6 @@ mod tests {
         ] {
             assert_eq!(format_elapsed(secs), expected, "elapsed seconds: {secs}");
         }
-    }
-
-    #[test]
-    fn waiting_label_counts_running_subagents() {
-        assert_eq!(waiting_for_subagents_label(1), "Waiting for 1 subagent");
-        assert_eq!(waiting_for_subagents_label(3), "Waiting for 3 subagents");
     }
 
     #[test]

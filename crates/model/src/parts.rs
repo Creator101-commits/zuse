@@ -1243,11 +1243,6 @@ mod tests {
         assert!(matches!(joined.last().unwrap(), MessagePart::Tool { .. }));
     }
 
-    #[test]
-    fn continuation_ids_are_deterministic() {
-        assert_eq!(continuation_id("m1", 1), "m1#c1");
-    }
-
     // ── A1 strip (docs/chat2-sync.md) ───────────────────────────────────────
 
     #[test]

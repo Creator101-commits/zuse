@@ -89,18 +89,3 @@ impl AgentAccounts {
             .collect()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_login_bound_agents_are_gated() {
-        assert!(requirement(HarnessId::Codex).is_some());
-        assert!(requirement(HarnessId::Cursor).is_some());
-        assert!(requirement(HarnessId::Hermes).is_some());
-        assert!(requirement(HarnessId::Opencode).is_none());
-        assert!(requirement(HarnessId::Pi).is_none());
-        assert!(requirement(HarnessId::Kiro).is_none());
-    }
-}

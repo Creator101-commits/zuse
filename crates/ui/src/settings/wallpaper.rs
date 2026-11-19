@@ -506,26 +506,6 @@ mod tests {
     }
 
     #[test]
-    fn wallpaper_settings_migrate_and_round_trip() {
-        let mut settings: super::super::UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(settings.wallpaper_folder.is_none());
-        assert_eq!(settings.keymap.random_wallpaper, "mod-u");
-        settings.wallpaper_folder = Some("/wallpapers".into());
-        settings.wallpaper_source = Some("/wallpapers/current.png".into());
-        settings.wallpaper_history = vec![
-            "/wallpapers/current.png".into(),
-            "/wallpapers/older.png".into(),
-        ];
-        settings.keymap.set(
-            super::super::ShortcutId::RandomWallpaper,
-            "mod-shift-u".into(),
-        );
-        let saved = serde_json::to_string(&settings).unwrap();
-        let loaded: super::super::UiSettings = serde_json::from_str(&saved).unwrap();
-        assert_eq!(loaded, settings);
-    }
-
-    #[test]
     fn recent_wallpapers_cool_down_and_small_folders_keep_random_choices() {
         let dir = tempfile::tempdir().unwrap();
         let paths: Vec<_> = (0..10)

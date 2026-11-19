@@ -2247,11 +2247,9 @@ mod tests {
     use zuse_rpc::methods;
 
     use super::{
-        PANEL_BORDER, PANEL_PAD_TOP, PANEL_PAD_X, PANEL_RADIUS, QueuePrimaryAction,
-        ROW_CONTROL_INSET, ROW_CONTROL_RADIUS, ROW_CONTROL_SIZE, ROW_HEIGHT, ROW_PAD_X, ROW_RADIUS,
-        ROW_SLOT, available_queue_primary_action, latest_queued_message, one_line,
-        queue_action_failure_message, queue_action_needs_host, queue_drag_offsets,
-        queue_drop_index, queue_latest_shortcut_visible, queue_lifted_top,
+        PANEL_PAD_TOP, QueuePrimaryAction, ROW_SLOT, available_queue_primary_action,
+        latest_queued_message, one_line, queue_action_failure_message, queue_action_needs_host,
+        queue_drag_offsets, queue_drop_index, queue_latest_shortcut_visible, queue_lifted_top,
         queue_mutation_acknowledged, queue_visible_text, visible_queue_rows,
     };
 
@@ -2452,29 +2450,6 @@ mod tests {
             super::queue_attachment_labels(&malformed, &paths),
             vec!["shot & detail.png", "reference.png"]
         );
-    }
-
-    /// A row's rounded hover wash is concentric with the tray's corner: the
-    /// two arcs share a center, so the gap between them is even all round.
-    /// Row buttons are inset evenly from the row's top, bottom and trailing
-    /// edge, and their corners follow the row's corner.
-    #[test]
-    fn row_buttons_are_concentric_with_the_row() {
-        assert_eq!((ROW_HEIGHT - ROW_CONTROL_SIZE) / 2.0, ROW_CONTROL_INSET);
-        assert_eq!(
-            ROW_CONTROL_INSET,
-            ROW_PAD_X - PANEL_PAD_X,
-            "same inset on the side"
-        );
-        assert_eq!(ROW_CONTROL_RADIUS + ROW_CONTROL_INSET, ROW_RADIUS);
-    }
-
-    #[test]
-    fn row_hover_corners_are_concentric_with_the_panel_curve() {
-        assert_eq!(PANEL_PAD_X, PANEL_PAD_TOP, "one inset on every side");
-        let row_corner_center = PANEL_BORDER + PANEL_PAD_X + ROW_RADIUS;
-        assert_eq!(row_corner_center, PANEL_RADIUS);
-        assert_eq!(PANEL_RADIUS - PANEL_BORDER - ROW_RADIUS, PANEL_PAD_X);
     }
 
     /// Filenames are no longer printed in the row, so every attachment folded

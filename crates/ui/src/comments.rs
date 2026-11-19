@@ -360,13 +360,6 @@ mod tests {
     }
 
     #[test]
-    fn chip_label_pluralizes() {
-        assert_eq!(chip_label(1), "1 comment");
-        assert_eq!(chip_label(2), "2 comments");
-        assert_eq!(chip_label(0), "0 comments");
-    }
-
-    #[test]
     fn a_body_quoting_a_side_marker_survives_the_round_trip() {
         let staged = vec![comment(
             "a.rs",

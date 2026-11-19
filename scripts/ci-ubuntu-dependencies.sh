@@ -10,11 +10,17 @@ deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://mirrors.e
 deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://mirrors.edge.kernel.org/ubuntu noble-updates main restricted universe multiverse
 deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://mirrors.edge.kernel.org/ubuntu noble-security main restricted universe multiverse
 SOURCES
+# APT_ARCHIVES (set by scripts/ci-apt-install.sh) keeps the downloaded .debs
+# in a directory CI caches between runs.
+install_options=(--no-install-recommends)
+if [ -n "${APT_ARCHIVES:-}" ]; then
+  install_options+=(-o "Dir::Cache::archives=$APT_ARCHIVES" -o APT::Keep-Downloaded-Packages=true)
+fi
 options=(-o "Dir::Etc::sourcelist=$source_dir/ubuntu.list" -o Dir::Etc::sourceparts=- -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
 if sudo apt-get "${options[@]}" -o APT::Update::Error-Mode=any update && \
-   sudo apt-get "${options[@]}" install -y "$@"; then
+   sudo apt-get "${options[@]}" install -y "${install_options[@]}" "$@"; then
   exit 0
 fi
 printf '%s\n' 'Alternative Ubuntu mirror unavailable; retrying the runner sources.' >&2
 sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any update
-sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y "$@"
+sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y "${install_options[@]}" "$@"

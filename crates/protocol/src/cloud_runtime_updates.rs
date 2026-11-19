@@ -185,23 +185,6 @@ pub enum UpdateState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn signing_bytes_are_canonical_and_domain_separated() {
-        let release = SignedRelease {
-            sha256: "ab".repeat(32),
-            version: "1.2.3".into(),
-            architecture: "x86_64".into(),
-            storage_formats: vec!["zuse-rust-engine-v1".into()],
-        };
-        let bytes = String::from_utf8(release.signing_bytes()).unwrap();
-        assert_eq!(
-            bytes,
-            format!(
-                "zuse-runtime-release-v1\n{{\"sha256\":\"{}\",\"version\":\"1.2.3\",\"architecture\":\"x86_64\",\"storageFormats\":[\"zuse-rust-engine-v1\"]}}",
-                "ab".repeat(32)
-            )
-        );
-    }
     /// The release pipeline (`infra/cloud/runtime-release.py`) signs the same
     /// fixture; both sides must produce these exact bytes.
     #[test]

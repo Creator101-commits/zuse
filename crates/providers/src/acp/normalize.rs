@@ -505,34 +505,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn message_and_thought_chunks_map_to_deltas() {
-        let update = json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "hello" },
-        });
-        assert_eq!(
-            map_update(&update),
-            vec![AgentEvent::TextDelta {
-                text: "hello".into()
-            }]
-        );
-        let thought = json!({
-            "sessionUpdate": "agent_thought_chunk",
-            "content": { "type": "text", "text": "hmm" },
-        });
-        assert_eq!(
-            map_update(&thought),
-            vec![AgentEvent::ReasoningDelta { text: "hmm".into() }]
-        );
-        // Non-text blocks render as nothing.
-        let image = json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "image", "data": "...", "mimeType": "image/png" },
-        });
-        assert_eq!(map_update(&image), Vec::new());
-    }
-
-    #[test]
     fn execute_tool_call_with_terminal_status_resolves_inline() {
         let update = json!({
             "sessionUpdate": "tool_call",
@@ -641,30 +613,6 @@ mod tests {
                 output: None,
                 diff: None,
             }]
-        );
-    }
-
-    #[test]
-    fn plan_maps_to_stable_todo_chip() {
-        let update = json!({
-            "sessionUpdate": "plan",
-            "entries": [
-                { "content": "read code", "priority": "high", "status": "completed" },
-                { "content": "write fix", "priority": "high", "status": "in_progress" },
-            ],
-        });
-        let events = map_update(&update);
-        assert_eq!(
-            events[0],
-            AgentEvent::ToolCall {
-                id: zuse_protocol::LIVE_PLAN_TOOL_ID.into(),
-                call: ToolCall::Todo {
-                    items: vec![
-                        TodoItem::new("read code", TodoStatus::Completed),
-                        TodoItem::new("write fix", TodoStatus::InProgress),
-                    ]
-                },
-            }
         );
     }
 

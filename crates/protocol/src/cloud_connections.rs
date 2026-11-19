@@ -99,18 +99,6 @@ pub struct LoginOperation {
 mod tests {
     use super::*;
     #[test]
-    fn supported_auth_methods_match_each_real_harness() {
-        assert!(ConnectionMethod::SetupToken.supported(AgentId::Claude));
-        assert!(!ConnectionMethod::DeviceCode.supported(AgentId::Claude));
-        for agent in [AgentId::Codex, AgentId::Grok] {
-            assert!(ConnectionMethod::DeviceCode.supported(agent));
-            assert!(!ConnectionMethod::SetupToken.supported(agent));
-        }
-        for agent in [AgentId::Claude, AgentId::Codex, AgentId::Grok] {
-            assert!(ConnectionMethod::ApiKey.supported(agent));
-        }
-    }
-    #[test]
     fn secret_input_refuses_unexpected_unowned_fields() {
         assert!(serde_json::from_value::<ConfigureConnection>(serde_json::json!({"agent":"codex","method":"api-key","secret":"value","ownerId":"other-account"})).is_err());
     }

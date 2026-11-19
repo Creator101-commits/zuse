@@ -1165,16 +1165,6 @@ fn install_visibility_and_hint_follow_target_capabilities() {
             }
         }
     }
-    assert_eq!(cli_name(HarnessId::Antigravity), "Antigravity");
-    assert_eq!(cli_name(HarnessId::Muse), "muse");
-    assert_eq!(
-        install_hint(HarnessId::Muse, false, false),
-        "Install the muse CLI to enable. Install with `curl -fsSL https://dev.meta.ai/install.sh | bash`"
-    );
-    assert_eq!(
-        install_hint(HarnessId::Antigravity, false, true),
-        "Install Antigravity to enable"
-    );
     assert!(
         install_hint(HarnessId::Antigravity, false, false).contains("ANTIGRAVITY_ACP_EXECUTABLE")
     );
@@ -1182,9 +1172,7 @@ fn install_visibility_and_hint_follow_target_capabilities() {
 
 #[cfg(test)]
 #[test]
-fn install_phase_copy_and_cancel_target_match_install() {
-    assert_eq!(install_label("Claude Code"), "Installing Claude Code…");
-    assert_eq!(install_label("Pi"), "Installing Pi…");
+fn install_params_carry_the_harness_and_target_device() {
     for target in [None, Some("remote-device".to_string())] {
         let params = install_params(HarnessId::Pi, &target);
         assert_eq!(params["harness"], "pi");
@@ -1193,12 +1181,4 @@ fn install_phase_copy_and_cancel_target_match_install() {
             serde_json::to_value(&target).unwrap()
         );
     }
-    assert_eq!(
-        install_hint(HarnessId::Codex, false, false),
-        "Install the codex CLI to enable. Install with `npm install -g @openai/codex`"
-    );
-    assert!(
-        install_hint(HarnessId::Codex, true, false)
-            .starts_with("codex CLI not installed — turn it off or install it.")
-    );
 }

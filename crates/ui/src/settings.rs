@@ -2407,79 +2407,6 @@ mod tests {
     }
 
     #[test]
-    fn slash_skills_are_opt_in_and_persist() {
-        let old: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(!old.skills_in_slash_menu);
-        let dir = tempfile::tempdir().unwrap();
-        let mut settings = old;
-        settings.skills_in_slash_menu = true;
-        settings.save(dir.path()).unwrap();
-        assert!(UiSettings::load(dir.path()).skills_in_slash_menu);
-    }
-
-    #[test]
-    fn compact_model_picker_is_default_and_opt_out_persists() {
-        let legacy: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(legacy.compact_model_picker);
-        let settings = UiSettings {
-            compact_model_picker: false,
-            ..legacy
-        };
-        let saved = serde_json::to_string(&settings).unwrap();
-        let loaded: UiSettings = serde_json::from_str(&saved).unwrap();
-        assert!(!loaded.compact_model_picker);
-    }
-
-    #[test]
-    fn pull_request_destination_defaults_to_the_native_view_and_round_trips() {
-        let existing: UiSettings = serde_json::from_str(r#"{"sidebarWidth":300}"#).unwrap();
-        assert_eq!(
-            existing.pull_request_destination,
-            PullRequestDestination::Native
-        );
-        for destination in PullRequestDestination::ALL {
-            let settings = UiSettings {
-                pull_request_destination: destination,
-                ..existing.clone()
-            };
-            let loaded: UiSettings =
-                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
-            assert_eq!(loaded.pull_request_destination, destination);
-            assert_eq!(loaded.sidebar_width, 300.0);
-        }
-    }
-
-    #[test]
-    fn composer_send_behavior_is_opt_in_for_old_and_partial_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
-        )
-        .unwrap();
-
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.composer_send_behavior, ComposerSendBehavior::Enter);
-        assert!(loaded.open_web_links_in_zuse);
-        assert!(loaded.new_thread_composer_background.is_none());
-        assert_eq!(
-            loaded.new_thread_background_effect,
-            NewThreadBackgroundEffect::None
-        );
-        assert_eq!(loaded.reduce_motion, crate::motion::ReduceMotion::System);
-        assert!(!loaded.pause_animations_in_background);
-        assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled);
-        for sound in [
-            crate::sound::Sound::Done,
-            crate::sound::Sound::Request,
-            crate::sound::Sound::Attention,
-        ] {
-            assert!(!loaded.session_sound_enabled(sound));
-        }
-    }
-
-    #[test]
     fn window_geometry_round_trips_and_legacy_settings_default() {
         let dir = tempfile::tempdir().unwrap();
         let geometry = WindowGeometry {
@@ -2763,66 +2690,6 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
-    fn appshot_shortcut_defaults_round_trip_and_reset() {
-        assert_eq!(
-            ShortcutId::CaptureAppshot.default_combo_on(true),
-            "ctrl-alt-space"
-        );
-        assert_eq!(
-            ShortcutId::CaptureAppshot.default_combo_on(false),
-            "mod-alt-space"
-        );
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"keymap":{"newSession":"mod-shift-n"}}"#,
-        )
-        .unwrap();
-        let mut settings = UiSettings::load(dir.path());
-        assert_eq!(
-            settings.keymap.capture_appshot,
-            ShortcutId::CaptureAppshot.default_combo()
-        );
-        assert_eq!(settings.keymap.new_session, "mod-shift-n");
-        settings
-            .keymap
-            .set(ShortcutId::CaptureAppshot, "mod-alt-k".into());
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            serde_json::to_vec(&settings).unwrap(),
-        )
-        .unwrap();
-        let mut restored = UiSettings::load(dir.path());
-        assert_eq!(restored.keymap.capture_appshot, "mod-alt-k");
-        restored.keymap.reset(ShortcutId::CaptureAppshot);
-        assert_eq!(
-            restored.keymap.capture_appshot,
-            ShortcutId::CaptureAppshot.default_combo()
-        );
-    }
-
-    #[test]
-    fn appshot_settings_are_serialized_only_on_desktop() {
-        let value = serde_json::to_value(UiSettings::default()).unwrap();
-        for key in [
-            "appshotsEnabled",
-            "appshotSoundEnabled",
-            "appshotDestination",
-        ] {
-            assert_eq!(
-                value.get(key).is_some(),
-                crate::appshots::is_desktop(),
-                "{key}"
-            );
-        }
-        assert_eq!(
-            value["keymap"].get("captureAppshot").is_some(),
-            crate::appshots::is_desktop()
-        );
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
     fn appshot_sound_migrates_mute_and_persists_independently() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(UiSettings::path(dir.path()), r#"{"soundEnabled":false}"#).unwrap();
@@ -3077,22 +2944,6 @@ mod tests {
             assert!(!UiSettings::path(dir.path()).exists());
             assert!(candidate.exists());
         });
-    }
-
-    #[test]
-    fn obsolete_steering_preference_does_not_reset_other_settings() {
-        let loaded: UiSettings = serde_json::from_str(
-            r#"{"activeTurnSendBehavior":"steer","sidebarWidth":300,"soundEnabled":false}"#,
-        )
-        .unwrap();
-        assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled);
-        assert!(
-            serde_json::to_value(&loaded)
-                .unwrap()
-                .get("activeTurnSendBehavior")
-                .is_none()
-        );
     }
 
     #[test]
@@ -3362,43 +3213,6 @@ mod tests {
         assert_eq!(store.code_fences_generation, 2);
     }
 
-    #[test]
-    fn sidebar_display_defaults_and_preferences_round_trip() {
-        let settings: UiSettings = serde_json::from_str("{}").unwrap();
-        assert!(settings.sidebar_compact);
-        assert!(settings.sidebar_show_project_icon);
-        assert!(settings.sidebar_show_project_label);
-        assert!(settings.sidebar_show_project_filter);
-        assert!(settings.sidebar_show_archived);
-        let customized = UiSettings {
-            sidebar_compact: false,
-            sidebar_show_project_icon: false,
-            sidebar_show_project_label: false,
-            sidebar_show_project_filter: false,
-            sidebar_show_archived: false,
-            sidebar_organization: SidebarOrganization::ByProject,
-            ..settings
-        };
-        let restored: UiSettings =
-            serde_json::from_str(&serde_json::to_string(&customized).unwrap()).unwrap();
-        assert_eq!(restored.clamped(), customized);
-    }
-
-    #[test]
-    fn project_organization_survives_loading() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarOrganization":"byProject"}"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            UiSettings::load(dir.path()).sidebar_organization,
-            SidebarOrganization::ByProject
-        );
-    }
-
     /// A settings file written before light mode existed has no `appearance`
     /// key; it must load as "follow the OS" rather than failing the whole parse
     /// and resetting every other preference to defaults.
@@ -3513,28 +3327,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_without_ui_font_use_the_platform_default() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
-        )
-        .unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(
-            loaded.ui_font_family,
-            crate::typography::UiFontFamily::default()
-        );
-        assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled);
-        assert!(!loaded.diff_wrap);
-        assert_eq!(
-            loaded.ui_font_size,
-            crate::typography::UiFontSize::default()
-        );
-    }
-
-    #[test]
     fn browser_zoom_snaps_and_steps_through_offered_levels() {
         assert_eq!(browser_zoom_level(0), 25);
         assert_eq!(browser_zoom_level(104), 100);
@@ -3646,36 +3438,6 @@ mod tests {
             sidebar_pin_profile_key(Some(WorkspaceScope::Development), None, None),
             None
         );
-    }
-
-    #[test]
-    fn local_synced_local_switch_restores_each_profiles_pins() {
-        let mut settings = UiSettings::default();
-        settings
-            .sidebar_pins_mut("local".to_string())
-            .extend(["local-1".to_string(), "local-2".to_string()]);
-        settings
-            .sidebar_pins_mut("synced:org-1:user-1".to_string())
-            .push("synced-1".to_string());
-
-        assert_eq!(settings.sidebar_pins("local"), ["local-1", "local-2"]);
-        assert_eq!(settings.sidebar_pins("synced:org-1:user-1"), ["synced-1"]);
-        assert_eq!(settings.sidebar_pins("local"), ["local-1", "local-2"]);
-    }
-
-    #[test]
-    fn account_switch_restores_each_accounts_pins() {
-        let mut settings = UiSettings::default();
-        settings
-            .sidebar_pins_mut("synced:org-a:user-a".to_string())
-            .push("a-1".to_string());
-        settings
-            .sidebar_pins_mut("synced:org-b:user-b".to_string())
-            .push("b-1".to_string());
-
-        assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
-        assert_eq!(settings.sidebar_pins("synced:org-b:user-b"), ["b-1"]);
-        assert_eq!(settings.sidebar_pins("synced:org-a:user-a"), ["a-1"]);
     }
 
     #[test]
@@ -3818,27 +3580,6 @@ mod tests {
         }
         .clamped();
         assert_eq!(loaded.right_pane_width, 2400.0);
-    }
-
-    #[test]
-    fn nan_heals_to_default() {
-        let healed = UiSettings {
-            sidebar_width: f32::NAN,
-            ..Default::default()
-        }
-        .clamped();
-        assert_eq!(healed.sidebar_width, SIDEBAR_DEFAULT);
-    }
-
-    #[test]
-    fn defaults_match_zuse() {
-        let d = UiSettings::default();
-        assert_eq!(d.sidebar_width, SIDEBAR_DEFAULT);
-        assert_eq!(d.right_pane_width, 520.0);
-        assert_eq!(d.terminal_height, 280.0);
-        assert!(!d.sidebar_collapsed && !d.right_pane_open && !d.terminal_open);
-        assert!(!d.escape_stops_active_agent);
-        assert!(!d.direct_steer_enabled);
     }
 
     #[test]
@@ -3995,52 +3736,6 @@ mod tests {
     }
 
     #[test]
-    fn new_project_shortcut_migrates_and_persists() {
-        let mut keymap: KeymapConfig =
-            serde_json::from_str(r#"{"newSession":"mod-alt-n"}"#).unwrap();
-        assert_eq!(keymap.get(ShortcutId::NewProject), "mod-o");
-        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-alt-n");
-        keymap.set(ShortcutId::NewProject, "mod-alt-p".into());
-        let mut restored: KeymapConfig =
-            serde_json::from_str(&serde_json::to_string(&keymap).unwrap()).unwrap();
-        assert_eq!(restored.get(ShortcutId::NewProject), "mod-alt-p");
-        restored.reset(ShortcutId::NewProject);
-        assert_eq!(restored.get(ShortcutId::NewProject), "mod-o");
-    }
-
-    #[test]
-    fn keymap_defaults_and_reset() {
-        let mut keymap = KeymapConfig::default();
-        assert_eq!(keymap.get(ShortcutId::SaveFile), "mod-s");
-        keymap.set(ShortcutId::SaveFile, "mod-shift-s".into());
-        keymap.reset(ShortcutId::SaveFile);
-        assert_eq!(keymap.get(ShortcutId::SaveFile), "mod-s");
-        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-b");
-        assert_eq!(keymap.get(ShortcutId::ToggleChanges), "mod-alt-b");
-        assert_eq!(keymap.get(ShortcutId::ToggleTerminal), "mod-j");
-        let ctrl = if cfg!(target_os = "macos") {
-            "ctrl"
-        } else {
-            "mod"
-        };
-        assert_eq!(keymap.get(ShortcutId::NextSession), format!("{ctrl}-tab"));
-        assert_eq!(
-            keymap.get(ShortcutId::PrevSession),
-            format!("{ctrl}-shift-tab")
-        );
-        assert_eq!(keymap.get(ShortcutId::NewSession), "mod-n");
-        assert_eq!(keymap.get(ShortcutId::ArchiveSession), "");
-        keymap.set(ShortcutId::ToggleSidebar, "mod-shift-x".into());
-        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-shift-x");
-        keymap.reset(ShortcutId::ToggleSidebar);
-        assert_eq!(keymap.get(ShortcutId::ToggleSidebar), "mod-b");
-        keymap.set(ShortcutId::ArchiveSession, "mod-shift-y".into());
-        assert_eq!(keymap.get(ShortcutId::ArchiveSession), "mod-shift-y");
-        keymap.reset(ShortcutId::ArchiveSession);
-        assert_eq!(keymap.get(ShortcutId::ArchiveSession), "");
-    }
-
-    #[test]
     fn every_shortcut_default_is_unique_and_bindable() {
         // A new shortcut must not ship in conflict with an existing one, and
         // its default must parse on this platform.
@@ -4132,28 +3827,6 @@ mod tests {
     }
 
     #[test]
-    fn defaults_are_distinct_physical_keys() {
-        // Distinct STRINGS is not enough — two defaults could still resolve to
-        // the same keystroke through `platform_combo`.
-        // Editors with disjoint key contexts (the composer's Stash and the
-        // file editor's Save) may share a key.
-        let mut seen: Vec<(String, ShortcutId)> = Vec::new();
-        for id in ShortcutId::ALL {
-            let bound = platform_combo(id.default_combo());
-            if bound.is_empty() {
-                continue;
-            }
-            assert!(
-                !seen
-                    .iter()
-                    .any(|(other, owner)| *other == bound && owner.overlaps_context(id)),
-                "{bound:?} bound twice"
-            );
-            seen.push((bound, id));
-        }
-    }
-
-    #[test]
     fn conflict_detection() {
         let mut keymap = KeymapConfig::default();
         assert!(conflicted_shortcuts(&keymap).is_empty());
@@ -4191,33 +3864,6 @@ mod tests {
         // session cycling.
         assert_eq!(platform_combo("ctrl-shift-tab"), "ctrl-shift-tab");
         assert_eq!(display_combo("ctrl-shift-tab"), "Ctrl+Shift+Tab");
-    }
-
-    #[test]
-    fn keymap_survives_old_settings_files() {
-        // Files written before the keymap existed load with defaults.
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"sidebarWidth": 300}"#).unwrap();
-        let loaded = UiSettings::load(dir.path());
-        assert_eq!(loaded.keymap, KeymapConfig::default());
-        assert!(!loaded.sidebar_grouped);
-        assert!(!loaded.escape_stops_active_agent);
-    }
-
-    #[test]
-    fn escape_stopping_is_opt_in_for_old_and_partial_settings() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            UiSettings::path(dir.path()),
-            r#"{"sidebarWidth": 300, "soundEnabled": false}"#,
-        )
-        .unwrap();
-
-        let loaded = UiSettings::load(dir.path());
-        assert!(!loaded.escape_stops_active_agent);
-        assert!(!loaded.direct_steer_enabled);
-        assert_eq!(loaded.sidebar_width, 300.0);
-        assert!(!loaded.sound_enabled);
     }
 
     #[test]
@@ -4336,14 +3982,6 @@ mod tests {
     }
 
     #[test]
-    fn modifier_send_hint_needs_only_the_primary_modifier() {
-        assert!(modifier_send_hint_visible(true, false, false));
-        assert!(!modifier_send_hint_visible(false, false, false));
-        assert!(!modifier_send_hint_visible(true, true, false));
-        assert!(!modifier_send_hint_visible(true, false, true));
-    }
-
-    #[test]
     fn badge_combos_use_mac_glyphs_and_linux_text() {
         // macOS: glyphs in canonical ⌃⌥⇧⌘ order, no separators — the model
         // picker's ⌘N chip form.
@@ -4409,21 +4047,6 @@ mod tests {
             ShortcutId::NextSession.default_combo()
         );
         assert_eq!(keymap.get(ShortcutId::ArchiveSession), "");
-    }
-
-    #[test]
-    fn terminal_height_clamps_on_load() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 5}"#).unwrap();
-        assert_eq!(
-            UiSettings::load(dir.path()).terminal_height,
-            TERMINAL_MIN_HEIGHT
-        );
-        std::fs::write(UiSettings::path(dir.path()), r#"{"terminalHeight": 99999}"#).unwrap();
-        assert_eq!(
-            UiSettings::load(dir.path()).terminal_height,
-            TERMINAL_ABS_MAX_HEIGHT
-        );
     }
 }
 

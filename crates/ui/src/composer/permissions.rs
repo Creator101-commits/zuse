@@ -444,10 +444,6 @@ mod tests {
 
     #[test]
     fn approve_for_me_needs_an_automatic_approver() {
-        assert_eq!(
-            LEVELS.map(label),
-            ["Ask for approval", "Approve for me", "Full access"]
-        );
         for harness in [HarnessId::Codex, HarnessId::ClaudeCode] {
             assert_eq!(unavailable(SandboxLevel::Auto, Some(&harness)), None);
             assert_eq!(

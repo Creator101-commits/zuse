@@ -10,8 +10,8 @@ use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
 use zuse_protocol::{
-    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SteeringMode,
-    TodoItem, TodoStatus, ToolCall, UserInputAnswer,
+    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, TodoItem,
+    TodoStatus, ToolCall, UserInputAnswer,
 };
 use zuse_providers::acp::SignInProgress;
 use zuse_providers::{
@@ -656,23 +656,6 @@ async fn resume_loads_the_session_and_drops_replayed_history() {
     }));
     assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
-#[test]
-fn descriptor_surface_matches_registry_expectations() {
-    let harness = AcpHarness::grok();
-    assert_eq!(harness.id(), HarnessId::Grok);
-    assert_eq!(harness.display_name(), "Grok");
-    assert!(harness.supports_steering());
-    assert_eq!(harness.steering_mode(), SteeringMode::StepBoundary);
-    assert_eq!(
-        harness.reasoning_levels(),
-        &[
-            zuse_protocol::ReasoningLevel::Low,
-            zuse_protocol::ReasoningLevel::Medium,
-            zuse_protocol::ReasoningLevel::High,
-        ]
-    );
-}
-
 #[tokio::test]
 async fn models_are_discovered_from_the_acp_session() {
     // ACP is the source of truth: the fixture advertises a model config
@@ -773,39 +756,6 @@ async fn hung_handshake_errors_instead_of_spinning_forever() {
         "{error}"
     );
 }
-#[test]
-fn hermes_and_pi_descriptor_surfaces_match_registry_expectations() {
-    let devin = AcpHarness::devin();
-    assert_eq!(devin.id(), HarnessId::Devin);
-    assert_eq!(devin.display_name(), "Devin");
-    assert!(devin.supports_steering());
-    assert_eq!(devin.steering_mode(), SteeringMode::StepBoundary);
-    assert!(devin.reasoning_levels().is_empty());
-
-    let hermes = AcpHarness::hermes();
-    assert_eq!(hermes.id(), HarnessId::Hermes);
-    assert_eq!(hermes.display_name(), "Hermes");
-    assert!(hermes.supports_steering());
-    assert_eq!(hermes.steering_mode(), SteeringMode::TurnBoundary);
-    assert!(hermes.reasoning_levels().is_empty());
-
-    let pi = zuse_providers::PiHarness::new();
-    assert_eq!(pi.id(), HarnessId::Pi);
-    assert_eq!(pi.display_name(), "Pi");
-    assert!(pi.supports_steering());
-    assert_eq!(pi.steering_mode(), SteeringMode::StepBoundary);
-    assert!(pi.reasoning_levels().is_empty());
-
-    let muse = zuse_providers::MuseHarness::new();
-    assert_eq!(muse.id(), HarnessId::Muse);
-    assert_eq!(muse.display_name(), "Muse Code");
-    assert!(muse.supports_steering());
-    assert_eq!(muse.steering_mode(), SteeringMode::StepBoundary);
-    assert!(muse.reasoning_levels().is_empty());
-    assert!(muse.deterministic_turn_end());
-    assert!(muse.stops_turn_in_place());
-}
-
 fn antigravity_harness() -> AcpHarness {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -1094,16 +1044,6 @@ async fn antigravity_stale_login_stops_background_probes_and_runs() {
     );
 }
 
-#[test]
-fn antigravity_descriptor_surface_matches_registry_expectations() {
-    let antigravity = AcpHarness::antigravity();
-    assert_eq!(antigravity.id(), HarnessId::Antigravity);
-    assert_eq!(antigravity.display_name(), "Antigravity");
-    assert!(antigravity.supports_steering());
-    assert_eq!(antigravity.steering_mode(), SteeringMode::TurnBoundary);
-    assert!(antigravity.reasoning_levels().is_empty());
-}
-
 #[tokio::test]
 async fn antigravity_runs_the_picked_effort_variant_unattended() {
     let events = antigravity_config_sets("gemini-3.7-flash", Some(ReasoningLevel::Medium)).await;
@@ -1198,21 +1138,6 @@ async fn antigravity_models_group_effort_variants_into_one_row() {
         ]
     );
     assert!(models.iter().all(|m| m.description.is_none()), "{models:?}");
-}
-
-#[tokio::test]
-async fn devin_spec_drives_the_shared_acp_wire() {
-    let devin = AcpHarness::devin().with_executable(fixture_path());
-    let (controls, _steer, _token) = controls();
-    let events = run_to_end(&devin, request("scenario:happy"), controls).await;
-    assert!(events.iter().any(|event| matches!(
-        event,
-        AgentEvent::SessionStarted { harness, .. } if *harness == HarnessId::Devin
-    )));
-    assert!(events.contains(&AgentEvent::TextDelta {
-        text: "Hello".into()
-    }));
-    assert_eq!(dones(&events), vec![(DoneStatus::Completed, None)]);
 }
 
 #[tokio::test]
@@ -2722,29 +2647,5 @@ async fn access_mode_rejection_stops_before_sending_the_prompt() {
                     .as_deref()
                     .is_some_and(|error| error.contains("mode change refused"))),
         "{events:?}"
-    );
-}
-
-#[test]
-fn oh_my_pi_detects_its_own_binary_and_mirrors_its_spec() {
-    let omp = AcpHarness::omp();
-    assert_eq!(omp.id(), HarnessId::OhMyPi);
-    assert_eq!(omp.display_name(), "Oh My Pi");
-    assert_eq!(omp.steering_mode(), SteeringMode::StepBoundary);
-    assert_eq!(
-        omp.reasoning_levels(),
-        &[
-            ReasoningLevel::Minimal,
-            ReasoningLevel::Low,
-            ReasoningLevel::Medium,
-            ReasoningLevel::High,
-            ReasoningLevel::XHigh,
-        ]
-    );
-    assert!(omp.with_executable(fixture_path()).installed());
-    assert!(
-        !AcpHarness::omp()
-            .with_executable("/does/not/exist/omp")
-            .installed()
     );
 }

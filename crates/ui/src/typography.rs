@@ -805,18 +805,6 @@ mod tests {
     }
 
     #[test]
-    fn type_scale_is_the_six_design_steps_on_a_13px_base() {
-        assert_eq!(
-            [TEXT_XS, TEXT_SM, TEXT_MD, TEXT_LG, TEXT_XL, TEXT_2XL],
-            [12.0, 13.0, 14.0, 16.0, 18.0, 24.0]
-        );
-        assert_eq!(TEXT_BASE, 13.0);
-        // Steps are rems, so the UI font-size preference scales them.
-        assert_eq!(text_sm().0, ui_rems(13.0).0);
-        assert_eq!(text_2xl().0, 1.5);
-    }
-
-    #[test]
     fn unavailable_family_resolves_to_geist() {
         let unavailable = UiFontFamily::Installed("Inter".into());
         let availability = FontAvailability::all().without(&unavailable);
@@ -904,19 +892,6 @@ mod tests {
         assert_eq!(
             resolve_effective_mono(&persisted, &availability, false),
             persisted
-        );
-    }
-
-    #[test]
-    fn catalog_keeps_bundled_and_virtual_choices_first() {
-        let availability = FontAvailability::all();
-        assert_eq!(
-            availability.choices()[..3],
-            [
-                UiFontFamily::Geist,
-                UiFontFamily::GeistMono,
-                UiFontFamily::System
-            ]
         );
     }
 

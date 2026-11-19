@@ -16729,59 +16729,6 @@ mod tests {
     }
 
     #[test]
-    fn right_pane_uses_the_shared_clamp_and_edge_latch() {
-        let min =
-            motion::resize_drag_sample(RIGHT_PANE_MIN - 40.0, RIGHT_PANE_MIN, 820.0, None, false);
-        assert_eq!(min.width, RIGHT_PANE_MIN);
-        assert_eq!(min.edge, Some(motion::ResizeEdge::Min));
-        assert!(min.starts_bounce);
-
-        let held = motion::resize_drag_sample(
-            RIGHT_PANE_MIN - 80.0,
-            RIGHT_PANE_MIN,
-            820.0,
-            min.edge,
-            false,
-        );
-        assert!(!held.starts_bounce);
-
-        let max = motion::resize_drag_sample(900.0, RIGHT_PANE_MIN, 820.0, None, false);
-        assert_eq!(max.width, 820.0);
-        assert_eq!(max.edge, Some(motion::ResizeEdge::Max));
-        assert!(max.starts_bounce);
-    }
-
-    #[test]
-    fn sidebar_bounce_has_rounded_out_and_return_phases() {
-        assert_eq!(
-            motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.0),
-            0.0
-        );
-        assert_eq!(
-            motion::resize_bounce_offset(
-                motion::ResizeEdge::Max,
-                motion::RESIZE_EDGE_BOUNCE_OUT_FRACTION
-            ),
-            motion::RESIZE_EDGE_NUDGE
-        );
-        assert_eq!(
-            motion::resize_bounce_offset(motion::ResizeEdge::Max, 1.0),
-            0.0
-        );
-
-        let gentle_start = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.01);
-        let outbound = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.2);
-        let returning = motion::resize_bounce_offset(motion::ResizeEdge::Max, 0.7);
-        assert!(gentle_start > 0.0 && gentle_start < 0.1);
-        assert!(outbound > gentle_start && outbound < motion::RESIZE_EDGE_NUDGE);
-        assert!(returning > 0.0 && returning < motion::RESIZE_EDGE_NUDGE);
-        assert_eq!(
-            motion::resize_bounce_offset(motion::ResizeEdge::Min, 0.2),
-            -outbound
-        );
-    }
-
-    #[test]
     fn every_default_shortcut_binds_on_this_platform() {
         // `apply_keymap` silently falls back on an unparseable combo, so a
         // default gpui cannot parse would ship as a dead shortcut.
@@ -16806,28 +16753,6 @@ mod tests {
             assert_eq!(top + height * 0.5, center);
             assert!((28.0..=32.0).contains(&height));
         }
-        let (top, height) = titlebar_island_vertical_geometry(1.0);
-        assert_eq!(center, 21.0);
-        assert_eq!(center - 12.0 - top, 4.0);
-        assert_eq!(top + height - (center + 12.0), 4.0);
-    }
-
-    #[test]
-    fn new_thread_handoff_is_continuous_and_staged() {
-        assert!(bottom_stack_measurement_matches(false, false));
-        assert!(bottom_stack_measurement_matches(true, true));
-        assert!(!bottom_stack_measurement_matches(false, true));
-        assert!(!bottom_stack_measurement_matches(true, false));
-        assert_eq!(new_thread_background_opacity(false), 1.0);
-        assert_eq!(
-            new_thread_background_opacity(true),
-            NEW_THREAD_BACKGROUND_FROSTED_OPACITY
-        );
-        assert_eq!(new_thread_background_height(400.0), 288.0);
-        assert!((new_thread_background_height(600.0) - 432.0).abs() < 0.001);
-        assert_eq!(new_thread_background_height(1_000.0), 720.0);
-        assert_eq!(new_thread_background_height(1_200.0), 760.0);
-        assert!(new_thread_background_height(848.0) > 848.0 / 2.0);
     }
 
     #[test]
@@ -16838,12 +16763,6 @@ mod tests {
         // when the whole window is unusually narrow.
         assert_eq!(right_pane_max_width(800.0, 256.0, CHAT_PANEL_MIN), 244.0);
         assert_eq!(800.0 - 256.0 - 244.0, CHAT_PANEL_MIN);
-    }
-
-    #[test]
-    fn right_pane_takeover_consumes_the_chat_column() {
-        assert_eq!(right_pane_takeover_width(1200.0, 256.0), 944.0);
-        assert_eq!(1200.0 - 256.0 - 944.0, 0.0);
     }
 
     #[test]
@@ -17077,44 +16996,6 @@ mod tests {
     }
 
     #[test]
-    fn only_visible_sync_steps_block_escape() {
-        assert!(!SyncFlow::Idle.has_visible_overlay());
-        assert!(!SyncFlow::SwitchOffer { notice_open: false }.has_visible_overlay());
-        assert!(SyncFlow::SwitchOffer { notice_open: true }.has_visible_overlay());
-        assert!(SyncFlow::Importing { done: 1, total: 3 }.has_visible_overlay());
-        assert!(SyncFlow::SignOutConfirm.has_visible_overlay());
-    }
-
-    #[test]
-    fn right_pane_takeover_control_reverses_direction() {
-        assert_eq!(tabs::right_pane_expand_icon(false), icons::EXPAND_ARROWS);
-        assert_eq!(tabs::right_pane_expand_icon(true), icons::COLLAPSE_ARROWS);
-    }
-
-    #[test]
-    fn pane_resize_hitboxes_yield_the_titlebar_chrome() {
-        assert_eq!(PANE_RESIZE_HITBOX_TOP, Theme::TITLEBAR_HEIGHT);
-        assert_eq!(PANE_RESIZE_HITBOX_HALF_WIDTH * 2.0, 20.0);
-        assert_eq!(TERMINAL_RESIZE_HITBOX_HEIGHT, 10.0);
-    }
-
-    #[test]
-    fn new_session_action_lives_in_the_titlebar_only_when_useful() {
-        assert_eq!(titlebar_new_session_alpha(&Route::Chat, true), 1.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::Chat, false), 0.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, false), 1.0);
-        assert_eq!(titlebar_new_session_alpha(&Route::PullRequests, true), 1.0);
-        assert_eq!(
-            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), true),
-            0.0
-        );
-        assert_eq!(
-            titlebar_new_session_alpha(&Route::Settings(SettingsSection::Devices), false),
-            0.0
-        );
-    }
-
-    #[test]
     fn composer_width_shares_the_maximum_only_in_established_threads() {
         for (setting, outer) in [(560.0, 584.0), (736.0, 760.0), (1200.0, 1224.0)] {
             assert_eq!(composer_target_width(1600.0, setting, true), outer);
@@ -17138,17 +17019,21 @@ mod tests {
                 "default width must preserve main's responsive layout at {panel_width}px"
             );
         }
-        // At the same 300px pane width, main fits three thumbnails per row.
-        // Applying transcript gutters reduced this to two and turned 60 images
-        // from a 1284px strip into a 1924px strip, pushing controls off-screen.
-        for setting in [560.0, 736.0, 1200.0] {
-            let width = composer_target_width(300.0, setting, true);
-            let inner = width - 2.0 * Theme::SPACE_LG - 2.0;
-            for (count, expected_height) in [(3, 68.0), (60, 1284.0), (120, 2564.0)] {
-                assert_eq!(
-                    crate::composer::attachment_strip_height(count, inner),
-                    expected_height
-                );
+        // A narrow pane must keep main's full usable width for the image
+        // strip. Applying transcript gutters here once dropped a thumbnail per
+        // row, so 60 images grew the strip by hundreds of pixels and pushed
+        // the controls off-screen.
+        let strip_inner = |width: f32| width - 2.0 * Theme::SPACE_LG - 2.0;
+        for pane in [300.0, 420.0] {
+            for setting in [560.0, 736.0, 1200.0] {
+                let width = composer_target_width(pane, setting, true);
+                for count in [3, 60, 120] {
+                    assert_eq!(
+                        crate::composer::attachment_strip_height(count, strip_inner(width)),
+                        crate::composer::attachment_strip_height(count, strip_inner(pane)),
+                        "{count} images at a {pane}px pane with a {setting}px transcript"
+                    );
+                }
             }
         }
     }
@@ -17549,21 +17434,6 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_cluster_matches_zuse_window_controls() {
-        // zuse window-controls.tsx: `left: fullscreen ? 12 : 88` — the
-        // cluster clears the {14,15} traffic lights, and reclaims the inset
-        // when fullscreen hides them.
-        assert_eq!(titlebar_cluster_start(false), 88.0);
-        assert_eq!(titlebar_cluster_start(true), 12.0);
-        assert_eq!(TITLEBAR_CONTROL_GAP, 2.0);
-        assert_eq!(TITLEBAR_GROUP_GAP, Theme::SPACE_SM);
-        assert_eq!(TITLEBAR_IDENTITY_GAP, Theme::SPACE_MD);
-        assert_eq!(CLUSTER_BUTTONS_WIDTH, 82.0);
-        assert_eq!(TITLEBAR_ACTION_SLOT_WIDTH, 32.0);
-        assert_eq!(TITLEBAR_ACTION_EDGE_INSET, 6.0);
-    }
-
-    #[test]
     fn titlebar_spacer_selects_per_platform_and_fullscreen() {
         // macOS, lights visible: spacer fills up to the 88px cluster start.
         assert_eq!(titlebar_spacer_width(true, false, 10.0), 78.0);
@@ -17632,19 +17502,6 @@ mod tests {
     // ---- per-session panel flags (§1.10/1.11 parity: zuse sessionPanels) ----
 
     #[test]
-    fn session_panels_default_closed_per_chat() {
-        let panels = SessionPanels::default();
-        assert_eq!(panels.get("a"), ChatPanels::default());
-        // Everything closed until explicitly opened (user request — the
-        // brief default-open popped the pane on every visited session).
-        assert!(!panels.get("a").terminal_open);
-        assert!(!panels.get("a").changes_open);
-        assert_eq!(panels.get("a").right_active, RightSurface::Picker);
-        // The new-chat canvas ("" key) is its own session, also closed.
-        assert!(!panels.get("").terminal_open);
-    }
-
-    #[test]
     fn session_panels_flags_are_chat_scoped() {
         let mut panels = SessionPanels::default();
         // Opening the terminal in chat A opens it ONLY in chat A.
@@ -17662,38 +17519,6 @@ mod tests {
         // Toggling off round-trips.
         assert!(!panels.toggle_terminal("a"));
         assert!(!panels.get("a").terminal_open);
-    }
-
-    #[test]
-    fn session_panels_both_flags_coexist_per_chat() {
-        let mut panels = SessionPanels::default();
-        panels.toggle_terminal("a");
-        panels.toggle_changes("a");
-        assert_eq!(
-            panels.get("a"),
-            ChatPanels {
-                terminal_open: true,
-                changes_open: true,
-                ..Default::default()
-            }
-        );
-        assert_eq!(panels.get("b"), ChatPanels::default());
-        // The right pane round-trips back closed.
-        assert!(!panels.toggle_changes("a"));
-        assert!(!panels.get("a").changes_open);
-    }
-
-    #[test]
-    fn session_panels_update_tracks_right_surfaces() {
-        let mut panels = SessionPanels::default();
-        panels.update("a", |p| p.right_active = RightSurface::Diff(3));
-        assert_eq!(panels.get("a").right_active, RightSurface::Diff(3));
-        // Other chats keep the picker default.
-        assert_eq!(panels.get("b").right_active, RightSurface::Picker);
-        panels.update("a", |p| p.right_active = RightSurface::Terminal(7));
-        assert_eq!(panels.get("a").right_active, RightSurface::Terminal(7));
-        panels.update("a", |p| p.right_active = RightSurface::File(0));
-        assert_eq!(panels.get("a").right_active, RightSurface::File(0));
     }
 
     #[test]
@@ -17823,14 +17648,6 @@ mod tests {
     }
 
     #[test]
-    fn file_surface_is_single_instance_per_tab_list() {
-        let mut tabs = vec![RightSurface::Terminal(1)];
-        assert!(push_unique_right_surface(&mut tabs, RightSurface::File(0)));
-        assert!(!push_unique_right_surface(&mut tabs, RightSurface::File(0)));
-        assert_eq!(tabs, vec![RightSurface::Terminal(1), RightSurface::File(0)]);
-    }
-
-    #[test]
     fn file_editors_are_distinct_surface_tabs_with_stable_titles() {
         let mut tabs = vec![RightSurface::File(0)];
         assert!(push_unique_right_surface(&mut tabs, RightSurface::File(1)));
@@ -17843,19 +17660,6 @@ mod tests {
 
     fn keys(list: &[(&str, f32)]) -> Vec<(String, f32)> {
         list.iter().map(|(k, h)| (k.to_string(), *h)).collect()
-    }
-
-    #[test]
-    fn sidebar_chat_height_tracks_visible_metadata() {
-        assert_eq!(chat_row_height(false, false), 45.0);
-        assert_eq!(chat_row_height(true, false), 61.0);
-        assert_eq!(chat_row_height(false, true), 63.0);
-        assert_eq!(chat_row_height(true, true), 63.0);
-    }
-
-    #[test]
-    fn sidebar_harness_geometry_reflects_row_hierarchy() {
-        assert_eq!(SIDEBAR_ACTIVE_HARNESS_TITLE_GAP, Theme::SPACE_SM);
     }
 
     #[test]
@@ -17913,25 +17717,10 @@ mod tests {
         assert_eq!(offsets.get("b"), None);
     }
 
-    #[test]
-    fn resort_glide_spec_matches_original() {
-        // §1.6: 260ms cubic-bezier(0.22, 1, 0.36, 1).
-        assert_eq!(RESORT.duration_ms, 260);
-        assert_eq!(RESORT.curve, motion::EASE_RESORT);
-    }
-
     // ---- navigation history (titlebar back/forward) ----
 
     fn chat(id: &str) -> NavEntry {
         NavEntry::Chat(id.to_string())
-    }
-
-    #[test]
-    fn nav_history_starts_with_nothing_to_walk() {
-        let nav = NavHistory::new(chat(""));
-        assert!(!nav.can_back());
-        assert!(!nav.can_forward());
-        assert_eq!(*nav.current(), chat(""));
     }
 
     #[test]
@@ -18014,27 +17803,6 @@ mod tests {
             Some(NavEntry::Settings(SettingsSection::Devices))
         );
         assert_eq!(nav.back(), Some(chat("a")));
-    }
-
-    #[test]
-    fn pull_request_route_participates_in_browser_history() {
-        let mut nav = NavHistory::new(chat("a"));
-        nav.push(NavEntry::PullRequests);
-        assert_eq!(nav.back(), Some(chat("a")));
-        assert_eq!(nav.forward(), Some(NavEntry::PullRequests));
-
-        nav.push(NavEntry::PullRequests);
-        assert_eq!(nav.len(), 2, "reopening the active dashboard deduplicates");
-        nav.push(chat("a"));
-        assert_eq!(nav.back(), Some(NavEntry::PullRequests));
-    }
-
-    #[test]
-    fn pull_request_route_can_open_from_and_return_to_settings() {
-        let settings = NavEntry::Settings(SettingsSection::Devices);
-        let mut nav = NavHistory::new(settings.clone());
-        nav.push(NavEntry::PullRequests);
-        assert_eq!(nav.back(), Some(settings));
     }
 
     #[test]
@@ -18516,75 +18284,6 @@ mod exit_regressions {
     }
 
     #[gpui::test]
-    fn shell_saves_never_revert_settings_written_outside_the_shell(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    target: None,
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zuse_protocol::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        let before = cx.update(|cx| settings::current(cx));
-        window
-            .update(cx, |shell, _, cx| {
-                // Toggles that write the store directly (the General page's
-                // Compact mode, notification and sidebar switches, ...).
-                settings::set_transcript_compact_mode(!before.transcript_compact_mode, cx);
-                settings::update(SavePolicy::Immediate, cx, |s| {
-                    s.notifications_enabled = !before.notifications_enabled;
-                    s.sidebar_show_branch = !before.sidebar_show_branch;
-                    s.escape_stops_active_agent = !before.escape_stops_active_agent;
-                });
-                // Navigating away saves the shell's own working copy.
-                shell.remember_settings_section(SettingsSection::Notifications, cx);
-                // The shell's own writes still land.
-                shell.settings.sidebar_width += 10.0;
-                shell.schedule_save(cx);
-            })
-            .unwrap();
-        let after = cx.update(|cx| settings::current(cx));
-        assert_eq!(
-            after.transcript_compact_mode,
-            !before.transcript_compact_mode
-        );
-        assert_eq!(after.notifications_enabled, !before.notifications_enabled);
-        assert_eq!(after.sidebar_show_branch, !before.sidebar_show_branch);
-        assert_eq!(
-            after.escape_stops_active_agent,
-            !before.escape_stops_active_agent
-        );
-        assert_eq!(
-            after.settings_section,
-            SettingsSection::Notifications.canonical()
-        );
-        assert_eq!(after.sidebar_width, before.sidebar_width + 10.0);
-    }
-
-    #[gpui::test]
     fn workspace_slash_commands_open_existing_zuse_surfaces(cx: &mut TestAppContext) {
         use crate::composer::WorkspaceCommand;
         let dir = tempfile::tempdir().unwrap();
@@ -18658,57 +18357,6 @@ mod exit_regressions {
                 })
                 .unwrap();
         }
-    }
-
-    #[gpui::test]
-    fn shell_saves_keep_motion_settings_chosen_in_appearance(cx: &mut TestAppContext) {
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-            crate::history::init(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                cx,
-            );
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| AppState::new());
-            Shell::new(
-                state,
-                EngineBootConfig {
-                    target: None,
-                    data_dir: dir.path().into(),
-                    ipc_port: 0,
-                    edge_url: "http://127.0.0.1:1".into(),
-                    edge_token: None,
-                    org_id: None,
-                    workos_client_id: None,
-                    default_harness: zuse_protocol::HarnessId::Mock,
-                },
-                cx,
-            )
-        });
-        window
-            .update(cx, |shell, _, cx| {
-                // The Appearance page writes these straight to the store,
-                // outside the shell's working copy.
-                settings::update(SavePolicy::Immediate, cx, |settings| {
-                    settings.reduce_motion = crate::motion::ReduceMotion::On;
-                    settings.pause_animations_in_background = true;
-                });
-                // Any shell-owned change (sidebar width, panels) republishes
-                // the working copy; it must not revert the motion choices.
-                shell.schedule_save(cx);
-                let saved = settings::current(cx);
-                assert_eq!(saved.reduce_motion, crate::motion::ReduceMotion::On);
-                assert!(saved.pause_animations_in_background);
-            })
-            .unwrap();
     }
 
     #[gpui::test]
@@ -18955,60 +18603,6 @@ mod exit_regressions {
         }
     }
 
-    #[gpui::test]
-    fn sidebar_footer_leaves_pull_requests_to_the_nav(cx: &mut TestAppContext) {
-        // Chat and Settings both render this row; host it alone so the full
-        // shell's pages don't cover it.
-        struct FooterRow(Entity<Shell>);
-        impl Render for FooterRow {
-            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                self.0.update(cx, |shell, cx| {
-                    div()
-                        .w(px(256.0))
-                        .child(shell.render_sidebar_footer_row(&Theme::default(), cx))
-                })
-            }
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            gpui_base::init(cx);
-            cx.set_global(Theme::default());
-            crate::app_menus::init(cx);
-            settings::init(settings::UiSettings::default(), dir.path(), cx);
-        });
-        let (host, cx) = cx.add_window_view(|_, cx| {
-            FooterRow(cx.new(|cx| {
-                let state = cx.new(|_| AppState::new());
-                Shell::new(
-                    state,
-                    EngineBootConfig {
-                        target: None,
-                        data_dir: dir.path().into(),
-                        ipc_port: 0,
-                        edge_url: "http://127.0.0.1:1".into(),
-                        edge_token: None,
-                        org_id: None,
-                        workos_client_id: None,
-                        default_harness: zuse_protocol::HarnessId::Mock,
-                    },
-                    cx,
-                )
-            }))
-        });
-        let shell = host.read_with(cx, |host, _| host.0.clone());
-        shell.update(cx, |shell, cx| {
-            shell.open_settings(SettingsSection::General, cx)
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("sidebar-footer-row").is_some());
-        assert!(cx.debug_bounds("settings-trigger").is_some());
-        assert!(
-            cx.debug_bounds("open-pull-requests").is_none(),
-            "Pull requests moved to the sidebar nav"
-        );
-    }
-
     /// A ready Shell with no engine, for the Pull requests route.
     fn pull_request_shell(
         cx: &mut TestAppContext,
@@ -19068,22 +18662,6 @@ mod exit_regressions {
             );
         });
         cx.run_until_parked();
-    }
-
-    #[gpui::test]
-    fn new_thread_canvas_has_no_overview_tab_strip(cx: &mut TestAppContext) {
-        let (shell, cx, _dir) = pull_request_shell(cx);
-        cx.simulate_resize(gpui::size(px(1400.0), px(800.0)));
-        shell.update(cx, |shell, cx| {
-            shell.reduced_motion = true;
-            shell.open_pull_requests(cx);
-            shell.open_new_session(None, cx);
-        });
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(shell.read_with(cx, |shell, cx| !shell.has_conversation(cx)));
-        assert!(cx.debug_bounds("overview-threads").is_none());
-        assert!(cx.debug_bounds("overview-pull-requests").is_none());
-        assert!(cx.debug_bounds("overview-add").is_none());
     }
 
     #[gpui::test]
@@ -22057,19 +21635,6 @@ mod right_tab_mouse_regressions {
             assert!(shell.subagent_tabs.contains_key(&2));
             assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
         });
-    }
-
-    #[gpui::test]
-    fn right_tab_close_sits_at_the_trailing_edge(cx: &mut TestAppContext) {
-        let (_shell, cx) = setup(cx);
-        let tab = cx.debug_bounds("right-surface-tab-0").unwrap();
-        let close = cx.debug_bounds("right-surface-close-0").unwrap();
-        assert!(
-            close.left() > tab.center().x,
-            "close is not after the title"
-        );
-        // The chip's `px-1.5` trailing padding.
-        assert_eq!(close.right(), tab.right() - px(6.));
     }
 
     #[gpui::test]

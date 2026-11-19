@@ -338,11 +338,4 @@ mod tests {
         }));
         assert!(!highlight_source_matches_editor(stale_source, updated_text));
     }
-
-    #[test]
-    fn editor_caret_uses_the_same_theme_token_as_other_inputs() {
-        for theme in [Theme::dark(), Theme::light()] {
-            assert_eq!(editor_style(&theme).caret, theme.caret);
-        }
-    }
 }

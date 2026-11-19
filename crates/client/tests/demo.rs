@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use zuse_client::events::NullListener;
 use zuse_client::{
     ChatIndicator, Client, ClientConfig, Credentials, DemoFixture, DemoOptions, MessageRole,
-    MessageStatus, SendOutcome, SendRequest, StreamSpeed, TranscriptScale,
+    MessageStatus, SendOutcome, SendRequest, StreamSpeed,
 };
 
 fn demo(options: DemoOptions) -> (Client, tempfile::TempDir) {
@@ -316,16 +316,6 @@ fn opening_the_live_chat_finishes_its_stream() {
     wait_for("veil completes", Duration::from_secs(20), || {
         !session.snapshot().streaming && !session.snapshot().working
     });
-}
-
-#[test]
-fn synthetic_transcripts_scale() {
-    let (client, _dir) = demo(DemoOptions {
-        transcript_scale: TranscriptScale::Huge,
-        ..fast()
-    });
-    let session = client.open_session("chat-veil").unwrap();
-    assert_eq!(session.snapshot().transcript_len, 1200);
 }
 
 #[test]

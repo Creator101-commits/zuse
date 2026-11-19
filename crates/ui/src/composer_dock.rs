@@ -717,19 +717,37 @@ mod tests {
         }
     }
 
+    /// `(wide, narrow)` composer widths one pixel apart where ten staged
+    /// images rewrap onto one more row. Derived from the strip geometry so a
+    /// thumbnail size change keeps the tests on a real wrap boundary.
+    fn rewrap_widths() -> (f32, f32) {
+        let wide = (300..2000)
+            .rev()
+            .map(|width| width as f32)
+            .find(|&width| {
+                attachment_layout(width - 1.0).extra_height > attachment_layout(width).extra_height
+            })
+            .expect("ten thumbnails wrap somewhere");
+        (wide, wide - 1.0)
+    }
+
     #[test]
     fn reflow_keeps_route_height_continuous_across_attachment_rows_and_reversal() {
         for docked in [true, false] {
             let mut reflow = DockReflow::default();
             let mut now = Instant::now();
+            let (wide, narrow) = rewrap_widths();
             let (before, after) = if docked {
-                (698.0, 697.0)
+                (wide, narrow)
             } else {
-                (697.0, 698.0)
+                (narrow, wide)
             };
             let source = attachment_layout(before);
             let target = attachment_layout(after);
-            assert_eq!((source.extra_height - target.extra_height).abs(), 64.0);
+            assert_eq!(
+                (source.extra_height - target.extra_height).abs(),
+                crate::composer::STRIP_THUMB + crate::composer::STRIP_GAP
+            );
             let mut frame = DockFrame::settled(docked);
             frame.active = true;
             frame.amount = 0.4;
@@ -801,8 +819,9 @@ mod tests {
 
     #[test]
     fn reflow_snaps_for_hidden_panels_and_reduced_motion_and_leaves_idle_resizes_alone() {
-        let source = attachment_layout(768.0);
-        let target = attachment_layout(592.0);
+        let (wide, narrow) = rewrap_widths();
+        let source = attachment_layout(wide);
+        let target = attachment_layout(narrow);
         let now = Instant::now();
         for (active, hidden, reduced) in [
             (false, false, false),

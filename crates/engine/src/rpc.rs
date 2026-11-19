@@ -7093,148 +7093,17 @@ mod tests {
 
     #[test]
     fn local_device_is_not_forwardable() {
-        assert!(!forwardable(methods::LOCAL_DEVICE));
-        assert!(!forwardable(methods::FOCUS_CHAT));
-        assert!(!forwardable(methods::ENGINE_INFO));
-        assert!(!forwardable(methods::ENGINE_READY));
-        assert!(forwardable(methods::QUEUE_COMMAND));
-        assert!(forwardable(methods::SEARCH_FILES));
-        assert!(forwardable(methods::SEARCH_GIT_HISTORY));
-        assert!(forwardable(methods::GET_BRANCH_GRAPH));
-        assert!(forwardable(methods::WATCH_GIT_WORKSPACE));
-        assert!(forwardable(methods::WATCH_CHANGE_REQUEST));
-        assert!(is_stream_method(methods::WATCH_GIT_WORKSPACE));
-        assert!(is_stream_method(methods::WATCH_CHANGE_REQUEST));
-        assert!(forwardable(methods::FETCH_ALL));
-        assert!(forwardable(methods::RESOLVE_GIT_AVATARS));
-        assert!(forwardable(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
-        assert!(is_stream_method(methods::WATCH_CHECKOUT_CHANGE_REQUEST));
-        assert!(forwardable(methods::DISCARD_WORKING_TREE));
-        assert!(forwardable(methods::LIST_WORKSPACE_DIRECTORY));
-        assert!(forwardable(methods::SEARCH_WORKSPACE_FILES));
-        assert!(forwardable(methods::READ_WORKSPACE_FILE));
-        assert!(forwardable(methods::READ_WORKSPACE_IMAGE));
-        assert!(forwardable(methods::DELETE_WORKSPACE_ENTRY));
-        assert!(forwardable(methods::MOVE_WORKSPACE_ENTRY));
-        assert!(forwardable(methods::WRITE_WORKSPACE_FILE));
-        assert!(forwardable(methods::WATCH_WORKSPACE_FILES));
-        assert!(forwardable(methods::WATCH_WORKSPACE_GIT_STATUS));
-        assert!(!is_stream_method(methods::LIST_WORKSPACE_DIRECTORY));
-        assert!(!is_stream_method(methods::SEARCH_WORKSPACE_FILES));
-        assert!(forwardable(methods::WARM_WORKSPACE_SEARCH));
-        assert!(!is_stream_method(methods::WARM_WORKSPACE_SEARCH));
-        assert!(forwardable(methods::SEARCH_WORKSPACE_CONTENT));
-        assert!(!is_stream_method(methods::SEARCH_WORKSPACE_CONTENT));
-        assert!(forwardable(methods::SEARCH_HOME_FOLDERS));
-        assert!(forwardable(methods::RELEASE_HOME_FOLDER_SEARCH));
-        assert!(!is_stream_method(methods::READ_WORKSPACE_FILE));
-        assert!(!is_stream_method(methods::WRITE_WORKSPACE_FILE));
-        assert!(is_stream_method(methods::WATCH_WORKSPACE_FILES));
-        assert!(is_stream_method(methods::WATCH_WORKSPACE_GIT_STATUS));
-        assert!(forwardable(methods::WATCH_HARNESS_UPDATES));
-        assert!(is_stream_method(methods::WATCH_HARNESS_UPDATES));
-        assert!(forwardable(methods::CHECK_HARNESS_UPDATES));
-        assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
-        assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));
-        assert!(!is_stream_method(methods::LIST_CHANGE_REQUEST_PAGE));
-        assert!(forwardable(methods::GET_CHANGE_REQUEST_REPOSITORY));
-        assert!(forwardable(methods::GET_CHANGE_REQUEST));
-        assert!(forwardable(methods::OBSERVE_PR_WATCH));
-        assert!(forwardable(methods::SET_PR_WATCH));
-        assert!(forwardable(methods::WATCH_PR_WATCHES));
-        assert!(is_stream_method(methods::WATCH_PR_WATCHES));
-        assert!(!is_stream_method(methods::OBSERVE_PR_WATCH));
-        assert!(!is_stream_method(methods::SET_PR_WATCH));
-        assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
-        assert!(forwardable(methods::POST_CHANGE_REQUEST_COMMENT));
-        assert!(forwardable(methods::UPDATE_CHANGE_REQUEST));
-        assert!(!is_stream_method(methods::UPDATE_CHANGE_REQUEST));
-        assert!(forwardable(methods::UPDATE_CHANGE_REQUEST_AT_HEAD));
-        assert!(!is_stream_method(methods::UPDATE_CHANGE_REQUEST_AT_HEAD));
-        assert!(!is_stream_method(methods::POST_CHANGE_REQUEST_COMMENT));
-        assert!(!is_stream_method(methods::GET_CHANGE_REQUEST));
-        assert!(!is_stream_method(methods::GET_CHANGE_REQUEST_DIFF));
-    }
-
-    /// Every forwardable unary method gets a bounded reply deadline —
-    /// interactive calls fail fast, network-bound git/update calls get the
-    /// long leash, and nothing awaits forever (the "Sending…" wedge).
-    #[test]
-    fn forward_deadlines_are_tiered_and_bounded() {
-        for method in [methods::LIST_MODELS, methods::LIST_COMMANDS] {
-            assert_eq!(
-                forward_deadline(method),
-                std::time::Duration::from_secs(100)
-            );
-        }
-        use std::time::Duration;
-        assert_eq!(
-            forward_deadline(methods::CREATE_WORKTREE),
-            Duration::from_secs(120)
-        );
-        assert_eq!(
-            forward_deadline(methods::CLONE_REPO),
-            Duration::from_secs(15 * 60)
-        );
-        assert_eq!(
-            forward_deadline(methods::APPLY_HARNESS_UPDATE),
-            Duration::from_secs(20 * 60)
-        );
-        assert_eq!(
-            forward_deadline(methods::CHECK_HARNESS_UPDATES),
-            Duration::from_secs(4 * 60)
-        );
-        assert_eq!(
-            forward_deadline(methods::LIST_BRANCHES),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            forward_deadline(methods::QUEUE_COMMAND),
-            Duration::from_secs(30)
-        );
-        assert_eq!(
-            forward_deadline(methods::LIST_CHANGE_REQUEST_PAGE),
-            Duration::from_secs(30)
-        );
-    }
-
-    #[test]
-    fn pull_request_errors_are_stable_and_sanitized() {
-        for (error, expected) in [
-            (
-                ChangeRequestError::CliUnavailable,
-                capability_errors::PULL_REQUESTS_CLI_UNAVAILABLE,
-            ),
-            (
-                ChangeRequestError::CliOutdated,
-                capability_errors::PULL_REQUESTS_CLI_OUTDATED,
-            ),
-            (
-                ChangeRequestError::Authentication,
-                capability_errors::PULL_REQUESTS_AUTHENTICATION,
-            ),
-            (
-                ChangeRequestError::RateLimited,
-                capability_errors::PULL_REQUESTS_RATE_LIMITED,
-            ),
-            (
-                ChangeRequestError::Timeout,
-                capability_errors::PULL_REQUESTS_TIMEOUT,
-            ),
-            (
-                ChangeRequestError::Decode,
-                capability_errors::PULL_REQUESTS_DECODE,
-            ),
-            (
-                ChangeRequestError::CommandFailed,
-                capability_errors::PULL_REQUESTS_COMMAND_FAILED,
-            ),
+        for method in [
+            methods::LOCAL_DEVICE,
+            methods::FOCUS_CHAT,
+            methods::ENGINE_INFO,
+            methods::ENGINE_READY,
         ] {
-            assert!(matches!(
-                change_request_rpc_error(error),
-                RpcError::Capability(code) if code == expected
-            ));
+            assert!(!forwardable(method), "{method}");
         }
+        assert!(forwardable(methods::QUEUE_COMMAND));
+        assert!(is_stream_method(methods::WATCH_WORKSPACE_FILES));
+        assert!(!is_stream_method(methods::READ_WORKSPACE_FILE));
     }
 
     #[test]

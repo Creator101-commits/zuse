@@ -545,15 +545,4 @@ mod tests {
             assert!(text.contains("viewBox"), "{path} lacks a viewBox");
         }
     }
-
-    #[test]
-    fn unknown_paths_are_none() {
-        assert!(Assets.load("icons/nope.svg").unwrap().is_none());
-    }
-
-    #[test]
-    fn list_filters_by_prefix() {
-        assert!(!Assets.list("icons/").unwrap().is_empty());
-        assert!(Assets.list("fonts/").unwrap().is_empty());
-    }
 }

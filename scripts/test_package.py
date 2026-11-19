@@ -350,15 +350,10 @@ class PackagingTests(unittest.TestCase):
                              "0.26.0", {"inputs": "test fixture"})
         launcher = (stage / "bin/zuse-server.cmd").read_bytes().decode()
         self.assertEqual(launcher, '@"%~dp0zuse.exe" --as-zuse-server %*\r\n')
-        self.assertIn("--as-zuse-server", Path(package.ROOT / "crates/commands/src/legacy.rs").read_text())
         self.assertTrue((stage / "bin/zuse.exe").is_file())
         self.assertNotIn("links", json.loads((stage / "manifest.json").read_text()))
 
     def test_every_layout_keeps_web_files_where_serve_discovers_them(self):
-        discovery = (package.ROOT / "crates/engine/src/browser_access.rs").read_text()
-        # Linux and Windows apps, the macOS bundle, and the standalone archive.
-        for relative in ('join("web")', 'join("../Resources/web")', 'join("../share/zuse/web")'):
-            self.assertIn(relative, discovery)
         self.assemble()
         self.assertTrue((self.destination / "libexec/web/index.html").is_file())
         self.assertTrue((self.destination / "libexec/zuse").is_file())

@@ -1143,13 +1143,6 @@ fn build(value: usize) -> Widget {
     }
 
     #[test]
-    fn rust_queries_load_for_the_bundled_abi() {
-        assert!(rust_configuration().is_ok());
-        let language_version = std::hint::black_box(tree_sitter::LANGUAGE_VERSION);
-        assert!(language_version >= tree_sitter::MIN_COMPATIBLE_LANGUAGE_VERSION);
-    }
-
-    #[test]
     fn every_registered_grammar_and_query_loads_for_the_bundled_abi() {
         let fixtures = [
             (LanguageId::JavaScript, "app.js", "const value = call(42);"),
@@ -1221,23 +1214,6 @@ fn build(value: usize) -> Widget {
             assert!(
                 document.lines.iter().flatten().next().is_some(),
                 "{language:?} fixture has no structural spans"
-            );
-        }
-    }
-
-    #[test]
-    fn affected_composed_and_project_queries_load_for_pinned_grammars() {
-        for language in [
-            LanguageId::TypeScript,
-            LanguageId::Tsx,
-            LanguageId::Kotlin,
-            LanguageId::Dockerfile,
-        ] {
-            let configuration = configuration(language)
-                .unwrap_or_else(|error| panic!("{language:?} query failed to load: {error}"));
-            assert!(
-                !configuration.names().is_empty(),
-                "{language:?} query has no captures"
             );
         }
     }

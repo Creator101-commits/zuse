@@ -3205,18 +3205,6 @@ tmpfs /run tmpfs rw 0 0
         assert_eq!(unescape_mount_point("/media/tail\\"), "/media/tail\\");
     }
 
-    #[tokio::test]
-    async fn list_drives_resolves_on_this_platform() {
-        let data = tempfile::tempdir().unwrap();
-        let repos =
-            Repos::with_worktrees_root(data.path(), "device", data.path().join("worktrees"));
-        // Content is machine-dependent; the call must succeed and dedupe.
-        let drives = repos.list_drives().await.unwrap();
-        let mut paths: Vec<&String> = drives.iter().map(|d| &d.path).collect();
-        paths.dedup();
-        assert_eq!(paths.len(), drives.len());
-    }
-
     #[test]
     fn git_history_matches_unicode_case_insensitively() {
         let mut candidate = history_commit("a1b2c3d4".into(), None);

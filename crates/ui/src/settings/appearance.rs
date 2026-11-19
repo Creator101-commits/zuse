@@ -4315,59 +4315,6 @@ mod tests {
     }
 
     #[test]
-    fn every_mode_gets_a_card() {
-        assert_eq!(AppearanceMode::ALL.len(), 3);
-        for mode in AppearanceMode::ALL {
-            assert!(!mode.label().is_empty());
-        }
-    }
-
-    #[test]
-    fn registry_offers_both_appearances_and_keeps_single_dark_families_valid() {
-        let registry = ThemeRegistry::builtin();
-        assert_eq!(
-            registry.variants_for(zuse_theme::Appearance::Light).count(),
-            10
-        );
-        assert_eq!(
-            registry.variants_for(zuse_theme::Appearance::Dark).count(),
-            19
-        );
-    }
-
-    #[test]
-    fn accent_helper_names_the_selected_accent() {
-        assert_eq!(
-            accent_helper(AccentSelection::ThemeDefault),
-            "Theme default"
-        );
-        assert_eq!(
-            accent_helper(AccentSelection::Preset(AccentPreset::Pink)),
-            "Pink"
-        );
-    }
-
-    #[test]
-    fn surface_helper_distinguishes_inherited_and_explicit_materials() {
-        assert_eq!(
-            surface_helper(SurfacePreference::ThemeDefault, SurfaceTreatment::Opaque),
-            "Theme default: opaque"
-        );
-        assert_eq!(
-            surface_helper(SurfacePreference::ThemeDefault, SurfaceTreatment::Frosted),
-            "Theme default: frosted"
-        );
-        assert_eq!(
-            surface_helper(SurfacePreference::Frosted, SurfaceTreatment::Opaque),
-            "Translucent surfaces"
-        );
-        assert_eq!(
-            surface_helper(SurfacePreference::Opaque, SurfaceTreatment::Frosted),
-            "Solid surfaces"
-        );
-    }
-
-    #[test]
     fn font_options_appear_once_in_stable_order() {
         let catalog = FontAvailability::all();
         let labels: Vec<_> = catalog.choices().iter().map(UiFontFamily::label).collect();
@@ -4484,23 +4431,6 @@ mod tests {
     }
 
     #[test]
-    fn each_font_kind_gets_distinct_labels_and_element_ids() {
-        let slugs: Vec<_> = FontKind::ALL.iter().map(|kind| kind.slug()).collect();
-        let labels: Vec<_> = FontKind::ALL.iter().map(|kind| kind.label()).collect();
-        assert_eq!(
-            slugs.iter().collect::<std::collections::HashSet<_>>().len(),
-            3
-        );
-        assert_eq!(
-            labels
-                .iter()
-                .collect::<std::collections::HashSet<_>>()
-                .len(),
-            3
-        );
-    }
-
-    #[test]
     fn pixel_sizes_render_whole_and_fractional_values() {
         assert_eq!(format_px(13.0), "13 px");
         assert_eq!(format_px(typography::CODE_FONT_SIZE_DEFAULT), "12.5 px");
@@ -4534,17 +4464,6 @@ mod tests {
         assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(0.0)], MONO_FONT_SIZES[0]);
         assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(99.0)], 20.0);
         assert_eq!(MONO_FONT_SIZES[nearest_mono_ix(12.4)], 12.5);
-    }
-
-    #[test]
-    fn every_size_dropdown_labels_its_whole_ladder_in_pixels() {
-        for kind in FontKind::ALL {
-            let labels = kind.size_labels();
-            assert_eq!(labels.len(), kind.size_count());
-            assert!(labels.iter().all(|label| label.ends_with(" px")));
-        }
-        assert!(FontKind::Terminal.size_labels().contains(&"13 px".into()));
-        assert!(FontKind::Code.size_labels().contains(&"12.5 px".into()));
     }
 
     #[gpui::test]

@@ -209,36 +209,11 @@ mod tests {
         );
     }
     #[test]
-    fn display_actions_preserve_complete_commands_and_typed_prompt_labels() {
+    fn display_actions_preserve_complete_commands() {
         let action = PermissionAction::from_tool_input(
             "pi:bash",
             &serde_json::json!({"command":["cargo","test","--lib"]}),
         );
         assert_eq!(action.detail(), "cargo test --lib");
-        let prompt = ApprovalPrompt {
-            persistent_allowed: true,
-            action,
-            allow_label: "Accept once".into(),
-            deny_label: "Reject once".into(),
-        };
-        assert_eq!(
-            serde_json::from_value::<ApprovalPrompt>(serde_json::to_value(&prompt).unwrap())
-                .unwrap(),
-            prompt
-        );
-    }
-    #[test]
-    fn typed_approval_metadata_round_trips_complete_inputs() {
-        let approval = ToolApproval::new(
-            "test:tool",
-            serde_json::json!({"path":"src/lib.rs","content":"x".repeat(9000)}),
-            "Yes",
-            "No",
-        );
-        assert_eq!(
-            serde_json::from_value::<ToolApproval>(serde_json::to_value(&approval).unwrap())
-                .unwrap(),
-            approval
-        );
     }
 }

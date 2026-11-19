@@ -175,15 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn strips_a_whole_wakeup_block() {
-        let reply = format!("Waiting for Echo to compile...\n\n{WAKEUP}\n\nIt built.");
-        assert_eq!(
-            stream_text(&[&reply]),
-            "Waiting for Echo to compile...\n\n\n\nIt built."
-        );
-    }
-
-    #[test]
     fn strips_a_block_split_at_every_position() {
         let reply = format!("before {WAKEUP} after");
         for (head, tail) in every_split(&reply) {

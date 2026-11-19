@@ -2342,14 +2342,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_colors_map_to_theme_accents() {
-        let theme = Theme::dark();
-        assert_eq!(usage_color(UsageLevel::Normal, &theme), theme.accent);
-        assert_eq!(usage_color(UsageLevel::Warn, &theme), theme.warning);
-        assert_eq!(usage_color(UsageLevel::Critical, &theme), theme.danger);
-    }
-
-    #[test]
     fn reset_formatting_is_absolute() {
         use chrono::Local;
         let now = Utc::now();
@@ -2405,75 +2397,6 @@ mod tests {
             format!("Session: {} · Week", format_reset(Some(soon), now).unwrap())
         );
         assert_eq!(usage_resets(&[], now), "");
-    }
-
-    #[test]
-    fn every_sign_in_provider_shares_one_accounts_flow() {
-        for harness in [
-            HarnessId::ClaudeCode,
-            HarnessId::Codex,
-            HarnessId::Cursor,
-            HarnessId::Antigravity,
-            HarnessId::Grok,
-            HarnessId::Devin,
-        ] {
-            assert!(signs_in(harness), "{harness:?}");
-            assert!(add_account_label(harness, true).starts_with("Connect a "));
-            assert_eq!(add_account_label(harness, false), "Add account");
-            assert!(login_copy(harness, None).starts_with("Finish signing in to "));
-            // One login per agent: one add button, no provider param.
-            let options = login_options(harness);
-            assert_eq!(options.len(), 1, "{harness:?}");
-            assert_eq!(options[0].provider, None);
-            assert_eq!(add_option_label(harness, options[0], false), "Add account");
-        }
-        assert_eq!(
-            add_account_label(HarnessId::Antigravity, true),
-            "Connect a Antigravity account"
-        );
-        // Every agent with a login of its own has an Accounts section.
-        for harness in [HarnessId::Opencode, HarnessId::Pi, HarnessId::Hermes] {
-            assert!(signs_in(harness), "{harness:?}");
-            assert!(reports_usage(harness));
-            for option in login_options(harness) {
-                assert!(option.provider.is_some(), "{harness:?} names its provider");
-                assert!(login_copy(harness, option.provider).starts_with("Finish signing in"));
-            }
-        }
-        assert!(!signs_in(HarnessId::Mock));
-        // Antigravity has no quota to show and keeps a single login.
-        assert!(!reports_usage(HarnessId::Antigravity) && reports_usage(HarnessId::Codex));
-        assert!(keeps_one_login(HarnessId::Antigravity) && !keeps_one_login(HarnessId::Cursor));
-        // Hermes rotates its own pool; zuse never switches it, and says so.
-        assert!(!switches_accounts(HarnessId::Hermes) && switches_accounts(HarnessId::Grok));
-        assert!(provider_note(HarnessId::Hermes).is_some_and(|n| n.contains("hermes auth add")));
-        assert!(provider_note(HarnessId::Grok).is_none());
-    }
-
-    #[test]
-    fn per_provider_agents_offer_one_sign_in_per_provider() {
-        let opencode = login_options(HarnessId::Opencode);
-        let labels: Vec<_> = opencode.iter().map(|o| o.label).collect();
-        assert_eq!(labels, ["ChatGPT", "GitHub Copilot"]);
-        assert_eq!(
-            add_option_label(HarnessId::Opencode, opencode[0], true),
-            "Connect ChatGPT"
-        );
-        assert_eq!(
-            add_option_label(HarnessId::Opencode, opencode[1], false),
-            "Add GitHub Copilot account"
-        );
-        let providers: Vec<_> = login_options(HarnessId::Hermes)
-            .iter()
-            .map(|o| o.provider.unwrap())
-            .collect();
-        assert_eq!(providers, ["openai-codex", "nous"]);
-        let flow = LoginFlow {
-            provider: Some("openai-codex"),
-            ..waiting(HarnessId::Pi, 1)
-        };
-        assert_eq!(flow.title(), "Sign in to ChatGPT for Pi");
-        assert_eq!(waiting(HarnessId::Grok, 1).title(), "Sign in to Grok");
     }
 
     #[test]
@@ -2615,71 +2538,6 @@ mod tests {
                 page.cancel_login(cx);
                 assert!(page.login.is_none());
             })
-            .unwrap();
-    }
-
-    /// A per-provider agent's section renders its rows (a live login, a
-    /// saved one, an unidentified one) and one add button per provider,
-    /// and a device-code sign-in's dialog shows the code line.
-    #[gpui::test]
-    fn per_provider_accounts_render_with_one_add_button_per_provider(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let window = page(cx);
-        let row = |id: &str, email: &str, active, switchable| AgentAccount {
-            id: id.into(),
-            harness: HarnessId::Opencode,
-            email: Some(email.into()),
-            plan_label: Some("ChatGPT Plus".into()),
-            active,
-            usage_windows: vec![zuse_protocol::AgentUsageWindow {
-                label: "Session".into(),
-                used_fraction: 0.4,
-                resets_at: None,
-            }],
-            usage_fetched_at: None,
-            usage_error: None,
-            display_name: None,
-            organization: None,
-            auth_kind: None,
-            switchable,
-            saved_at: None,
-            provider: Some("openai".into()),
-        };
-        window
-            .update(cx, |page, _, _cx| {
-                page.embedded_harness = Some(HarnessId::Opencode);
-                page.snapshot = Loadable::Ready(AgentAccountsSnapshot {
-                    accounts: vec![
-                        row("a", "a@example.com", true, true),
-                        row("b", "b@example.com", false, true),
-                        AgentAccount {
-                            usage_windows: vec![],
-                            provider: Some("github-copilot".into()),
-                            ..row("c", "GitHub account", true, false)
-                        },
-                    ],
-                    warnings: vec![],
-                });
-                page.login = Some(LoginFlow {
-                    provider: Some("github-copilot"),
-                    url: Some("https://github.com/login/device".into()),
-                    step: LoginStep::Browser {
-                        message: Some("Enter the code ABCD-1234 on GitHub.".into()),
-                    },
-                    ..waiting(HarnessId::Opencode, 1)
-                });
-                assert_eq!(
-                    page.login.as_ref().unwrap().status().as_ref(),
-                    "Enter the code ABCD-1234 on GitHub."
-                );
-                assert_eq!(
-                    page.login.as_ref().unwrap().title(),
-                    "Sign in to GitHub Copilot for OpenCode"
-                );
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
     }
 

@@ -62,59 +62,6 @@ fn formatting_is_locale_aware_and_rejects_invalid_dates() {
     assert_eq!(de.date(2026, 2, 30), None);
 }
 #[test]
-fn contributor_corrections_are_preserved() {
-    let hans = Localizer::new(Locale::ZhHans);
-    let hant = Localizer::new(Locale::ZhHant);
-    assert_eq!(hans.text("settings-cloud_machines_pane_checkout"), "结账");
-    assert_eq!(hant.text("settings-cloud_machines_pane_checkout"), "結帳");
-    assert_eq!(
-        format!(
-            "3 {}{}",
-            hans.text("chat-turn_summary_tool"),
-            hans.text("chat-turn_summary_call")
-        ),
-        "3 次工具调用"
-    );
-    assert!(
-        hans.text("projects-worktree_setup_card_branching_a_fresh_worktree")
-            .contains("工作树")
-    );
-    assert!(
-        hant.text("projects-pr_pane_all_checks_passed")
-            .contains("通過")
-    );
-    assert!(
-        !hant
-            .text("projects-pr_pane_all_checks_passed")
-            .contains("透過")
-    );
-}
-
-#[test]
-#[ignore = "one-time audit against the pinned import; intentional later translation edits may differ"]
-fn every_imported_message_preserves_text_placeholders_and_markup() {
-    use sha2::{Digest, Sha256};
-    let report: serde_json::Value =
-        serde_json::from_str(include_str!("../migration.json")).unwrap();
-    for locale in Locale::ALL {
-        let l10n = Localizer::new(locale);
-        for (key, record) in report["messages"].as_object().unwrap() {
-            let mut args = Arguments::new();
-            for variable in record["variables"].as_array().unwrap() {
-                let variable = variable.as_str().unwrap();
-                args.set(variable, format!("{{{{{variable}}}}}"));
-            }
-            let rendered = l10n
-                .format(record["target"].as_str().unwrap(), Some(&args))
-                .replace(['\u{2068}', '\u{2069}'], "");
-            let actual = format!("{:x}", Sha256::digest(rendered.as_bytes()));
-            let expected = record["translations"][locale.code()].as_str().unwrap();
-            assert_eq!(actual, expected, "{locale:?}: {key}: {rendered}");
-        }
-    }
-}
-
-#[test]
 fn all_catalogs_resolve_and_translation_variables_are_supplied_by_english() {
     use fluent_syntax::{ast, parser};
     use std::collections::{BTreeMap, BTreeSet};

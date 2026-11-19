@@ -118,6 +118,10 @@ async fn pump(
     if keep > 0 {
         let _ = output.write_all(&tail[..keep]).await;
     }
+    // tokio's `File` hands each write to a blocking thread and reports success
+    // before it lands; without a flush the last writes can still be in flight
+    // after this returns, so a reader sees a truncated (or empty) log.
+    let _ = output.flush().await;
 }
 /// `stop_previous` waits for the group leader only; the process that owns the
 /// port (a server under the startup shell) can outlive it by a moment. Give the

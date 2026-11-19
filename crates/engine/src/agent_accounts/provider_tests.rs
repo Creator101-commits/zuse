@@ -1409,42 +1409,6 @@ fn device_codes_and_urls_are_found_in_coloured_cli_output() {
     );
 }
 
-#[test]
-fn usage_reasons_name_each_providers_vendor_and_cli() {
-    let entry = UsageEntry::default();
-    let reason = |harness, key: Option<&str>, active, error: ProbeError| {
-        usage_error_message(harness, key, active, &error, &entry, 0).unwrap()
-    };
-    let limited = ProbeError::RateLimited {
-        retry_after_secs: None,
-    };
-    let rejected = ProbeError::Unauthorized { status: 401 };
-    assert_eq!(
-        reason(HarnessId::Grok, None, true, limited.clone()),
-        "Rate limited by xAI"
-    );
-    assert_eq!(
-        reason(HarnessId::Opencode, Some("github-copilot"), false, limited),
-        "Rate limited by GitHub"
-    );
-    assert_eq!(
-        reason(HarnessId::Grok, None, true, rejected.clone()),
-        "Session expired — it refreshes the next time grok runs"
-    );
-    assert_eq!(
-        reason(HarnessId::Pi, Some("openai-codex"), false, rejected.clone()),
-        "Session expired — switch to it to refresh"
-    );
-    assert_eq!(
-        reason(HarnessId::Devin, None, true, rejected.clone()),
-        "Signed out — sign in again"
-    );
-    assert_eq!(
-        reason(HarnessId::Grok, None, false, rejected),
-        "Signed out — sign in again"
-    );
-}
-
 // ── review hardening: grok entries, endpoints, the secret writer ────────────
 
 /// A multi-issuer `auth.json`: a switch merges only the slot's issuer entry

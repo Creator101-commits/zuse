@@ -9177,9 +9177,15 @@ mod tests {
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("opus"));
                 assert!(!picker.is_open());
+                // Reopening starts on the newly selected provider with a
+                // cleared search, not on whatever was browsed last.
                 picker.open_model_menu(window, cx);
-                assert!(picker.model_scope.is_none());
+                assert_eq!(picker.model_scope, Some(HarnessId::ClaudeCode));
                 assert!(picker.search.read(cx).text().is_empty());
+                picker.model_scope = Some(HarnessId::Codex);
+                picker.close(cx);
+                picker.open_model_menu(window, cx);
+                assert_eq!(picker.model_scope, Some(HarnessId::ClaudeCode));
             })
             .unwrap();
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
@@ -9358,21 +9364,27 @@ mod tests {
             .read_with(cx, |picker, _| assert_eq!(picker.active, 0))
             .unwrap();
         handle
-            .update(cx, |picker, _, cx| {
+            .update(cx, |picker, window, cx| {
+                // A failed or still-loading provider has no navigable rows.
+                for provider in [HarnessId::ClaudeCode, HarnessId::Grok] {
+                    picker.scope_model_menu(Some(provider), cx);
+                    assert_eq!(picker.model_rows_len(cx), 0, "{provider:?}");
+                }
                 picker.models.insert(
                     HarnessId::ClaudeCode,
                     Loadable::Ready(vec![bare_model("claude", "Claude model")]),
                 );
                 picker.catalog_rev += 1;
-                // A provider's models become directly selectable when its
-                // catalog finishes loading; no provider-page detour is needed.
-                assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
-                picker.activate_model_index(1, cx);
+                // Its models become selectable once its catalog loads.
+                picker.scope_model_menu(Some(HarnessId::ClaudeCode), cx);
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
+                picker.activate_model_index(0, cx);
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude"));
+                picker.open_model_menu(window, cx);
                 picker.show_compact_models(cx);
-                assert_eq!(picker.model_rows_len(cx), 2);
+                assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(
                     picker.model_rows(cx)[picker.active].harness,
                     HarnessId::ClaudeCode
@@ -9554,12 +9566,12 @@ mod tests {
             .update(cx, |picker, window, cx| {
                 picker.open_model_menu(window, cx);
                 assert!(picker.compact_model_list);
-                // Models from every offered provider are directly selectable.
+                // The list opens on the current provider; the provider rail
+                // switches to another provider's models.
                 picker.show_compact_models(cx);
-                assert_eq!(picker.model_rows_len(cx), 2);
+                assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::Codex);
-                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
-                // Searching must also find another provider's model.
+                picker.scope_model_menu(Some(HarnessId::ClaudeCode), cx);
                 picker
                     .search
                     .update(cx, |input, cx| input.set_text("Claude", cx));
@@ -9570,9 +9582,10 @@ mod tests {
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude-model"));
                 picker.pick_harness(HarnessId::Codex, cx);
-                // Clicking a foreign-provider row works without a search too.
-                picker.show_compact_models(cx);
-                picker.activate_model_index(1, cx);
+                // Picking a foreign-provider row works without a search too.
+                picker.search.update(cx, |input, cx| input.set_text("", cx));
+                picker.scope_model_menu(Some(HarnessId::ClaudeCode), cx);
+                picker.activate_model_index(0, cx);
                 assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
                 picker.pick_harness(HarnessId::Codex, cx);
                 // Switching provider (Tab on the panel) lands back on the
@@ -9589,6 +9602,7 @@ mod tests {
                     state.selected_chat = Some("thread".into());
                     cx.notify();
                 });
+                picker.scope_model_menu(Some(HarnessId::Codex), cx);
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 1);
                 assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::Codex);
@@ -9599,14 +9613,7 @@ mod tests {
                 picker.search.update(cx, |input, cx| input.set_text("", cx));
                 // Until the selected chat row arrives, keep its last known provider.
                 assert_eq!(picker.compact_groups(cx), vec![(Some(HarnessId::Codex), 0)]);
-                picker.compact_model_list = false;
-                picker.focus_on_mount = true;
             })
-            .unwrap();
-        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-        handle
-            .read_with(cx, |picker, _| assert!(picker.effort_bounds.is_some()))
             .unwrap();
         handle
             .update(cx, |picker, _, cx| {
@@ -10376,28 +10383,6 @@ mod tests {
             resolved.chat_config().unwrap().sandbox,
             SandboxLevel::DangerFullAccess
         );
-    }
-
-    #[test]
-    fn default_model_is_first_catalog_row() {
-        let models = vec![
-            Model {
-                id: "flagship".into(),
-                label: "Flagship".into(),
-                description: None,
-                reasoning_levels: vec![],
-                options: vec![],
-            },
-            Model {
-                id: "fast".into(),
-                label: "Fast".into(),
-                description: None,
-                reasoning_levels: vec![],
-                options: vec![],
-            },
-        ];
-        assert_eq!(default_model(&models).map(|m| &*m.id), Some("flagship"));
-        assert!(default_model(&[]).is_none());
     }
 
     #[test]

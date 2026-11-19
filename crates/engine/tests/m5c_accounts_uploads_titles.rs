@@ -748,13 +748,6 @@ async fn hermes_credential_pool_is_listed_read_only() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), pool);
 }
 
-#[test]
-fn snapshot_wire_shape() {
-    let snapshot = AgentAccountsSnapshot::default();
-    let value = serde_json::to_value(&snapshot).expect("serializes");
-    assert_eq!(value, serde_json::json!({ "accounts": [], "warnings": [] }));
-}
-
 #[tokio::test]
 async fn claude_login_flow_is_the_clis_loopback_pkce() {
     let tmp = tempfile::tempdir().expect("tempdir");

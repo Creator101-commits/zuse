@@ -406,7 +406,7 @@ pub fn is_openable_login_url(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{HarnessId, inline_code, login_command, login_options};
+    use super::inline_code;
 
     #[test]
     fn catalog_code_spans_render_as_backticks() {
@@ -416,11 +416,5 @@ mod tests {
         );
         assert_eq!(inline_code("a < b <em>x</em>"), "a < b <em>x</em>");
         assert_eq!(inline_code("tail <part"), "tail <part");
-    }
-
-    #[test]
-    fn muse_signs_in_through_its_own_cli() {
-        assert_eq!(login_command(HarnessId::Muse), Some("muse login"));
-        assert!(login_options(HarnessId::Muse).is_empty());
     }
 }

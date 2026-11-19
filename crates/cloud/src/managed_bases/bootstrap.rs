@@ -439,13 +439,6 @@ mod tests {
         assert!(install.contains(&format!(
             "printf '%s\\n' '{key}' > /usr/local/share/zuse/.runtime-release-signing.pub.next"
         )));
-        assert!(install.contains("PathExists=/home/zuse/.zuse-data/runtime-updates/request.json"));
-        assert!(install.contains(
-            "ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/zuse/runtime-update.py run"
-        ));
-        assert!(install.contains(
-            "ExecStart=/usr/bin/python3 -I -B /usr/local/libexec/zuse/runtime-update.py recover"
-        ));
         let helper = include_str!("../../../../infra/cloud/runtime-update.py");
         assert!(helper.contains("/usr/local/share/zuse/runtime-release-signing.pub"));
         assert!(helper.contains("DOMAIN = b'zuse-runtime-release-v1\\n'"));

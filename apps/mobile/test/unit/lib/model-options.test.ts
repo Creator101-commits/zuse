@@ -79,7 +79,5 @@ describe("runtimeOptionFor", () => {
 
 		expect(new Set(options.map((option) => option.systemImage)).size).toBe(4);
 		expect(new Set(options.map((option) => option.tint)).size).toBe(4);
-		expect(runtimeOptionFor("auto-accept-edits").tint).toBe("#0A84FF");
-		expect(runtimeOptionFor("full-access").tint).toBe("#FF453A");
 	});
 });

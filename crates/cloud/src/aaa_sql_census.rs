@@ -96,6 +96,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Census {
 }
 
 #[test]
+#[ignore = "manual SQL census; run with --ignored --test-threads=1"]
 fn install() {
     let filter = tracing_subscriber::filter::Targets::new()
         .with_target("sqlx::query", tracing::Level::TRACE)
