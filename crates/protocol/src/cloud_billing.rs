@@ -374,7 +374,7 @@ pub mod plans {
     pub const TRIAL_DAYS: u32 = 7;
     /// Used when no enterprise contact is configured. Placeholder until the
     /// owner provides a booking link (`ZUSE_ENTERPRISE_CONTACT_URL`).
-    pub const ENTERPRISE_CONTACT_FALLBACK: &str = "mailto:hello@zuse.sh?subject=Zuse%20Enterprise";
+    pub const ENTERPRISE_CONTACT_FALLBACK: &str = "mailto:swaraj@zuse.sh?subject=Zuse%20Enterprise";
     pub fn catalog(
         trial_available: bool,
         available: &dyn Fn(&str) -> bool,

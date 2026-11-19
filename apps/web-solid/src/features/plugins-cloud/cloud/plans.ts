@@ -4,7 +4,7 @@ import type { BillingUsageItem, CloudCapabilities, PlanCatalog, PlanId, PlanOffe
 
 /** Machine minutes the default 4 vCPU / 16 GB machine uses per awake minute. */
 export const DEFAULT_RATE = 4;
-export const ENTERPRISE_CONTACT_FALLBACK = "mailto:hello@zuse.sh?subject=Zuse%20Enterprise";
+export const ENTERPRISE_CONTACT_FALLBACK = "mailto:swaraj@zuse.sh?subject=Zuse%20Enterprise";
 
 /** Older servers send no catalog; these are the plans they sell. The trial is never offered without the server saying so. */
 export const FALLBACK_CATALOG: PlanCatalog = {
