@@ -30,7 +30,7 @@ mod secrets;
 pub use onboarding::StartChat;
 gpui::actions!(
     cloud_setup_overlay,
-    [CloseRepositoryPicker, CloseImageHistory]
+    [CloseRepositoryPicker, CloseImageHistory, SaveChanges]
 );
 pub type Owner = (String, Option<String>);
 /// Delay before the `attempt`th fallback status read while the account feed
@@ -96,6 +96,8 @@ pub struct RepositoryPanel {
     picker: bool,
     /// The open overflow ("…") menu, by its trigger id.
     overflow: Option<SharedString>,
+    /// The window's size at the last render, to place the unsaved bar.
+    viewport: Size<Pixels>,
     usage_only: bool,
     storage_usage: Option<i64>,
     picker_focus: FocusHandle,
@@ -132,6 +134,7 @@ impl RepositoryPanel {
                 Some("CloudRepositoryPicker"),
             ),
             KeyBinding::new("escape", CloseImageHistory, Some("CloudImageHistory")),
+            KeyBinding::new("secondary-s", SaveChanges, Some("CloudSettingsPanel")),
         ]);
         let search = cx.new(|cx| TextInput::new("Search repositories…", window, cx));
         cx.observe(&search, |_, _, cx| cx.notify()).detach();
@@ -160,6 +163,7 @@ impl RepositoryPanel {
             notice: None,
             picker: false,
             overflow: None,
+            viewport: Size::default(),
             usage_only: false,
             storage_usage: None,
             picker_focus: cx.focus_handle(),
@@ -179,6 +183,17 @@ impl RepositoryPanel {
             plan_read: false,
             plan_summary: None,
             page: CloudPage::All,
+        }
+    }
+    /// Cmd/Ctrl+S: save whichever form on this page has edits.
+    fn save_changes(&mut self, cx: &mut Context<Self>) {
+        if !self.can_manage() {
+            return;
+        }
+        if self.machine_dirty(cx) {
+            self.save_machine(cx);
+        } else if self.environment_dirty(cx) {
+            self.save_environment(cx);
         }
     }
     pub fn set_page(&mut self, page: CloudPage, cx: &mut Context<Self>) {

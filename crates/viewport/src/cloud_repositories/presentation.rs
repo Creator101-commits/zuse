@@ -943,6 +943,15 @@ impl RepositoryPanel {
 }
 impl Render for RepositoryPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.viewport = window.viewport_size();
+        div()
+            .key_context("CloudSettingsPanel")
+            .on_action(cx.listener(|this, _: &SaveChanges, _, cx| this.save_changes(cx)))
+            .child(self.render_page(window, cx))
+    }
+}
+impl RepositoryPanel {
+    fn render_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         if !self.loaded && self.owner.is_some() {
             self.refresh(cx);
         }

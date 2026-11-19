@@ -8,6 +8,10 @@
 //! and the standard machine. `FIXTURE_ONBOARDING=<step>` opens first-run
 //! onboarding at `welcome`, `repositories`, `setup`, `agents` or `start`.
 //! `FIXTURE_NO_REPOS=1` keeps GitHub connected but adds no repositories.
+//! `FIXTURE_ACCOUNT=signed-out` starts signed out. `FIXTURE_ARCHIVED=1`
+//! archives the first chat. `FIXTURE_CLICKS="x,y;x,y"` clicks those window
+//! points (via XTest, under Xvfb) before the capture, and
+//! `FIXTURE_TYPE=text` then types into the focused field.
 use chrono::{Duration, Utc};
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use serde_json::{Value, json};
@@ -354,6 +358,16 @@ impl RpcService for Controller {
         }
         if self.fresh {
             match method {
+                // Just subscribed: nothing used yet.
+                methods::CLOUD_BILLING_SUMMARY => {
+                    let mut summary = summary(self.start, self.plan);
+                    let plan = &mut summary["plan"];
+                    plan["remainingMachineMinutes"] = plan["includedMachineMinutes"].clone();
+                    plan["usedMachineMinutes"] = json!(0);
+                    plan["extraMachineMinutes"] = json!(0);
+                    return bound(summary);
+                }
+                methods::CLOUD_BILLING_USAGE => return bound(json!({"items": []})),
                 methods::CLOUD_PROJECTS => return bound(json!({"projects": []})),
                 methods::CLOUD_GITHUB => {
                     return bound(json!({"configured": true, "canManageInstallations": true,
@@ -480,11 +494,20 @@ fn main() {
             s.auto_selected = true;
             s.spaces_synced = true;
             s.chats_synced = true;
-            s.apply_cloud_account(json!({"user":{"id": OWNER,"email":"you@example.com"},"orgId":null}));
-            s.fixture_cloud_subscription(plan != PlanState::None);
+            if std::env::var("FIXTURE_ACCOUNT").as_deref() == Ok("signed-out") {
+                s.apply_cloud_account(json!({"user": null, "orgId": null}));
+            } else {
+                s.apply_cloud_account(json!({"user":{"id": OWNER,"email":"you@example.com"},"orgId":null}));
+                s.fixture_cloud_subscription(plan != PlanState::None);
+            }
             s.chats = MACHINES.iter().zip(TITLES).map(|((_, chat, branch), title)| serde_json::from_value(json!({
                 "id": chat, "deviceId": "fixture-local", "title": title, "branch": branch, "archived": false,
                 "createdAt": "2026-11-02T12:00:00Z"})).unwrap()).collect();
+            if std::env::var("FIXTURE_ARCHIVED").is_ok()
+                && let Some(chat) = s.chats.first_mut()
+            {
+                chat.archived = true;
+            }
             s.fixture_cloud_sidebar_catalog(client, &json!({}), &json!({"accountId": OWNER, "organizationId": null, "workspaces": []}));
             s
         });
@@ -516,6 +539,22 @@ fn main() {
                 window.update(cx, |shell, _, cx| shell.fixture_usage_compute(cx)).unwrap();
                 cx.background_executor().timer(std::time::Duration::from_millis(2000)).await;
             }
+            for point in std::env::var("FIXTURE_CLICKS").unwrap_or_default().split(';').filter(|p| !p.is_empty()) {
+                let status = std::process::Command::new("python3")
+                    .args(["-c", XTEST, "click", point])
+                    .status()
+                    .expect("click");
+                assert!(status.success(), "click failed");
+                cx.background_executor().timer(std::time::Duration::from_millis(900)).await;
+            }
+            if let Ok(text) = std::env::var("FIXTURE_TYPE") {
+                let status = std::process::Command::new("python3")
+                    .args(["-c", XTEST, "type", &text])
+                    .status()
+                    .expect("type");
+                assert!(status.success(), "typing failed");
+                cx.background_executor().timer(std::time::Duration::from_millis(900)).await;
+            }
             let Some(out) = out else { return };
             let any: gpui::AnyWindowHandle = window.into();
             any.update(cx, |_, window, cx| {
@@ -536,3 +575,29 @@ fn main() {
         }).detach();
     });
 }
+
+/// Clicks a point or types text into the focused field through XTest.
+const XTEST: &str = r#"
+import ctypes as c,sys,time
+x=c.CDLL('libX11.so.6');t=c.CDLL('libXtst.so.6')
+x.XOpenDisplay.argtypes=[c.c_char_p];x.XOpenDisplay.restype=c.c_void_p;d=x.XOpenDisplay(None);assert d
+x.XFlush.argtypes=[c.c_void_p];t.XTestFakeMotionEvent.argtypes=[c.c_void_p,c.c_int,c.c_int,c.c_int,c.c_ulong];t.XTestFakeButtonEvent.argtypes=[c.c_void_p,c.c_uint,c.c_int,c.c_ulong]
+x.XStringToKeysym.argtypes=[c.c_char_p];x.XStringToKeysym.restype=c.c_ulong
+x.XKeysymToKeycode.argtypes=[c.c_void_p,c.c_ulong];x.XKeysymToKeycode.restype=c.c_uint
+t.XTestFakeKeyEvent.argtypes=[c.c_void_p,c.c_uint,c.c_int,c.c_ulong]
+if sys.argv[1]=='click':
+    a,b=map(int,sys.argv[2].split(','))
+    t.XTestFakeMotionEvent(d,-1,a,b,0);x.XFlush(d);time.sleep(.3)
+    t.XTestFakeButtonEvent(d,1,1,0);t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d)
+else:
+    def key(name,down):
+        code=x.XKeysymToKeycode(d,x.XStringToKeysym(name.encode()));assert code
+        t.XTestFakeKeyEvent(d,code,down,0)
+    for ch in sys.argv[2]:
+        up=ch.isupper()
+        name={' ':'space','-':'minus','/':'slash','.':'period'}.get(ch,ch.lower())
+        if up:key('Shift_L',1)
+        key(name,1);key(name,0)
+        if up:key('Shift_L',0)
+    x.XFlush(d)
+"#;

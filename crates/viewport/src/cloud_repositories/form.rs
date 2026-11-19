@@ -92,64 +92,32 @@ pub(super) fn message(text: &str, error: bool) -> Div {
         .child(text.to_owned())
 }
 
-/// Status on the left; Discard and Save on the right, live only when dirty.
+/// The floating "Unsaved changes" bar with Reset and Save, shown only while
+/// the page has edits. Cmd/Ctrl+S saves too (see `SaveChanges`).
 pub(super) fn save_bar(
     id: &'static str,
-    status: String,
+    viewport: Size<Pixels>,
     dirty: bool,
     busy: bool,
     discard: impl Fn(&mut RepositoryPanel, &mut Context<RepositoryPanel>) + 'static,
     save: impl Fn(&mut RepositoryPanel, &mut Context<RepositoryPanel>) + 'static,
     cx: &mut Context<RepositoryPanel>,
-) -> Div {
-    let ready = dirty && !busy;
-    row()
-        .items_center()
-        .justify_between()
-        .gap(px(12.))
-        .px(px(14.))
-        .py(px(10.))
-        .rounded(px(10.))
-        .border_1()
-        .border_color(palette::rgb(BORDER))
-        .bg(s::frame_bg())
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(12.))
-                .line_height(px(16.))
-                .text_color(palette::rgb(if dirty { TEXT } else { MUTED }))
-                .child(if dirty {
-                    "Unsaved changes".to_owned()
-                } else {
-                    status
-                }),
-        )
-        .child(
-            row()
-                .gap(px(8.))
-                .when(dirty, |v| {
-                    v.child(
-                        cs::button(
-                            SharedString::from(format!("{id}-discard")),
-                            "Discard",
-                            false,
-                            busy,
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| discard(this, cx))),
-                    )
-                })
-                .child(
-                    crate::cloud_settings::kit::primary_button(
-                        SharedString::from(format!("{id}-save")),
-                        if busy { "Saving…" } else { "Save changes" },
-                        ready,
-                    )
-                    .when(ready, |b| {
-                        b.on_click(cx.listener(move |this, _, _, cx| save(this, cx)))
-                    }),
-                ),
-        )
+) -> AnyElement {
+    if !dirty {
+        return div().into_any_element();
+    }
+    use crate::cloud_settings::kit;
+    let reset = kit::reset_button(SharedString::from(format!("{id}-discard")), !busy)
+        .when(!busy, |b| {
+            b.on_click(cx.listener(move |this, _, _, cx| discard(this, cx)))
+        });
+    let save = kit::primary_button(
+        SharedString::from(format!("{id}-save")),
+        if busy { "Saving…" } else { "Save" },
+        !busy,
+    )
+    .when(!busy, |b| {
+        b.on_click(cx.listener(move |this, _, _, cx| save(this, cx)))
+    });
+    kit::unsaved_bar(viewport, reset, save).into_any_element()
 }

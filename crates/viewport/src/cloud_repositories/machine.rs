@@ -251,7 +251,7 @@ impl RepositoryPanel {
             });
         }));
     }
-    fn save_machine(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn save_machine(&mut self, cx: &mut Context<Self>) {
         let Some(version) = self.machine.version.as_ref() else {
             return;
         };
@@ -281,7 +281,7 @@ impl RepositoryPanel {
         );
         cx.notify();
     }
-    fn machine_dirty(&self, cx: &App) -> bool {
+    pub(super) fn machine_dirty(&self, cx: &App) -> bool {
         self.machine.version.as_ref().is_some_and(|v| {
             self.machine.setup.read(cx).value(cx).trim() != v.recipe.setup_script.trim()
                 || self.machine.instructions.read(cx).value(cx).trim()
@@ -474,7 +474,7 @@ impl RepositoryPanel {
     }
 
     /// The setup script alone, with its save bar: the onboarding step.
-    pub(super) fn render_machine_setup(&self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_machine_setup(&self, _cx: &mut Context<Self>) -> Div {
         use super::form;
         use crate::cloud_settings::kit;
         let busy = self.pending.values().any(|p| p.kind.starts_with("machine"));
@@ -505,15 +505,9 @@ impl RepositoryPanel {
         if let Some(error) = &self.machine.error {
             root = root.child(form::message(error, true));
         }
-        root.child(form::save_bar(
-            "cloud-machine",
-            String::new(),
-            self.machine_dirty(cx) && self.can_manage(),
-            busy,
-            |this, cx| this.discard_machine(cx),
-            |this, cx| this.save_machine(cx),
-            cx,
-        ))
+        // Onboarding's Continue saves these edits ("Save and continue").
+        let _ = busy;
+        root
     }
 
     pub(super) fn render_machine(&self, cx: &mut Context<Self>) -> Div {
@@ -588,7 +582,7 @@ impl RepositoryPanel {
         }
         root.child(form::save_bar(
             "cloud-machine",
-            format!("Version {}", version.revision),
+            self.viewport,
             self.machine_dirty(cx) && self.can_manage(),
             busy,
             |this, cx| this.discard_machine(cx),
