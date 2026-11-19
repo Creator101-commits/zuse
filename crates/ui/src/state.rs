@@ -923,6 +923,9 @@ struct PendingChatArchive {
 const OPTIMISTIC_SAVED_GRACE_MS: i64 = 30_000;
 /// How long a row removed here stays hidden from older queue frames.
 const REMOVED_QUEUED_GRACE_MS: i64 = 10_000;
+/// How long an echo a transcript frame confirmed comes back if a newer
+/// transcript copy lacks its message.
+const CONFIRMED_ECHO_GRACE_MS: i64 = 30_000;
 
 /// A message the user queued in a cloud chat, shown in the queue the moment
 /// it is sent and replaced by the server's row (same queue id) once listed.
@@ -1071,6 +1074,10 @@ pub struct AppState {
     /// Optimistic user echoes per chat id, shown until the doc frame carrying
     /// the same message id arrives (client-minted ids make dedup exact).
     echoes: HashMap<String, Vec<SessionMessageEntry>>,
+    /// Echoes a transcript frame confirmed, with the time it did, kept
+    /// briefly in case a newer copy of the transcript lacks them (see
+    /// [`Self::settle_echoes`]).
+    confirmed_echoes: HashMap<String, Vec<(SessionMessageEntry, i64)>>,
     /// Send-in-flight overlay per chat id: a queued doc command the host
     /// hasn't executed yet (see [`Self::begin_pending_send`]).
     pending_sends: HashMap<String, PendingSend>,
@@ -1240,6 +1247,7 @@ impl AppState {
             transcript_revision: 0,
             link_roots_revision: 0,
             echoes: HashMap::new(),
+            confirmed_echoes: HashMap::new(),
             pending_sends: HashMap::new(),
             upload_progress: None,
             transfers: HashMap::new(),
@@ -2184,16 +2192,49 @@ impl AppState {
             self.prepared_transcripts.remove(id);
         }
         self.transcript_revision = self.transcript_revision.wrapping_add(1);
-        // Doc frames supersede optimistic echoes carrying the same id.
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            echoes.retain(|echo| !entries.iter().any(|e| e.id == echo.id));
-        }
         self.transcript = entries;
+        self.settle_echoes();
         self.transcript_replayed = true;
         self.ack_pending_send_from_transcript();
         self.prune_optimistic_queue();
+    }
+
+    /// Transcript frames supersede optimistic echoes carrying the same id.
+    /// A superseded echo is kept out of sight for a moment: when a newer
+    /// copy of the transcript doesn't have the message yet (a cloud chat's
+    /// saved history lists it before its computer's live transcript does),
+    /// the echo shows again instead of the message vanishing until that copy
+    /// catches up.
+    fn settle_echoes(&mut self) {
+        let Some(chat) = self.selected_chat.clone() else {
+            return;
+        };
+        let now = chrono::Utc::now().timestamp_millis();
+        let transcript = &self.transcript;
+        let has = |id: &str| transcript.iter().any(|entry| entry.id == id);
+        let echoes = self.echoes.entry(chat.clone()).or_default();
+        let confirmed = self.confirmed_echoes.entry(chat).or_default();
+        confirmed.retain(|(_, at)| now - *at < CONFIRMED_ECHO_GRACE_MS);
+        let mut changed = false;
+        let (shown, hidden): (Vec<_>, Vec<_>) = std::mem::take(echoes)
+            .into_iter()
+            .partition(|echo| !has(&echo.id));
+        *echoes = shown;
+        confirmed.extend(hidden.into_iter().map(|echo| (echo, now)));
+        let (kept, lost): (Vec<_>, Vec<_>) = std::mem::take(confirmed)
+            .into_iter()
+            .partition(|(echo, _)| has(&echo.id));
+        *confirmed = kept;
+        for (echo, _) in lost {
+            if !echoes.iter().any(|e| e.id == echo.id) {
+                echoes.push(echo);
+                changed = true;
+            }
+        }
+        if changed {
+            echoes.sort_by_key(|echo| echo.created_at);
+            self.transcript_revision = self.transcript_revision.wrapping_add(1);
+        }
     }
 
     /// A queued cloud message that already reached the transcript leaves
@@ -2224,12 +2265,7 @@ impl AppState {
         if is_reset {
             self.transcript_replayed = true;
         }
-        if let Some(chat_id) = self.selected_chat.as_deref()
-            && let Some(echoes) = self.echoes.get_mut(chat_id)
-        {
-            let transcript = &self.transcript;
-            echoes.retain(|echo| !transcript.iter().any(|e| e.id == echo.id));
-        }
+        self.settle_echoes();
         self.ack_pending_send_from_transcript();
         self.prune_optimistic_queue();
         Ok(())
@@ -2392,6 +2428,9 @@ impl AppState {
 
     /// Drop an echo (send failed — the prompt returns to the draft).
     pub fn remove_echo(&mut self, chat_id: &str, message_id: &str) {
+        if let Some(confirmed) = self.confirmed_echoes.get_mut(chat_id) {
+            confirmed.retain(|(e, _)| e.id != message_id);
+        }
         if let Some(echoes) = self.echoes.get_mut(chat_id) {
             let previous_len = echoes.len();
             echoes.retain(|e| e.id != message_id);
@@ -3554,6 +3593,7 @@ impl AppState {
         self.sub_transcripts.clear();
         self.sub_history.clear();
         self.echoes.clear();
+        self.confirmed_echoes.clear();
         self.optimistic_queue.clear();
         self.removed_queued.clear();
         self.queue_paused = None;
@@ -7411,6 +7451,19 @@ mod tests {
             id: "m1".into(),
             ..echo.clone()
         }]);
+        assert!(state.pending_echoes().is_empty());
+        // A newer copy of the transcript that doesn't have it yet (a cloud
+        // chat's live transcript after its saved history) shows the echo
+        // again instead of losing the message, until that copy has it.
+        state.apply_transcript(vec![]);
+        assert_eq!(state.pending_echoes().len(), 1);
+        state.apply_transcript(vec![SessionMessageEntry {
+            id: "m1".into(),
+            ..echo.clone()
+        }]);
+        assert!(state.pending_echoes().is_empty());
+        state.remove_echo("c1", "m1");
+        state.apply_transcript(vec![]);
         assert!(state.pending_echoes().is_empty());
         // Failure path: explicit removal.
         state.push_echo(
