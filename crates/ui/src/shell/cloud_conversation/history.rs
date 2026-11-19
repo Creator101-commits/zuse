@@ -344,6 +344,7 @@ impl CloudConversation {
             if let Ok(queue) =
                 serde_json::from_value::<Vec<zuse_doc::QueuedMessage>>(head.queue.clone())
             {
+                state.set_queue_paused(&head.session_id, head.queue_paused);
                 state.apply_queue(queue);
             }
             let _ = state.receive_transcript_update(head.transcript.clone(), cx);

@@ -918,6 +918,32 @@ struct PendingChatArchive {
     accepted: bool,
 }
 
+/// After the server saved a queued message the queue doesn't list yet,
+/// how long this app keeps showing it (it was usually sent at once).
+const OPTIMISTIC_SAVED_GRACE_MS: i64 = 30_000;
+/// How long a row removed here stays hidden from older queue frames.
+const REMOVED_QUEUED_GRACE_MS: i64 = 10_000;
+
+/// A message the user queued in a cloud chat, shown in the queue the moment
+/// it is sent and replaced by the server's row (same queue id) once listed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OptimisticQueued {
+    pub item: zuse_doc::QueuedMessage,
+    /// The transcript id the message takes when it is sent.
+    pub message_id: String,
+    pub state: OptimisticState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum OptimisticState {
+    /// On its way to the server.
+    Sending,
+    /// Saved by the server at this time (epoch ms).
+    Saved(i64),
+    /// Not sent; the row offers Retry and Remove.
+    Failed(String),
+}
+
 /// Root application state. Reducer methods (`apply_*`, [`Self::session_for`], …)
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
@@ -1014,6 +1040,18 @@ pub struct AppState {
     /// server reports it: `(chat id, code)`. A runtime update or Update
     /// computer shows as a status above the composer.
     pub(crate) cloud_queue_error: Option<(String, String)>,
+    /// The queue the chat's host last reported; [`Self::queue`] adds the
+    /// messages this app sent that it doesn't list yet.
+    host_queue: Vec<zuse_doc::QueuedMessage>,
+    /// Cloud messages queued from this app, per chat, until the server's
+    /// queue lists them (see [`OptimisticQueued`]).
+    optimistic_queue: HashMap<String, Vec<OptimisticQueued>>,
+    /// Rows this app just removed, by id and removal time: a queue frame
+    /// read before the removal can't bring them back.
+    removed_queued: HashMap<String, i64>,
+    /// Whether Stop holds the chat's queue, as its host reports it:
+    /// `(chat id, paused)`. Hosts that don't report it leave this unset.
+    queue_paused: Option<(String, bool)>,
     pub context_usage: Option<zuse_protocol::ContextUsage>,
     /// The selected chat has a transcript from a `WatchDocMessages` reset
     /// (including a retained reset from an earlier visit). An
@@ -1189,6 +1227,10 @@ impl AppState {
             queue: Vec::new(),
             cloud_queue_revisions: HashMap::new(),
             cloud_queue_error: None,
+            host_queue: Vec::new(),
+            optimistic_queue: HashMap::new(),
+            removed_queued: HashMap::new(),
+            queue_paused: None,
             context_usage: None,
             transcript_replayed: false,
             transcript_history: NativeHistory::default(),
@@ -2151,6 +2193,20 @@ impl AppState {
         self.transcript = entries;
         self.transcript_replayed = true;
         self.ack_pending_send_from_transcript();
+        self.prune_optimistic_queue();
+    }
+
+    /// A queued cloud message that already reached the transcript leaves
+    /// the queue.
+    fn prune_optimistic_queue(&mut self) {
+        if self
+            .selected_chat
+            .as_deref()
+            .and_then(|chat| self.optimistic_queue.get(chat))
+            .is_some_and(|rows| !rows.is_empty())
+        {
+            self.rebuild_queue();
+        }
     }
 
     /// Apply a `WatchDocMessages` delta frame in place. `Err` = this copy has
@@ -2175,6 +2231,7 @@ impl AppState {
             echoes.retain(|echo| !transcript.iter().any(|e| e.id == echo.id));
         }
         self.ack_pending_send_from_transcript();
+        self.prune_optimistic_queue();
         Ok(())
     }
 
@@ -2543,7 +2600,117 @@ impl AppState {
                 self.pending_sends.remove(chat_id);
             }
         }
-        self.queue = items;
+        self.host_queue = items;
+        self.rebuild_queue();
+    }
+
+    /// [`Self::queue`]: the host's rows, minus rows just removed here, then
+    /// this app's queued cloud messages the host doesn't list yet, in the
+    /// order they were sent. A message leaves the optimistic list once the
+    /// host lists it, or, after the server saved it, once it reached the
+    /// transcript (it was sent at once) or [`OPTIMISTIC_SAVED_GRACE_MS`]
+    /// passed.
+    fn rebuild_queue(&mut self) {
+        let now = chrono::Utc::now().timestamp_millis();
+        self.removed_queued
+            .retain(|_, at| now - *at < REMOVED_QUEUED_GRACE_MS);
+        let removed = &self.removed_queued;
+        let mut queue: Vec<_> = self
+            .host_queue
+            .iter()
+            .filter(|row| !removed.contains_key(&row.id))
+            .cloned()
+            .collect();
+        if let Some(chat) = self.selected_chat.as_deref()
+            && let Some(rows) = self.optimistic_queue.get_mut(chat)
+        {
+            let host = &self.host_queue;
+            let transcript = &self.transcript;
+            rows.retain(|row| {
+                if host.iter().any(|item| item.id == row.item.id) {
+                    return false;
+                }
+                match row.state {
+                    OptimisticState::Saved(at) => {
+                        now - at < OPTIMISTIC_SAVED_GRACE_MS
+                            && !transcript.iter().any(|entry| entry.id == row.message_id)
+                    }
+                    _ => true,
+                }
+            });
+            queue.extend(
+                rows.iter()
+                    .filter(|row| !removed.contains_key(&row.item.id))
+                    .map(|row| row.item.clone()),
+            );
+        }
+        if self.queue != queue {
+            self.queue = queue;
+        }
+    }
+
+    /// Show a message the user just queued in a cloud chat at once.
+    pub(crate) fn push_optimistic_queued(&mut self, chat_id: &str, row: OptimisticQueued) {
+        let rows = self.optimistic_queue.entry(chat_id.to_owned()).or_default();
+        if let Some(existing) = rows.iter_mut().find(|r| r.item.id == row.item.id) {
+            existing.state = row.state;
+        } else {
+            rows.push(row);
+        }
+        self.rebuild_queue();
+    }
+
+    /// The server's answer for an optimistic row: saved, or not sent.
+    pub(crate) fn set_optimistic_queued(
+        &mut self,
+        chat_id: &str,
+        id: &str,
+        state: OptimisticState,
+    ) {
+        if let Some(row) = self
+            .optimistic_queue
+            .get_mut(chat_id)
+            .and_then(|rows| rows.iter_mut().find(|row| row.item.id == id))
+        {
+            row.state = state;
+        }
+        self.rebuild_queue();
+    }
+
+    /// Drop an optimistic row (the user discarded a message that wasn't sent).
+    pub(crate) fn drop_optimistic_queued(&mut self, chat_id: &str, id: &str) {
+        if let Some(rows) = self.optimistic_queue.get_mut(chat_id) {
+            rows.retain(|row| row.item.id != id);
+        }
+        self.rebuild_queue();
+    }
+
+    /// This app's not-yet-listed copy of a queued row, if it is one.
+    pub(crate) fn optimistic_queued(&self, id: &str) -> Option<&OptimisticQueued> {
+        let chat = self.selected_chat.as_deref()?;
+        self.optimistic_queue
+            .get(chat)?
+            .iter()
+            .find(|row| row.item.id == id)
+    }
+
+    /// A row the host confirmed removing leaves at once and stays gone.
+    pub(crate) fn forget_queued(&mut self, id: &str) {
+        self.removed_queued
+            .insert(id.to_owned(), chrono::Utc::now().timestamp_millis());
+        self.rebuild_queue();
+    }
+
+    /// Whether Stop holds the selected chat's queue (false when unknown).
+    pub(crate) fn selected_queue_paused(&self) -> bool {
+        self.queue_paused.as_ref().is_some_and(|(chat, paused)| {
+            *paused && self.selected_chat.as_deref() == Some(chat.as_str())
+        })
+    }
+
+    /// Record the host's pause state for `chat_id`.
+    pub(crate) fn set_queue_paused(&mut self, chat_id: &str, paused: bool) {
+        self.queue_paused = Some((chat_id.to_owned(), paused));
     }
 
     /// Why the selected cloud chat's queue waits, while it has rows.
@@ -3387,6 +3554,9 @@ impl AppState {
         self.sub_transcripts.clear();
         self.sub_history.clear();
         self.echoes.clear();
+        self.optimistic_queue.clear();
+        self.removed_queued.clear();
+        self.queue_paused = None;
         self.pending_sends.clear();
         self.upload_progress = None;
         self.transfers.clear();
@@ -4652,6 +4822,9 @@ fn spawn_queue_watch(
         /// A cloud queue's reason for waiting.
         #[serde(default, rename = "queueError")]
         queue_error: Option<String>,
+        /// Whether Stop holds the queue; absent from older hosts.
+        #[serde(default)]
+        paused: Option<bool>,
     }
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -4703,6 +4876,9 @@ fn spawn_queue_watch(
                         }
                         state.cloud_queue_error =
                             frame.queue_error.map(|code| (chat_id.clone(), code));
+                        if let Some(paused) = frame.paused {
+                            state.set_queue_paused(&chat_id, paused);
+                        }
                         state.apply_queue(frame.items);
                         cx.notify();
                     }
@@ -7061,6 +7237,152 @@ mod tests {
         assert_eq!(ids, vec!["sent"]);
         assert!(!state.pending_sends.contains_key("c1"));
         assert_eq!(state.queue.len(), 1);
+    }
+
+    fn queued_row(id: &str, text: &str) -> zuse_doc::QueuedMessage {
+        zuse_doc::QueuedMessage {
+            id: id.into(),
+            text: text.into(),
+            attachments: vec![],
+            hold_for_turn_end: true,
+            issued_by: "cloud-authority".into(),
+            issued_at: 0,
+            edited_at: None,
+            delivery_gate: None,
+        }
+    }
+
+    fn optimistic(id: &str, text: &str) -> OptimisticQueued {
+        OptimisticQueued {
+            item: queued_row(id, text),
+            message_id: format!("message-{id}"),
+            state: OptimisticState::Sending,
+        }
+    }
+
+    fn queue_ids(state: &AppState) -> Vec<&str> {
+        state.queue.iter().map(|row| row.id.as_str()).collect()
+    }
+
+    /// A queued cloud message shows the moment it is sent and is replaced by
+    /// the server's row in place: no frame in between drops it, and it is
+    /// never listed twice.
+    #[test]
+    fn a_queued_cloud_message_shows_at_once_and_the_servers_row_replaces_it() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("session".into());
+        state.apply_queue(vec![queued_row("earlier", "earlier")]);
+        state.push_optimistic_queued("session", optimistic("q1", "and also"));
+        assert_eq!(queue_ids(&state), vec!["earlier", "q1"]);
+        // A frame read before the server saved it keeps it.
+        state.apply_queue(vec![queued_row("earlier", "earlier")]);
+        assert_eq!(queue_ids(&state), vec!["earlier", "q1"]);
+        // Saved, still not listed: still shown.
+        state.set_optimistic_queued(
+            "session",
+            "q1",
+            OptimisticState::Saved(Utc::now().timestamp_millis()),
+        );
+        state.apply_queue(vec![queued_row("earlier", "earlier")]);
+        assert_eq!(queue_ids(&state), vec!["earlier", "q1"]);
+        // The server lists it: one row, the server's.
+        state.apply_queue(vec![
+            queued_row("earlier", "earlier"),
+            queued_row("q1", "and also"),
+        ]);
+        assert_eq!(queue_ids(&state), vec!["earlier", "q1"]);
+        assert!(state.optimistic_queued("q1").is_none());
+        // Sent when the turn ends: it leaves the queue for good.
+        state.apply_queue(vec![queued_row("earlier", "earlier")]);
+        assert_eq!(queue_ids(&state), vec!["earlier"]);
+    }
+
+    /// Sent at once by the server (the chat was idle), a saved message
+    /// never listed leaves the queue when it reaches the transcript.
+    #[test]
+    fn a_saved_queued_message_leaves_the_queue_when_it_reaches_the_chat() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("session".into());
+        state.push_optimistic_queued("session", optimistic("q1", "go"));
+        state.set_optimistic_queued(
+            "session",
+            "q1",
+            OptimisticState::Saved(Utc::now().timestamp_millis()),
+        );
+        state.apply_transcript(vec![]);
+        assert_eq!(queue_ids(&state), vec!["q1"]);
+        state.apply_transcript(vec![SessionMessageEntry {
+            id: "message-q1".into(),
+            role: zuse_doc::MessageRole::User,
+            parts: vec![],
+            created_at: 0,
+            device_id: "cloud".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        }]);
+        assert!(state.queue.is_empty());
+        // A saved row nobody lists stops showing after its grace period.
+        state.push_optimistic_queued("session", optimistic("q2", "late"));
+        state.set_optimistic_queued(
+            "session",
+            "q2",
+            OptimisticState::Saved(Utc::now().timestamp_millis() - OPTIMISTIC_SAVED_GRACE_MS - 1),
+        );
+        assert!(state.queue.is_empty());
+    }
+
+    /// A message the server refused stays in the queue, marked not sent,
+    /// through every frame, until the user retries or removes it.
+    #[test]
+    fn a_queued_message_the_server_refused_stays_as_not_sent() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("session".into());
+        state.push_optimistic_queued("session", optimistic("q1", "and also"));
+        state.set_optimistic_queued("session", "q1", OptimisticState::Failed("not sent".into()));
+        state.apply_queue(vec![]);
+        assert_eq!(queue_ids(&state), vec!["q1"]);
+        assert!(matches!(
+            state.optimistic_queued("q1").map(|row| &row.state),
+            Some(OptimisticState::Failed(_))
+        ));
+        // Retry: sending again, same row.
+        state.push_optimistic_queued("session", optimistic("q1", "and also"));
+        assert_eq!(queue_ids(&state), vec!["q1"]);
+        assert_eq!(
+            state.optimistic_queued("q1").map(|row| &row.state),
+            Some(&OptimisticState::Sending)
+        );
+        state.drop_optimistic_queued("session", "q1");
+        assert!(state.queue.is_empty());
+    }
+
+    /// A row removed here doesn't come back from a frame read before the
+    /// removal.
+    #[test]
+    fn a_removed_queued_row_stays_gone() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("session".into());
+        state.apply_queue(vec![queued_row("a", "a"), queued_row("b", "b")]);
+        state.forget_queued("a");
+        assert_eq!(queue_ids(&state), vec!["b"]);
+        state.apply_queue(vec![queued_row("a", "a"), queued_row("b", "b")]);
+        assert_eq!(queue_ids(&state), vec!["b"]);
+    }
+
+    /// The pause Stop puts on a queue is shown for its own chat only.
+    #[test]
+    fn a_paused_queue_is_reported_for_its_chat() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("session".into());
+        assert!(!state.selected_queue_paused());
+        state.set_queue_paused("session", true);
+        assert!(state.selected_queue_paused());
+        state.selected_chat = Some("other".into());
+        assert!(!state.selected_queue_paused());
+        state.selected_chat = Some("session".into());
+        state.set_queue_paused("session", false);
+        assert!(!state.selected_queue_paused());
     }
 
     #[test]

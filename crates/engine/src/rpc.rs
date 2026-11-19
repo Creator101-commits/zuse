@@ -4360,15 +4360,35 @@ impl EngineRpc {
                     .open(&p.chat_id)
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
                 let rx = handle.watch_queue();
+                let pause = handle.watch_queue_pause();
+                // Frames carry whether Stop holds the queue, so the queue can
+                // say it is paused and offer to resume it.
                 Ok(RpcReply::Stream(
-                    futures::stream::unfold((rx, true), |(mut rx, first)| async move {
-                        if !first {
-                            rx.changed().await.ok()?;
-                        }
-                        let items = rx.borrow_and_update().clone();
-                        let value = serde_json::json!({ "items": items });
-                        Some((value, (rx, false)))
-                    })
+                    futures::stream::unfold(
+                        (rx, pause, handle, None::<bool>),
+                        |(mut rx, mut pause, handle, last)| async move {
+                            loop {
+                                let items_changed = last.is_none()
+                                    || tokio::select! {
+                                        changed = rx.changed() => { changed.ok()?; true }
+                                        changed = pause.changed() => { changed.ok()?; false }
+                                    };
+                                // Every chat change ticks `pause`; only a
+                                // changed queue or pause makes a frame.
+                                pause.borrow_and_update();
+                                let paused = handle.queue_paused();
+                                if !items_changed && last == Some(paused) {
+                                    continue;
+                                }
+                                let items = rx.borrow_and_update().clone();
+                                let value = serde_json::json!({
+                                    "items": items,
+                                    "paused": paused,
+                                });
+                                return Some((value, (rx, pause, handle, Some(paused))));
+                            }
+                        },
+                    )
                     .boxed(),
                 ))
             }

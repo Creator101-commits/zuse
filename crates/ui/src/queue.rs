@@ -427,21 +427,47 @@ impl Composer {
             lifted,
         );
 
-        // The tray's own header: what the rows are waiting for.
+        // The tray's own header: what the rows are waiting for. Stop holds
+        // the queue until the next message or Resume, and says so.
         let waiting = self.state.read(cx).chat_delivery_degraded(&chat_id);
+        let paused = self.state.read(cx).selected_queue_paused();
         let header = div()
             .px(px(12.0))
             .py(px(6.0))
             .border_b_1()
             .border_color(theme.border.opacity(0.4))
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
             .text_size(px(11.0))
             .line_height(px(14.0))
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(theme.text_muted)
             .child(if waiting {
                 crate::localization::text("chat-queue_tray_waiting_for_connection", cx)
+            } else if paused {
+                crate::localization::text("chat-queue_tray_queue_paused", cx)
             } else {
                 crate::localization::text("chat-queue_tray_queued", cx)
+            })
+            .when(paused && !waiting, |el| {
+                el.child(
+                    div()
+                        .id("message-queue-resume")
+                        .role(gpui::Role::Button)
+                        .aria_label(crate::localization::text(
+                            "chat-queue_tray_resume_queued_messages",
+                            cx,
+                        ))
+                        .px(px(6.0))
+                        .rounded(px(ROW_CONTROL_RADIUS))
+                        .cursor_pointer()
+                        .text_color(theme.accent)
+                        .hover(|s| s.bg(crate::theme::ink(0.07)))
+                        .on_click(cx.listener(|this, _, _, cx| this.resume_queue(cx)))
+                        .child(crate::localization::text("chat-queue_tray_resume", cx)),
+                )
             });
         // The rows section is the drop target, including its padding.
         let panel = div()
@@ -517,7 +543,19 @@ impl Composer {
         let being_edited = editing.as_deref() == Some(item.id.as_str());
         let being_removed = self.queue_removing.contains(&item.id);
         let delivery_blocked = item.delivery_gate.is_some();
-        let interaction_blocked = delivery_blocked || being_removed;
+        // A cloud message this app just queued: inert until the server has
+        // it, or not sent, with Retry and Remove.
+        let optimistic = self
+            .state
+            .read(cx)
+            .optimistic_queued(&item.id)
+            .map(|row| row.state.clone());
+        let sending = optimistic == Some(crate::state::OptimisticState::Sending);
+        let not_sent = matches!(optimistic, Some(crate::state::OptimisticState::Failed(_)));
+        if not_sent && !lifted {
+            return self.not_sent_queue_row(&key, item, theme, cx);
+        }
+        let interaction_blocked = delivery_blocked || being_removed || sending;
         let (text, chips) = match &item.delivery_gate {
             Some(QueueDeliveryGate::Editing {
                 owner_device_id, ..
@@ -537,7 +575,7 @@ impl Composer {
             "edit",
             "Edit",
             icons::PEN,
-            !being_removed,
+            !being_removed && !sending,
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.begin_queue_edit(edit_id.clone(), cx);
@@ -553,7 +591,7 @@ impl Composer {
                 "Remove"
             },
             icons::TRASH_BIN_MINIMALISTIC,
-            !being_removed,
+            !being_removed && !sending,
             theme,
             cx.listener(move |this, _, _, cx| {
                 this.remove_queued(drop_id.clone(), cx);
@@ -781,6 +819,94 @@ impl Composer {
                 move |el, t| el.relative().top(px(motion::lerp(start, target, t))),
             )
             .into_any_element()
+    }
+
+    /// A queued cloud message the server didn't take: its text, a quiet
+    /// "Not sent", Remove (back to the draft) and Retry.
+    fn not_sent_queue_row(
+        &self,
+        key: &SharedString,
+        item: &QueuedMessage,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (text, chips) = queue_row_text(&item.text, &item.attachments);
+        let discard_id = item.id.clone();
+        let discard = self.queue_action(
+            key,
+            "drop",
+            "Remove",
+            icons::TRASH_BIN_MINIMALISTIC,
+            true,
+            theme,
+            cx.listener(move |this, _, _, cx| {
+                this.discard_unsent_cloud_queued(&discard_id, cx);
+            }),
+        );
+        let retry_id = item.id.clone();
+        let retry = self.queue_action(
+            key,
+            "retry",
+            "Retry",
+            icons::REFRESH,
+            true,
+            theme,
+            cx.listener(move |this, _, _, cx| {
+                this.retry_unsent_cloud_queued(&retry_id, cx);
+            }),
+        );
+        div()
+            .id(SharedString::from(format!("{key}-row")))
+            .debug_selector(|| "message-queue-not-sent".into())
+            .h(px(ROW_HEIGHT))
+            .flex_none()
+            .px(px(ROW_PAD_X - PANEL_PAD_X))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .rounded(px(ROW_RADIUS))
+            .child(div().w(px(14.0)).flex_none())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(QUEUE_TEXT_SIZE))
+                    .line_height(px(16.0))
+                    .text_color(theme.text_muted)
+                    .child(crate::composer::chip_text(text, chips, theme)),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(theme.danger)
+                    .child("Not sent"),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(3.0))
+                    .child(discard)
+                    .child(retry),
+            )
+            .into_any_element()
+    }
+
+    /// Resume a queue Stop paused: a cloud chat asks its server; a chat on a
+    /// device sends the first row, which resumes the rest after it.
+    pub(crate) fn resume_queue(&mut self, cx: &mut Context<Self>) {
+        if self.resume_cloud_queue(cx) {
+            return;
+        }
+        let head = self.state.read(cx).queue.first().map(|row| row.id.clone());
+        if let Some(id) = head {
+            self.send_queued_now(id, cx);
+        }
     }
 
     pub(crate) fn release_queue_previews(&mut self, cx: &mut gpui::App) {
@@ -1323,7 +1449,7 @@ impl Composer {
                     {
                         if selected_matches {
                             composer.state.update(cx, |state, cx| {
-                                state.queue.retain(|item| item.id != id);
+                                state.forget_queued(&id);
                                 cx.notify();
                             });
                         }
