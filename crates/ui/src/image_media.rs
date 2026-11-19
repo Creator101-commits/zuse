@@ -245,6 +245,25 @@ pub(crate) fn decode_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, Str
     decode_raster_image(bytes, zuse_protocol::MAX_WORKSPACE_IMAGE_BYTES)
 }
 
+/// A single file preview can decode larger sources, retaining a small static image.
+/// Chat thumbnails and document images keep their stricter concurrent budgets.
+pub(crate) fn decode_file_preview_image(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
+    if mime == "image/svg+xml" {
+        return decode_image(mime, bytes);
+    }
+    let mut limits = raster_limits();
+    limits.max_image_width = Some(32768);
+    limits.max_image_height = Some(32768);
+    limits.max_alloc = Some(256 * 1024 * 1024);
+    decode_raster_image_with_format(
+        bytes,
+        zuse_protocol::MAX_WORKSPACE_IMAGE_BYTES,
+        Some(2048),
+        (mime == "image/x-tga").then_some(image::ImageFormat::Tga),
+        limits,
+    )
+}
+
 /// Repository icons retain only a small static thumbnail, even for large source logos.
 pub(crate) fn decode_project_icon(mime: &str, bytes: Vec<u8>) -> Result<MediaImage, String> {
     if mime == "image/svg+xml" {
@@ -279,7 +298,7 @@ pub(crate) fn decode_raster_image(bytes: Vec<u8>, max_bytes: usize) -> Result<Me
     decode_raster_image_bounded(bytes, max_bytes, None)
 }
 
-/// Decoder bounds for every raster preview: 4096 px per side, 64 MiB of
+/// Decoder bounds for shared raster previews: 4096 px per side, 64 MiB of
 /// decoder allocation.
 pub(crate) fn raster_limits() -> image::Limits {
     let mut limits = image::Limits::default();
@@ -294,13 +313,26 @@ fn decode_raster_image_bounded(
     max_bytes: usize,
     max_side: Option<u32>,
 ) -> Result<MediaImage, String> {
+    decode_raster_image_with_format(bytes, max_bytes, max_side, None, raster_limits())
+}
+
+fn decode_raster_image_with_format(
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    max_side: Option<u32>,
+    format: Option<image::ImageFormat>,
+    limits: image::Limits,
+) -> Result<MediaImage, String> {
     if bytes.len() > max_bytes {
         return Err("Image exceeds preview size limit".into());
     }
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
-    reader.limits(raster_limits());
+    if let Some(format) = format {
+        reader.set_format(format);
+    }
+    reader.limits(limits);
     // Decode one frame and encode a static PNG so GPUI cannot expand unbounded animation frames.
     let decoded = reader.decode().map_err(|e| e.to_string())?;
     // Generated previews retain one bounded 8-bit frame. This keeps each
@@ -477,6 +509,19 @@ mod tests {
                 .unwrap();
             assert!(decode_image("image/png", png.into_inner()).is_err());
         }
+    }
+
+    #[test]
+    fn large_workspace_rasters_keep_a_bounded_preview() {
+        let mut png = Cursor::new(Vec::new());
+        image::RgbaImage::new(6000, 100)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = png.into_inner();
+        assert!(decode_image("image/png", bytes.clone()).is_err());
+        let media = decode_file_preview_image("image/png", bytes).unwrap();
+        assert!(media.width <= 2048.0);
+        assert!(media.bytes < 64 * 1024 * 1024);
     }
 
     #[test]
