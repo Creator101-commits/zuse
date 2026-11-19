@@ -175,6 +175,24 @@ jobs:
           path: ~/apt-debs
           key: apt-debs-${{ runner.os }}-${{ hashFiles('scripts/ci-ubuntu-dependencies.sh') }}-cmake-libclang-dev-libasound2-dev-ripgrep
       - run: bash scripts/ci-apt-install.sh ~/apt-debs cmake libclang-dev libasound2-dev ripgrep
+      # The Android acceptance test runs Gradle inside the cloud suite. Cache its
+      # dependencies and resolve them up front with retries, so a transient
+      # Maven Central miss cannot fail the Rust suite.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('apps/android/**/*.gradle*', 'apps/android/gradle/**') }}
+          restore-keys: gradle-${{ runner.os }}-
+      - name: Resolve Android test dependencies
+        run: |
+          for attempt in 1 2 3 4; do
+            apps/android/gradlew -p apps/android :core:testClasses --no-daemon && exit 0
+            echo "Gradle dependency resolution failed (attempt $attempt); retrying"
+            sleep $((attempt * 15))
+          done
+          exit 1
       # The guest binary backs the runtime and Postgres recovery tests below.
       - run: cargo build --locked -p zuse-cloud-guest
       - run: cargo check --locked -p zuse-cloud-api -p zuse-client
