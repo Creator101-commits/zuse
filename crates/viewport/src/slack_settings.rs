@@ -12,6 +12,10 @@ use zuse_protocol::{
     slack::{Connection, PendingConnection},
 };
 
+/// Whether the Slack connection card is shown in Cloud settings.
+/// Hidden until Slack is enabled on the cloud service.
+pub const SHOW_SLACK_SETTINGS: bool = false;
+
 /// Shown while settings re-check the connection after a failed action.
 const CHECKING: &str = "Checking the current connection…";
 
