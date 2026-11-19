@@ -1,7 +1,9 @@
 //! Connection setup shared by native and web. Secrets are cleared after submission.
 use super::agent_login_binding::Binding;
+use super::presentation::MenuItem;
 use super::*;
-use crate::cloud_settings::kit::{self, Tone};
+use crate::cloud_settings::kit;
+use crate::tooltip::TooltipExt as _;
 use zuse_protocol::{cloud_computers::AgentId, cloud_connections::*};
 
 pub(super) struct AgentView {
@@ -19,6 +21,15 @@ pub(super) struct AgentView {
     pub error: Option<String>,
     pub poll: Option<Task<()>>,
     polls: u32,
+    /// Connections hidden while their disconnect is in flight, so the row
+    /// leaves at once and only returns if the server refuses.
+    disconnecting: BTreeSet<String>,
+    /// The idempotency key of a sign-in cancelled before its code arrived;
+    /// the late reply is cancelled instead of reopening the row.
+    abandoned: Option<String>,
+    /// The device code was just copied: the copy button shows a check.
+    copied: Option<Task<()>>,
+    _submit: Subscription,
 }
 impl AgentView {
     /// Any connection the guide can treat as a usable coding agent.
@@ -48,6 +59,9 @@ impl AgentView {
     pub fn new(window: &mut Window, cx: &mut Context<RepositoryPanel>) -> Self {
         let secret = cx.new(|cx| TextInput::password("Paste your credential", window, cx));
         cx.observe(&secret, |_, _, cx| cx.notify()).detach();
+        let submit = cx.subscribe(&secret, |this, _, _: &crate::input::Submitted, cx| {
+            this.submit_agent(cx)
+        });
         Self {
             connections: vec![],
             edit: None,
@@ -63,6 +77,10 @@ impl AgentView {
             error: None,
             poll: None,
             polls: 0,
+            disconnecting: BTreeSet::new(),
+            abandoned: None,
+            copied: None,
+            _submit: submit,
         }
     }
     pub fn reset(&mut self, cx: &mut Context<RepositoryPanel>) {
@@ -79,8 +97,64 @@ impl AgentView {
         self.error = None;
         self.poll = None;
         self.polls = 0;
+        self.disconnecting.clear();
+        self.abandoned = None;
+        self.copied = None;
         self.secret
             .update(cx, |input, cx| input.set_value(String::new(), cx));
+    }
+}
+impl AgentView {
+    /// Closes the inline connect form without touching any sign-in state.
+    fn close_edit(&mut self, cx: &mut Context<RepositoryPanel>) {
+        self.edit = None;
+        self.selection = None;
+        self.managed_connection = None;
+        self.recovery_open = false;
+        self.recovery_target = None;
+        self.copied = None;
+        self.secret
+            .update(cx, |input, cx| input.set_value(String::new(), cx));
+    }
+    /// Optimistically records a finished sign-in as a connected account.
+    fn mark_connected(&mut self, operation: &LoginOperation) {
+        if let Some(row) = self
+            .connections
+            .iter_mut()
+            .find(|c| c.connection_id == operation.connection_id)
+        {
+            row.state = ConnectionState::Connected;
+            row.error_code = None;
+            return;
+        }
+        let method = self
+            .edit
+            .filter(|(agent, _)| *agent == operation.agent)
+            .map(|(_, method)| method)
+            .unwrap_or(ConnectionMethod::DeviceCode);
+        self.connections.push(AgentConnection {
+            connection_id: operation.connection_id.clone(),
+            agent: operation.agent,
+            method,
+            state: ConnectionState::Connected,
+            account_label: None,
+            expires_at: None,
+            version: 0,
+            error_code: None,
+            credential_update: None,
+            credential_update_key: None,
+        });
+    }
+    /// A request failed: undo what the row showed optimistically.
+    pub(super) fn request_failed(&mut self, kind: &str) {
+        match kind {
+            "agent-disconnect" => self.disconnecting.clear(),
+            "agent-login" if self.abandoned.take().is_some() => {
+                self.login_binding = None;
+                self.operation = None;
+            }
+            _ => {}
+        }
     }
 }
 impl RepositoryPanel {
@@ -243,6 +317,13 @@ impl RepositoryPanel {
             "agents" => {
                 match serde_json::from_value::<Vec<AgentConnection>>(data["connections"].clone()) {
                     Ok(connections) => {
+                        // A hidden row stays hidden until the server agrees
+                        // it is gone; a stale reply can't bring it back.
+                        self.agents.disconnecting.retain(|id| {
+                            connections.iter().any(|c| {
+                                &c.connection_id == id && c.state != ConnectionState::Revoked
+                            })
+                        });
                         self.agents.connections = connections;
                         self.agents.supports_reconnect = data["supportsDeviceReconnect"] == true;
                         self.agents.supports_reconfigure =
@@ -377,6 +458,35 @@ impl RepositoryPanel {
                         ) {
                             return;
                         }
+                        if kind == "agent-login"
+                            && self.agents.abandoned.is_some()
+                            && self.agents.abandoned.as_deref()
+                                == self
+                                    .agents
+                                    .login_binding
+                                    .as_ref()
+                                    .map(|b| b.idempotency_key.as_str())
+                        {
+                            // Cancelled before the code arrived: cancel it
+                            // on the server too and keep the row closed.
+                            self.agents.abandoned = None;
+                            let mut operation = operation;
+                            if matches!(
+                                operation.state,
+                                LoginState::Queued | LoginState::Authorizing
+                            ) {
+                                self.call(
+                                    "agent-cancel",
+                                    methods::CLOUD_AGENT_LOGIN_CANCEL,
+                                    json!({"operationId":operation.operation_id}),
+                                    cx,
+                                );
+                                operation.state = LoginState::Cancelled;
+                            }
+                            self.agents.operation = Some(operation);
+                            cx.notify();
+                            return;
+                        }
                         if kind == "agent-login" {
                             if self.agents.edit
                                 == Some((operation.agent, ConnectionMethod::DeviceCode))
@@ -389,6 +499,16 @@ impl RepositoryPanel {
                         }
                         if operation.state == LoginState::Connected {
                             self.call("agents", methods::CLOUD_AGENT_CONNECTIONS, json!({}), cx);
+                            // Show it connected now; the reload fills in
+                            // the account name.
+                            self.agents.mark_connected(&operation);
+                            if self
+                                .agents
+                                .edit
+                                .is_some_and(|(agent, _)| agent == operation.agent)
+                            {
+                                self.agents.close_edit(cx);
+                            }
                         }
                         self.agents.operation = Some(operation);
                     }
@@ -554,37 +674,6 @@ impl RepositoryPanel {
         self.agents.error = None;
         cx.notify();
     }
-    fn open_agent(
-        &mut self,
-        agent: AgentId,
-        expected_owner: Option<Owner>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.owner != expected_owner {
-            return;
-        }
-        self.agents.recovery_target = None;
-        self.agents.recovery_open = false;
-        if self.unfinished_agent_login() {
-            let connection = self
-                .agents
-                .login_binding
-                .as_ref()
-                .filter(|binding| binding.agent == agent.as_str())
-                .and_then(|binding| binding.connection.clone());
-            self.select_agent_target(agent, connection, expected_owner, cx);
-            return;
-        }
-        let current = self
-            .agents
-            .connections
-            .iter()
-            .rev()
-            .find(|c| c.agent == agent)
-            .cloned();
-        self.select_agent_target(agent, current.map(|c| c.connection_id), expected_owner, cx);
-    }
-
     fn submit_agent(&mut self, cx: &mut Context<Self>) {
         let Some((agent, method)) = self.agents.edit else {
             return;
@@ -720,432 +809,346 @@ impl RepositoryPanel {
         }
         cx.notify();
     }
+}
+
+/// The cloud coding agents, in the order the page lists them.
+const AGENTS: [AgentId; 3] = [AgentId::Claude, AgentId::Codex, AgentId::Grok];
+
+fn agent_name(agent: AgentId) -> &'static str {
+    match agent {
+        AgentId::Claude => "Claude",
+        AgentId::Codex => "Codex",
+        AgentId::Grok => "Grok",
+    }
+}
+
+/// The Codex mark keeps its gradient: gpui's SVG element paints one colour,
+/// so it renders as an image.
+fn codex_mark() -> &'static std::sync::Arc<Image> {
+    static IMAGE: std::sync::OnceLock<std::sync::Arc<Image>> = std::sync::OnceLock::new();
+    IMAGE.get_or_init(|| {
+        let svg = include_str!("../../../ui/assets/icons/codex-mark.svg")
+            .replace("fill=\"currentColor\"", "fill=\"url(#codex-gradient)\"")
+            .replace("<path", "<defs><linearGradient id=\"codex-gradient\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop stop-color=\"#b9adff\"/><stop offset=\"0.5\" stop-color=\"#8094ff\"/><stop offset=\"1\" stop-color=\"#453cf5\"/></linearGradient></defs><path");
+        std::sync::Arc::new(Image::from_bytes(ImageFormat::Svg, svg.into_bytes()))
+    })
+}
+
+/// Row tile size, and the indent that lines nested content up with names.
+const TILE: f32 = 28.;
+const NESTED: f32 = s::ROW_PAD_X + TILE + s::ROW_GAP;
+
+/// The agent's own mark in a row tile.
+fn agent_tile(agent: AgentId) -> Div {
+    let mark = match agent {
+        AgentId::Codex => img(codex_mark().clone())
+            .size(px(16.))
+            .flex_none()
+            .into_any_element(),
+        AgentId::Claude => icon("claude-mark")
+            .size(px(16.))
+            .text_color(gpui::rgb(0xD97757))
+            .into_any_element(),
+        AgentId::Grok => icon("grok-mark")
+            .size(px(16.))
+            .text_color(palette::rgb(TEXT))
+            .into_any_element(),
+    };
+    div()
+        .flex_none()
+        .size(px(TILE))
+        .rounded(px(7.))
+        .bg(s::frame_bg())
+        .border_1()
+        .border_color(palette::rgb(BORDER).opacity(0.6))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(mark)
+}
+
+/// What an account is called: its label, else how it signed in.
+fn account_name(connection: &AgentConnection) -> String {
+    connection
+        .account_label
+        .clone()
+        .filter(|label| !label.trim().is_empty())
+        .unwrap_or_else(|| {
+            match connection.method {
+                ConnectionMethod::ApiKey => "API key",
+                ConnectionMethod::SetupToken => "Setup token",
+                ConnectionMethod::DeviceCode => "Signed in",
+            }
+            .into()
+        })
+}
+
+fn mini_spinner(id: impl Into<ElementId>) -> AnyElement {
+    icon("loading")
+        .size(px(12.))
+        .text_color(palette::rgb(MUTED))
+        .with_animation(
+            id,
+            Animation::new(std::time::Duration::from_millis(1000)).repeat(),
+            |svg, t| svg.with_transformation(Transformation::rotate(percentage(t))),
+        )
+        .into_any_element()
+}
+
+fn quiet_text(text: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(11.))
+        .line_height(px(16.))
+        .text_color(palette::rgb(MUTED))
+        .child(text.into())
+}
+
+/// A connection's status, on the right of its row. Revoked shows nothing.
+fn connection_status(id: &str, state: ConnectionState) -> Option<Div> {
+    let (dot, label): (Option<Hsla>, &str) = match state {
+        ConnectionState::Connected => (
+            Some(palette::tone(
+                hsla(133.9 / 360., 0.606, 0.488, 1.),
+                hsla(131.4 / 360., 0.734, 0.31, 1.),
+            )),
+            "Connected",
+        ),
+        ConnectionState::Pending => (None, "Verifying"),
+        ConnectionState::ReconnectRequired => (
+            Some(palette::tone(
+                hsla(32. / 360., 0.92, 0.6, 1.),
+                hsla(26. / 360., 0.9, 0.42, 1.),
+            )),
+            "Signed out",
+        ),
+        ConnectionState::Error => (Some(s::destructive_text()), "Failed"),
+        ConnectionState::Revoked => return None,
+    };
+    let lead = match dot {
+        Some(dot) => div()
+            .flex_none()
+            .size(px(6.))
+            .rounded_full()
+            .bg(dot)
+            .into_any_element(),
+        None => mini_spinner(SharedString::from(format!("agent-verifying-{id}"))),
+    };
+    Some(
+        row()
+            .flex_none()
+            .gap(px(6.))
+            .child(lead)
+            .child(quiet_text(label)),
+    )
+}
+
+impl RepositoryPanel {
+    /// Prepares the inline form after it opens: device sign-in starts at
+    /// once; credential forms get the right placeholder and focus.
+    fn agent_form_opened(&mut self, agent: AgentId, cx: &mut Context<Self>) {
+        match self.agents.edit {
+            Some((open, ConnectionMethod::DeviceCode)) if open == agent => {
+                let allowed = self
+                    .agents
+                    .selection
+                    .as_ref()
+                    .is_some_and(|binding| binding.can_submit(self.agents.supports_reconnect));
+                if allowed && !self.unfinished_agent_login() {
+                    self.submit_agent(cx);
+                }
+            }
+            Some((open, method)) if open == agent => {
+                let placeholder = if method == ConnectionMethod::SetupToken {
+                    "Paste the setup token"
+                } else {
+                    "Paste an API key"
+                };
+                self.agents.secret.update(cx, |input, cx| {
+                    input.set_placeholder(placeholder.into(), cx);
+                    input.focus(cx);
+                });
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+    /// "Connect" and "Add another account": a new connection, signed in the
+    /// agent's default way.
+    fn connect_agent(&mut self, agent: AgentId, owner: Option<Owner>, cx: &mut Context<Self>) {
+        if self.owner != owner {
+            return;
+        }
+        self.cancel_agent_edit(cx);
+        self.select_agent_target(agent, None, owner, cx);
+        self.agent_form_opened(agent, cx);
+    }
+    /// Signs an existing connection in again, keeping its identity so tasks
+    /// pinned to it carry on.
+    fn reconnect_agent(
+        &mut self,
+        agent: AgentId,
+        connection: String,
+        owner: Option<Owner>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.owner != owner {
+            return;
+        }
+        self.cancel_agent_edit(cx);
+        self.select_agent_target(agent, Some(connection), owner, cx);
+        self.agent_form_opened(agent, cx);
+    }
+    /// Swaps the open form to another way of connecting, as a new connection.
+    fn switch_agent_method(
+        &mut self,
+        agent: AgentId,
+        method: ConnectionMethod,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(owner) = self.owner.clone() else {
+            return;
+        };
+        if self.agents.abandoned.is_some() {
+            return;
+        }
+        if self.agents.edit.is_some_and(|(open, _)| open != agent) {
+            self.cancel_agent_edit(cx);
+        } else {
+            self.cancel_agent_login(cx);
+        }
+        self.agents.recovery_target = None;
+        self.agents.recovery_open = false;
+        self.agents.selection = Some(Binding {
+            owner,
+            agent: agent.as_str().into(),
+            connection: None,
+            idempotency_key: uuid::Uuid::new_v4().to_string(),
+            operation: None,
+        });
+        self.agents.login_binding = None;
+        self.agents.operation = None;
+        self.agents.managed_connection = None;
+        self.agents.error = None;
+        self.agents.edit = Some((agent, method));
+        self.agents
+            .secret
+            .update(cx, |input, cx| input.set_value(String::new(), cx));
+        self.agent_form_opened(agent, cx);
+    }
+    /// Stops a sign-in in progress: on the server if it has started, or as
+    /// soon as its code arrives if not.
+    fn cancel_agent_login(&mut self, cx: &mut Context<Self>) {
+        let started = self
+            .agents
+            .operation
+            .as_mut()
+            .filter(|o| matches!(o.state, LoginState::Queued | LoginState::Authorizing))
+            .map(|operation| {
+                operation.state = LoginState::Cancelled;
+                operation.operation_id.clone()
+            });
+        if let Some(id) = started {
+            self.call(
+                "agent-cancel",
+                methods::CLOUD_AGENT_LOGIN_CANCEL,
+                json!({"operationId":id}),
+                cx,
+            );
+        } else if self
+            .pending
+            .values()
+            .any(|pending| pending.kind == "agent-login")
+        {
+            self.agents.abandoned = self
+                .agents
+                .login_binding
+                .as_ref()
+                .map(|binding| binding.idempotency_key.clone());
+        }
+    }
+    /// Closes the open form, cancelling any sign-in it started.
+    fn cancel_agent_edit(&mut self, cx: &mut Context<Self>) {
+        if self.agents.edit.is_none() {
+            return;
+        }
+        self.cancel_agent_login(cx);
+        self.agents.close_edit(cx);
+        self.agents.error = None;
+        cx.notify();
+    }
+    fn disconnect_agent(
+        &mut self,
+        connection: String,
+        owner: Option<Owner>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.owner != owner {
+            return;
+        }
+        if self.agents.managed_connection.as_deref() == Some(connection.as_str()) {
+            self.cancel_agent_edit(cx);
+        }
+        self.agents.disconnecting.insert(connection.clone());
+        self.call(
+            "agent-disconnect",
+            methods::CLOUD_AGENT_DISCONNECT,
+            json!({"connectionId":connection}),
+            cx,
+        );
+        cx.notify();
+    }
+    fn copy_agent_code(&mut self, code: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(code));
+        self.agents.copied = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(1500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.agents.copied = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+    /// Whether this connection can be signed in again in place.
+    fn can_reconnect(&self, connection: &AgentConnection) -> bool {
+        if connection.method == ConnectionMethod::DeviceCode {
+            self.agents.supports_reconnect
+        } else {
+            self.agents.supports_reconfigure
+        }
+    }
+
     pub(super) fn render_agents(&self, _window: &Window, cx: &mut Context<Self>) -> Div {
         let busy = self
             .pending
             .values()
             .any(|p| p.kind.starts_with("agent") && p.kind != "agents");
         let mut body = column();
-        for (i, (agent, label)) in [
-            (AgentId::Claude, "Claude"),
-            (AgentId::Codex, "Codex"),
-            (AgentId::Grok, "Grok"),
-        ]
-        .into_iter()
-        .enumerate()
+        for (i, agent) in AGENTS.into_iter().enumerate() {
+            body = body.child(self.agent_block(i == 0, agent, busy, cx));
+        }
+        if self.agents.edit.is_none()
+            && let Some(error) = &self.agents.error
         {
-            let connection = self
-                .agents
-                .connections
-                .iter()
-                .rev()
-                .find(|c| c.agent == agent);
-            let description = connection
-                .map(|c| match c.state {
-                    ConnectionState::Connected => c
-                        .account_label
-                        .clone()
-                        .unwrap_or_else(|| "Connected".into()),
-                    ConnectionState::Pending => "Verifying connection…".into(),
-                    ConnectionState::ReconnectRequired => "Reconnect to continue".into(),
-                    ConnectionState::Revoked => "Disconnected".into(),
-                    ConnectionState::Error => "Connection failed. Reconnect to try again.".into(),
-                })
-                .unwrap_or_default();
-            let expected_owner = self.owner.clone();
-            // Unconnected agents say so in their description; a pill only
-            // marks a connection that exists.
-            let pill = connection.map(|c| match c.state {
-                ConnectionState::Connected => kit::pill("Connected", Tone::Ready),
-                ConnectionState::Pending => kit::pill("Verifying", Tone::Progress),
-                ConnectionState::ReconnectRequired => kit::pill("Reconnect", Tone::Attention),
-                ConnectionState::Error => kit::pill("Failed", Tone::Error),
-                ConnectionState::Revoked => kit::pill("Disconnected", Tone::Neutral),
-            });
-            let glyph = match agent {
-                AgentId::Claude => "claude-mark",
-                AgentId::Codex => "codex-mark",
-                AgentId::Grok => "grok-mark",
-            };
-            body = body.child(kit::row_item(
-                i == 0,
-                Some(kit::icon_tile(glyph, 28.).into_any_element()),
-                label,
-                description,
-                Some(
-                    row()
-                        .items_center()
-                        .gap(px(10.))
-                        .when_some(pill, |v, pill| v.child(pill))
-                        .child(
-                            cs::button(
-                                SharedString::from(format!("cloud-agent-{}", agent.as_str())),
-                                if connection.is_some() {
-                                    "Manage"
-                                } else {
-                                    "Connect"
-                                },
-                                false,
-                                busy,
-                                false,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.open_agent(agent, expected_owner.clone(), cx)
-                                },
-                            )),
-                        )
-                        .into_any_element(),
-                ),
-            ));
-        }
-        if let Some((agent, method)) = self.agents.edit {
-            let label = match agent {
-                AgentId::Claude => "Claude",
-                AgentId::Codex => "Codex",
-                AgentId::Grok => "Grok",
-            };
-            let alternative = if agent == AgentId::Claude {
-                ConnectionMethod::SetupToken
-            } else {
-                ConnectionMethod::DeviceCode
-            };
-            let mut form = column()
-                .gap(px(10.))
-                .p(px(12.))
-                .border_t_1()
-                .border_color(s::card_border())
-                .child(s::description_text(format!("Connect {label}")));
-            let mut choices = row().gap(px(8.));
-            for (choice, title) in [
-                (
-                    alternative,
-                    if agent == AgentId::Claude {
-                        "Setup token"
-                    } else {
-                        "Device code"
-                    },
-                ),
-                (ConnectionMethod::ApiKey, "API key"),
-            ] {
-                choices = choices.child(
-                    cs::button(
-                        SharedString::from(format!("agent-method-{}", choice.as_str())),
-                        title,
-                        method == choice,
-                        busy,
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.unfinished_agent_login() {this.agents.error=Some("Finish or cancel the pending device sign-in before changing its connection method.".into());cx.notify();return;}
-                        let Some(owner)=this.owner.clone() else{return};
-                        this.agents.selection=Some(Binding {owner,agent:agent.as_str().into(),connection:None,idempotency_key:uuid::Uuid::new_v4().to_string(),operation:None});
-                        this.agents.login_binding=None;
-                        this.agents.operation=None;
-                        this.agents.edit = Some((agent, choice));
-                        this.agents
-                            .secret
-                            .update(cx, |input, cx| input.set_value(String::new(), cx));
-                        cx.notify();
-                    })),
-                );
-            }
-            form = form.child(choices);
-            if method == ConnectionMethod::DeviceCode {
-                let selected = self
-                    .agents
-                    .selection
-                    .as_ref()
-                    .and_then(|binding| binding.connection.as_deref());
-                form=form.child(s::description_text(if selected.is_some() {"Reconnect this existing connection using the same provider account. Existing tasks keep their selected connection; a different account must be added separately."}else{"Add a separate account connection. Existing tasks keep their previously selected connection."}));
-                for connection in self.agents.connections.iter().filter(|c| {
-                    self.agents.supports_reconnect
-                        && c.agent == agent
-                        && c.method == ConnectionMethod::DeviceCode
-                }) {
-                    let id = connection.connection_id.clone();
-                    let expected_owner = self.owner.clone();
-                    let title = format!(
-                        "Reconnect {}",
-                        connection
-                            .account_label
-                            .as_deref()
-                            .unwrap_or(&connection.connection_id)
-                    );
-                    form = form.child(
-                        cs::button(
-                            SharedString::from(format!("agent-reconnect-{id}")),
-                            title,
-                            selected == Some(id.as_str()),
-                            busy,
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.select_agent_target(
-                                agent,
-                                Some(id.clone()),
-                                expected_owner.clone(),
-                                cx,
-                            )
-                        })),
-                    );
-                }
-                if selected.is_some() && !self.agents.supports_reconnect {
-                    form=form.child(s::description_text("The server needs an update before this existing connection can be safely reauthorized. Add another account creates a separate connection."));
-                }
-                let expected_owner = self.owner.clone();
-                form = form.child(
-                    cs::button(
-                        "add-agent-account",
-                        "Add another account",
-                        selected.is_none(),
-                        busy,
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_agent_target(agent, None, expected_owner.clone(), cx)
-                    })),
-                );
-            }
-            if method == ConnectionMethod::SetupToken {
-                form = form.child(s::description_text(
-                    "Run claude setup-token in your terminal, then paste the generated token here.",
-                ));
-            }
-            if method != ConnectionMethod::DeviceCode {
-                let replacing = self
-                    .agents
-                    .selection
-                    .as_ref()
-                    .is_some_and(|b| b.connection.is_some());
-                form=form.child(s::description_text(if replacing {"Verify a replacement for this task's exact selected connection. The previous credential remains active until verification succeeds. Existing running sessions may need Restart runtime afterward."}else{"Add a separate connection. Existing tasks keep their selected connection."}));
-                if replacing {
-                    let expected_owner = self.owner.clone();
-                    form = form.child(
-                        cs::button(
-                            "add-separate-agent-credential",
-                            "Add separate connection",
-                            false,
-                            busy,
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.select_agent_target(agent, None, expected_owner.clone(), cx);
-                            if !this.unfinished_agent_login() {
-                                this.agents.edit = Some((agent, method));
-                            }
-                        })),
-                    );
-                    if !self.agents.supports_reconfigure {
-                        form = form.child(s::description_text(
-                            "Update this server to replace the selected credential safely.",
-                        ));
-                    }
-                }
-                form = form.child(self.agents.secret.clone());
-            }
-            if let Some(operation) = self.agents.operation.as_ref().filter(|o| o.agent == agent) {
-                if matches!(
-                    operation.state,
-                    LoginState::Queued | LoginState::Authorizing
-                ) {
-                    let seconds = ((operation.expires_at - chrono::Utc::now().timestamp_millis())
-                        .max(0)
-                        / 1000) as u64;
-                    form = form.child(s::description_text(format!(
-                        "Sign-in session expires in {}:{:02}",
-                        seconds / 60,
-                        seconds % 60
-                    )));
-                    form = form.child(s::description_text(
-                        if operation.verification_url.is_some() {
-                            "Finish sign-in in your browser. You can close this panel and return."
-                        } else {
-                            if method == ConnectionMethod::DeviceCode {
-                                "Preparing device sign-in…"
-                            } else {
-                                "Verifying the replacement credential…"
-                            }
-                        },
-                    ));
-                    if let Some(code) = &operation.verification_code {
-                        let code = code.clone();
-                        form = form.child(
-                            cs::button(
-                                "copy-agent-device-code",
-                                SharedString::from(format!("Copy code · {code}")),
-                                false,
-                                false,
-                                false,
-                            )
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(code.clone()))
-                            }),
-                        );
-                    }
-                    if let Some(url) = operation
-                        .verification_url
-                        .as_ref()
-                        .filter(|u| u.starts_with("https://"))
-                    {
-                        let url = url.clone();
-                        form = form.child(
-                            cs::button(
-                                "open-agent-verification",
-                                "Open sign-in page",
-                                true,
-                                false,
-                                false,
-                            )
-                            .on_click(move |_, _, cx| cx.open_url(&url)),
-                        );
-                    }
-                    let id = operation.operation_id.clone();
-                    form = form.child(
-                        cs::button(
-                            "cancel-agent-device-login",
-                            "Cancel sign-in",
-                            false,
-                            busy,
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.call(
-                                "agent-cancel",
-                                methods::CLOUD_AGENT_LOGIN_CANCEL,
-                                json!({"operationId":id}),
-                                cx,
-                            )
-                        })),
-                    );
-                } else if operation.state == LoginState::Expired {
-                    form = form.child(s::description_text(
-                        "This code expired. Start sign-in again for a new code.",
-                    ));
-                } else if operation.state == LoginState::Error {
-                    form = form.child(s::description_text(match operation.error_code.as_deref() {
-                        Some("auth_account_mismatch")=>"This sign-in used a different provider account. Reconnect using the original account, or choose Add another account to create a separate connection. Existing tasks were not switched.",
-                        Some("auth_identity_review_required")=>"The existing connection has no verified provider identity. An operator must review it before it can be reused. Add another account creates a separate connection and does not switch existing tasks.",
-                        _=>"Sign-in failed. Retry the selected connection or explicitly add another account.",
-                    }));
-                } else if operation.state == LoginState::Connected {
-                    form = form.child(s::description_text("Account connected."));
-                }
-            }
-            let pending = self.agents.operation.as_ref().is_some_and(|o| {
-                o.agent == agent && matches!(o.state, LoginState::Queued | LoginState::Authorizing)
-            });
-            if !pending
-                && !(method == ConnectionMethod::DeviceCode
-                    && self
-                        .agents
-                        .selection
-                        .as_ref()
-                        .is_some_and(|binding| binding.connection.is_some())
-                    && !self.agents.supports_reconnect)
-                && !(method != ConnectionMethod::DeviceCode
-                    && self
-                        .agents
-                        .selection
-                        .as_ref()
-                        .is_some_and(|b| b.connection.is_some())
-                    && !self.agents.supports_reconfigure)
-                && !self.unfinished_agent_login()
-            {
-                form = form.child(
-                    cs::button(
-                        "submit-agent-connection",
-                        if method == ConnectionMethod::DeviceCode {
-                            "Start sign-in"
-                        } else {
-                            if self
-                                .agents
-                                .selection
-                                .as_ref()
-                                .is_some_and(|b| b.connection.is_some())
-                            {
-                                "Verify replacement credential"
-                            } else {
-                                "Verify and add connection"
-                            }
-                        },
-                        true,
-                        busy,
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.submit_agent(cx))),
-                );
-            }
-            if self.agents.login_binding.is_some() {
-                form = form.child(
-                    cs::button(
-                        "refresh-agent-verification",
-                        "Refresh verification status",
-                        false,
-                        busy,
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.call("agents", methods::CLOUD_AGENT_CONNECTIONS, json!({}), cx)
-                    })),
-                );
-            }
-            if let Some(connection) = self.agents.connections.iter().rev().find(|c| {
-                c.agent == agent
-                    && self.agents.managed_connection.as_deref() == Some(c.connection_id.as_str())
-            }) {
-                let expected_owner = self.owner.clone();
-                let id = connection.connection_id.clone();
-                form = form.child(
-                    cs::button(
-                        "disconnect-agent-connection",
-                        "Disconnect",
-                        false,
-                        busy,
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.owner != expected_owner {
-                            return;
-                        }
-                        this.call(
-                            "agent-disconnect",
-                            methods::CLOUD_AGENT_DISCONNECT,
-                            json!({"connectionId":id}),
-                            cx,
-                        )
-                    })),
-                );
-            }
-            form = form.child(
-                cs::button("close-agent-connection", "Done", false, false, false).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.agents.edit = None;
-                        this.agents.recovery_open = false;
-                        this.agents.recovery_target = None;
-                        this.agents
-                            .secret
-                            .update(cx, |input, cx| input.set_value(String::new(), cx));
-                        cx.notify();
-                    }),
-                ),
-            );
-            body = body.child(form);
-        }
-        if let Some(error) = &self.agents.error {
             body = body.child(
                 div()
-                    .p(px(12.))
-                    .text_size(px(12.))
+                    .px(px(s::ROW_PAD_X))
+                    .py(px(10.))
+                    .border_t_1()
+                    .border_color(palette::rgb(BORDER))
+                    .text_size(px(11.))
+                    .line_height(px(16.))
                     .text_color(s::destructive_text())
                     .child(error.clone()),
             );
         }
         kit::section(
             "Coding agents",
-            "Cloud chats sign in with your own subscription or API key. Connect once, then pick the account per chat. Agents on this computer live under Providers & accounts.",
+            "Cloud chats use your own subscription or API key. Connect once, then pick the account per chat. Agents on this computer are under Providers & accounts.",
             Some(
-                cs::button("refresh-cloud-agents", "Refresh", false, busy, false)
+                cs::icon_button("refresh-cloud-agents", "refresh", "Refresh", busy, false)
+                    .tip("Refresh")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.agents.error = None;
                         this.call("agents", methods::CLOUD_AGENT_CONNECTIONS, json!({}), cx);
@@ -1154,5 +1157,515 @@ impl RepositoryPanel {
             ),
             body,
         )
+    }
+
+    /// One agent: its row, any extra accounts under it, and the inline
+    /// connect form when it is open.
+    fn agent_block(&self, first: bool, agent: AgentId, busy: bool, cx: &mut Context<Self>) -> Div {
+        let owner = self.owner.clone();
+        let accounts: Vec<&AgentConnection> = self
+            .agents
+            .connections
+            .iter()
+            .filter(|c| {
+                c.agent == agent
+                    && c.state != ConnectionState::Revoked
+                    && !self.agents.disconnecting.contains(&c.connection_id)
+            })
+            .collect();
+        let open = self.agents.edit.is_some_and(|(open, _)| open == agent);
+        let other_open = self.agents.edit.is_some() && !open;
+        let target = self
+            .agents
+            .selection
+            .as_ref()
+            .and_then(|binding| binding.connection.clone());
+
+        let (description, trailing) = match accounts.as_slice() {
+            [] => (
+                String::new(),
+                (!open).then(|| {
+                    // One primary action at a time: another agent's open
+                    // form owns it.
+                    let id = SharedString::from(format!("cloud-agent-{}", agent.as_str()));
+                    let button = if other_open {
+                        cs::button(id, "Connect", false, busy, false)
+                    } else {
+                        kit::primary_button(id, "Connect", !busy)
+                    };
+                    let owner = owner.clone();
+                    button
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.connect_agent(agent, owner.clone(), cx)
+                        }))
+                        .into_any_element()
+                }),
+            ),
+            [account] => (
+                account_name(account),
+                Some(self.account_trailing(agent, account, true, busy, cx)),
+            ),
+            // Each account row below carries its own status.
+            many => (
+                format!("{} accounts", many.len()),
+                Some(self.agent_menu(agent, None, busy, cx)),
+            ),
+        };
+        let mut block = column()
+            .when(!first, |v| {
+                v.border_t_1().border_color(palette::rgb(BORDER))
+            })
+            .child(kit::row_item(
+                true,
+                Some(agent_tile(agent).into_any_element()),
+                agent_name(agent),
+                description,
+                trailing,
+            ));
+        let nested_target = accounts.len() > 1
+            && target
+                .as_deref()
+                .is_some_and(|id| accounts.iter().any(|c| c.connection_id == id));
+        if open && !nested_target {
+            block = block.child(self.agent_form(agent, busy, cx));
+        }
+        if accounts.len() > 1 {
+            for account in &accounts {
+                block = block.child(
+                    s::row(true)
+                        .flex_nowrap()
+                        .pl(px(NESTED))
+                        .py(px(6.))
+                        .min_h(px(40.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.))
+                                .line_height(px(16.))
+                                .text_color(palette::rgb(TEXT))
+                                .child(account_name(account)),
+                        )
+                        .child(self.account_trailing(agent, account, false, busy, cx)),
+                );
+                if open && target.as_deref() == Some(account.connection_id.as_str()) {
+                    block = block.child(self.agent_form(agent, busy, cx));
+                }
+            }
+        }
+        block
+    }
+
+    /// Status, a "Reconnect" key when the account needs one, and its menu.
+    fn account_trailing(
+        &self,
+        agent: AgentId,
+        account: &AgentConnection,
+        only: bool,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let owner = self.owner.clone();
+        let id = account.connection_id.clone();
+        let needs_sign_in = matches!(
+            account.state,
+            ConnectionState::ReconnectRequired | ConnectionState::Error
+        ) && self.can_reconnect(account)
+            && self.agents.edit.is_none();
+        let menu = self.agent_menu(agent, Some((account, only)), busy, cx);
+        row()
+            .gap(px(10.))
+            .when_some(connection_status(&id, account.state), |v, s| v.child(s))
+            .when(needs_sign_in, |v| {
+                let id = id.clone();
+                v.child(
+                    cs::button(
+                        SharedString::from(format!("agent-reconnect-{id}")),
+                        "Reconnect",
+                        false,
+                        busy,
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.reconnect_agent(agent, id.clone(), owner.clone(), cx)
+                    })),
+                )
+            })
+            .child(menu)
+            .into_any_element()
+    }
+
+    /// The "…" menu: per account (sign in again, disconnect) and, on the
+    /// agent's own row, adding accounts.
+    fn agent_menu(
+        &self,
+        agent: AgentId,
+        account: Option<(&AgentConnection, bool)>,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut items = vec![];
+        // The agent's own row adds accounts; nested account rows don't.
+        if account.is_none_or(|(_, only)| only) {
+            let owner = self.owner.clone();
+            items.push(MenuItem {
+                id: format!("agent-add-{}", agent.as_str()).into(),
+                glyph: "plus",
+                label: "Add another account".into(),
+                danger: false,
+                run: std::rc::Rc::new(move |this, _, cx| {
+                    this.connect_agent(agent, owner.clone(), cx)
+                }),
+            });
+            items.push(MenuItem {
+                id: format!("agent-api-key-{}", agent.as_str()).into(),
+                glyph: "key-minimalistic",
+                label: "Use API key".into(),
+                danger: false,
+                run: std::rc::Rc::new(move |this, _, cx| {
+                    this.switch_agent_method(agent, ConnectionMethod::ApiKey, cx)
+                }),
+            });
+        }
+        if let Some((account, _)) = account.filter(|(a, _)| self.can_reconnect(a)) {
+            let id = account.connection_id.clone();
+            let owner = self.owner.clone();
+            items.push(MenuItem {
+                id: format!("agent-reconnect-item-{id}").into(),
+                glyph: "refresh",
+                label: if account.method == ConnectionMethod::DeviceCode {
+                    "Sign in again"
+                } else {
+                    "Replace credential"
+                }
+                .into(),
+                danger: false,
+                run: std::rc::Rc::new(move |this, _, cx| {
+                    this.reconnect_agent(agent, id.clone(), owner.clone(), cx)
+                }),
+            });
+        }
+        if let Some((account, _)) = account {
+            let id = account.connection_id.clone();
+            let owner = self.owner.clone();
+            items.push(MenuItem {
+                id: format!("agent-disconnect-{id}").into(),
+                glyph: "trash-bin-minimalistic",
+                label: "Disconnect".into(),
+                danger: true,
+                run: std::rc::Rc::new(move |this, _, cx| {
+                    this.disconnect_agent(id.clone(), owner.clone(), cx)
+                }),
+            });
+        }
+        let id = match account {
+            Some((account, _)) => format!("agent-account-menu-{}", account.connection_id),
+            None => format!("agent-menu-{}", agent.as_str()),
+        };
+        self.overflow_menu(
+            id.into(),
+            format!("{} account options", agent_name(agent)).into(),
+            busy,
+            items,
+            cx,
+        )
+    }
+
+    /// The inline connect form inside an agent's row.
+    fn agent_form(&self, agent: AgentId, busy: bool, cx: &mut Context<Self>) -> Div {
+        let Some((_, method)) = self.agents.edit else {
+            return div();
+        };
+        let operation = self.agents.operation.as_ref().filter(|o| o.agent == agent);
+        let waiting = operation
+            .is_some_and(|o| matches!(o.state, LoginState::Queued | LoginState::Authorizing));
+        let requesting = self
+            .pending
+            .values()
+            .any(|p| matches!(p.kind, "agent-login" | "agent-configure"));
+        let replacing = self
+            .agents
+            .selection
+            .as_ref()
+            .is_some_and(|binding| binding.connection.is_some());
+        let mut form = column()
+            .gap(px(10.))
+            .pl(px(NESTED))
+            .pr(px(s::ROW_PAD_X))
+            .pb(px(12.));
+        // The status line: an optional key and status on the left, the
+        // text links on the right.
+        let mut status: Option<Div> = None;
+        let mut primary: Option<AnyElement> = None;
+
+        if method == ConnectionMethod::DeviceCode {
+            let code = operation
+                .filter(|_| waiting)
+                .and_then(|o| o.verification_code.clone());
+            let url = operation
+                .filter(|_| waiting)
+                .and_then(|o| o.verification_url.clone())
+                .filter(|u| u.starts_with("https://"));
+            if code.is_some() || url.is_some() {
+                let mut line = row().gap(px(12.)).flex_wrap();
+                if let Some(code) = code {
+                    let copied = self.agents.copied.is_some();
+                    let copy = code.clone();
+                    line = line.child(
+                        row()
+                            .flex_none()
+                            .h(px(40.))
+                            .pl(px(14.))
+                            .pr(px(6.))
+                            .gap(px(10.))
+                            .rounded(px(9.))
+                            .border_1()
+                            .border_color(s::card_border())
+                            .bg(s::frame_bg())
+                            .child(
+                                div()
+                                    .font_family("Geist Mono")
+                                    .text_size(px(18.))
+                                    .line_height(px(24.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(palette::rgb(TEXT))
+                                    .child(code),
+                            )
+                            .child(
+                                cs::icon_button(
+                                    "copy-agent-device-code",
+                                    if copied { "check" } else { "copy" },
+                                    "Copy code",
+                                    false,
+                                    false,
+                                )
+                                .tip(if copied { "Copied" } else { "Copy code" })
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.copy_agent_code(copy.clone(), cx),
+                                )),
+                            ),
+                    );
+                }
+                if let Some(url) = url {
+                    line = line.child(
+                        kit::quiet_button("open-agent-verification", "Open sign-in page")
+                            .gap(px(4.))
+                            .text_color(palette::rgb(TEXT))
+                            .child(
+                                icon("arrow-up-right")
+                                    .size(px(12.))
+                                    .text_color(palette::rgb(MUTED)),
+                            )
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    );
+                }
+                form = form.child(line);
+                status = Some(
+                    row()
+                        .gap(px(6.))
+                        .child(mini_spinner("agent-sign-in-wait"))
+                        .child(quiet_text("Waiting for sign-in…")),
+                );
+            } else if waiting || requesting {
+                status = Some(
+                    row()
+                        .gap(px(6.))
+                        .child(mini_spinner("agent-sign-in-code"))
+                        .child(quiet_text("Getting a sign-in code…")),
+                );
+            } else {
+                let (note, label) = match operation.map(|o| o.state) {
+                    Some(LoginState::Expired) => ("That code expired.", "Get a new code"),
+                    Some(LoginState::Error) => ("", "Try again"),
+                    _ => ("", "Start sign-in"),
+                };
+                if !note.is_empty() {
+                    status = Some(quiet_text(note));
+                }
+                let allowed = self
+                    .agents
+                    .selection
+                    .as_ref()
+                    .is_some_and(|b| b.can_submit(self.agents.supports_reconnect));
+                if allowed {
+                    primary = Some(
+                        kit::primary_button("submit-agent-connection", label, !busy)
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_agent(cx)))
+                            .into_any_element(),
+                    );
+                } else {
+                    status = Some(quiet_text(
+                        "Update the server to sign this connection in again.",
+                    ));
+                }
+            }
+        } else {
+            if method == ConnectionMethod::SetupToken {
+                form = form.child(
+                    row()
+                        .gap(px(6.))
+                        .flex_wrap()
+                        .child(quiet_text("Run"))
+                        .child(
+                            row()
+                                .id("copy-setup-token-command")
+                                .h(px(20.))
+                                .px(px(6.))
+                                .gap(px(6.))
+                                .rounded(px(5.))
+                                .bg(s::frame_bg())
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .font_family("Geist Mono")
+                                        .text_size(px(11.))
+                                        .text_color(palette::rgb(TEXT))
+                                        .child("claude setup-token"),
+                                )
+                                .child(icon("copy").size(px(11.)).text_color(palette::rgb(MUTED)))
+                                .tip("Copy command")
+                                .on_click(|_, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        "claude setup-token".into(),
+                                    ))
+                                }),
+                        )
+                        .child(quiet_text("in a terminal, then paste the token.")),
+                );
+            }
+            let filled = !self.agents.secret.read(cx).value(cx).trim().is_empty();
+            let allowed = self
+                .agents
+                .selection
+                .as_ref()
+                .is_some_and(|b| b.can_submit(self.agents.supports_reconfigure));
+            form = form.child(
+                row()
+                    .gap(px(8.))
+                    .child(
+                        s::field()
+                            .min_w_0()
+                            .px(px(10.))
+                            .child(self.agents.secret.clone()),
+                    )
+                    .child(
+                        kit::primary_button(
+                            "submit-agent-connection",
+                            if replacing { "Replace" } else { "Save" },
+                            filled && allowed && !busy && !waiting,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.submit_agent(cx))),
+                    ),
+            );
+            if waiting || requesting {
+                status = Some(
+                    row()
+                        .gap(px(6.))
+                        .child(mini_spinner("agent-credential-verify"))
+                        .child(quiet_text("Verifying…")),
+                );
+            } else if replacing && !allowed {
+                status = Some(quiet_text("Update the server to replace this credential."));
+            }
+        }
+
+        // The other way to connect, as a small text link.
+        let alternative = match (agent, method) {
+            (_, ConnectionMethod::DeviceCode) | (AgentId::Claude, ConnectionMethod::SetupToken) => {
+                Some(("Use an API key instead", ConnectionMethod::ApiKey))
+            }
+            (AgentId::Claude, _) => {
+                Some(("Use a setup token instead", ConnectionMethod::SetupToken))
+            }
+            (_, ConnectionMethod::ApiKey) => {
+                Some(("Sign in instead", ConnectionMethod::DeviceCode))
+            }
+            _ => None,
+        };
+        let mut links = row().flex_none().gap(px(2.)).ml_auto();
+        if let Some((label, next)) = alternative.filter(|_| !requesting) {
+            links = links.child(kit::quiet_button("agent-switch-method", label).on_click(
+                cx.listener(move |this, _, _, cx| this.switch_agent_method(agent, next, cx)),
+            ));
+        }
+        links = links.child(
+            kit::quiet_button("close-agent-connection", "Cancel")
+                .on_click(cx.listener(|this, _, _, cx| this.cancel_agent_edit(cx))),
+        );
+        form = form.child(
+            row()
+                .gap(px(10.))
+                .min_h(px(28.))
+                .when_some(primary, |v, p| v.child(p))
+                .when_some(status, |v, s| v.child(s))
+                .child(links),
+        );
+        let message = self.agents.error.clone().or_else(|| {
+            operation
+                .filter(|o| o.state == LoginState::Error)
+                .map(|o| {
+                    match o.error_code.as_deref() {
+                        Some("auth_account_mismatch") => "That was a different account. Sign in with the original one, or add it as another account.",
+                        Some("auth_identity_review_required") => "This connection needs a review before it can be reused. Add another account instead.",
+                        _ => "Sign-in failed.",
+                    }
+                    .to_owned()
+                })
+        });
+        if let Some(message) = message {
+            form = form.child(
+                div()
+                    .text_size(px(11.))
+                    .line_height(px(16.))
+                    .text_color(s::destructive_text())
+                    .child(message),
+            );
+        }
+        form
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{account_name, connection_status};
+    use zuse_protocol::{cloud_computers::AgentId, cloud_connections::*};
+
+    fn connection(method: ConnectionMethod, label: Option<&str>) -> AgentConnection {
+        AgentConnection {
+            connection_id: "c".into(),
+            agent: AgentId::Codex,
+            method,
+            state: ConnectionState::Connected,
+            account_label: label.map(Into::into),
+            expires_at: None,
+            version: 1,
+            error_code: None,
+            credential_update: None,
+            credential_update_key: None,
+        }
+    }
+
+    #[test]
+    fn accounts_are_named_by_label_then_by_how_they_signed_in() {
+        let named = connection(ConnectionMethod::DeviceCode, Some("you@example.com"));
+        assert_eq!(account_name(&named), "you@example.com");
+        let blank = connection(ConnectionMethod::ApiKey, Some("  "));
+        assert_eq!(account_name(&blank), "API key");
+        let token = connection(ConnectionMethod::SetupToken, None);
+        assert_eq!(account_name(&token), "Setup token");
+    }
+
+    #[test]
+    fn only_live_connections_show_a_status() {
+        assert!(connection_status("c", ConnectionState::Revoked).is_none());
+        for state in [
+            ConnectionState::Connected,
+            ConnectionState::Pending,
+            ConnectionState::ReconnectRequired,
+            ConnectionState::Error,
+        ] {
+            assert!(connection_status("c", state).is_some());
+        }
     }
 }

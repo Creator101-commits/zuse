@@ -12,6 +12,9 @@
 //! archives the first chat. `FIXTURE_CLICKS="x,y;x,y"` clicks those window
 //! points (via XTest, under Xvfb) before the capture, and
 //! `FIXTURE_TYPE=text` then types into the focused field.
+//! `FIXTURE_AGENTS=multi` adds a second Codex account. Device sign-in hands
+//! out a code and keeps waiting; `FIXTURE_LOGIN=connect` finishes it after a
+//! few status checks.
 use chrono::{Duration, Utc};
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use serde_json::{Value, json};
@@ -349,10 +352,53 @@ struct Controller {
     fresh: bool,
     /// GitHub connected, no repositories added yet.
     no_repos: bool,
+    /// Device sign-in status checks so far.
+    polls: std::sync::atomic::AtomicU32,
+}
+impl Controller {
+    fn login(&self, state: &str) -> Result<RpcReply, RpcError> {
+        bound(
+            json!({"operationId": "op-1", "connectionId": "codex-new", "agent": "codex",
+            "state": state, "verificationUrl": "https://example.com/device",
+            "verificationCode": "WDJB-MJHT", "expiresAt": now() + 15 * 60_000, "errorCode": null}),
+        )
+    }
+    fn signed_in(&self) -> bool {
+        std::env::var("FIXTURE_LOGIN").as_deref() == Ok("connect")
+            && self.polls.load(std::sync::atomic::Ordering::SeqCst) >= 3
+    }
 }
 #[async_trait::async_trait]
 impl RpcService for Controller {
     async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
+        match method {
+            methods::CLOUD_AGENT_LOGIN => return self.login("authorizing"),
+            methods::CLOUD_AGENT_LOGIN_STATUS => {
+                self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return self.login(if self.signed_in() {
+                    "connected"
+                } else {
+                    "authorizing"
+                });
+            }
+            methods::CLOUD_AGENT_LOGIN_CANCEL => return self.login("cancelled"),
+            methods::CLOUD_AGENT_DISCONNECT => return bound(json!({})),
+            methods::CLOUD_AGENT_CONNECTIONS if self.fresh && self.signed_in() => {
+                return bound(json!({"connections": [
+                    {"connectionId": "codex-new", "agent": "codex", "method": "device-code", "state": "connected", "accountLabel": "you@example.com", "expiresAt": null, "version": 1, "errorCode": null}
+                ], "supportsDeviceReconnect": true}));
+            }
+            methods::CLOUD_AGENT_CONNECTIONS
+                if !self.fresh && std::env::var("FIXTURE_AGENTS").as_deref() == Ok("multi") =>
+            {
+                return bound(json!({"connections": [
+                    {"connectionId": "codex", "agent": "codex", "method": "device-code", "state": "connected", "accountLabel": "you@example.com", "expiresAt": null, "version": 1, "errorCode": null},
+                    {"connectionId": "codex-work", "agent": "codex", "method": "device-code", "state": "connected", "accountLabel": "work@example.com", "expiresAt": null, "version": 1, "errorCode": null},
+                    {"connectionId": "claude", "agent": "claude", "method": "setup-token", "state": "connected", "accountLabel": "Claude Max", "expiresAt": null, "version": 1, "errorCode": null}
+                ], "supportsDeviceReconnect": true, "supportsCredentialReconfiguration": true}));
+            }
+            _ => {}
+        }
         if self.no_repos && method == methods::CLOUD_PROJECTS {
             return bound(json!({"projects": []}));
         }
@@ -460,6 +506,7 @@ fn main() {
         plan,
         fresh,
         no_repos: std::env::var("FIXTURE_NO_REPOS").is_ok(),
+        polls: Default::default(),
     }));
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().to_path_buf();
