@@ -61,6 +61,29 @@ pub(super) struct Catalog {
     /// account event) or a task is archived here, so views of archived
     /// tasks reload without polling.
     workspaces_revision: u64,
+    /// Tasks archived from this sidebar, by workspace id. They stay out of
+    /// every list (saved, fresh, or refreshed by a hint) until a fresh list
+    /// shows the server recorded the archive, so a list read before the
+    /// archive landed cannot put the row back.
+    pending_archive: HashMap<String, PendingArchive>,
+}
+/// A task hidden while its archive is in flight or not yet listed.
+struct PendingArchive {
+    /// The row as it was listed, restored if the archive fails.
+    row: Value,
+    /// When the server acknowledged the archive. Until then the row is
+    /// always hidden; afterwards for at most [`ARCHIVE_CONFIRM_WINDOW`].
+    acknowledged: Option<std::time::Instant>,
+}
+/// How long an acknowledged archive keeps hiding a row that fresh lists still
+/// show as active. Lists normally catch up within seconds; past this the
+/// server's list wins.
+const ARCHIVE_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+fn archived_row(row: &Value) -> bool {
+    matches!(
+        row["state"].as_str(),
+        Some("deleted" | "archived" | "archiving")
+    ) || matches!(row["desiredState"].as_str(), Some("deleted" | "archived"))
 }
 fn access_denied(error: &RpcError) -> bool {
     matches!(error,RpcError::Capability(code) if code=="workspace_access_denied"||code=="workspace_not_found")
@@ -125,16 +148,63 @@ impl AppState {
         self.cloud_sidebar.loading = true;
         cx.notify();
     }
-    /// Drop an archived (or archiving) task from the visible catalog at once;
-    /// the `workspace` account event that follows refreshes it for real.
-    pub(crate) fn hide_cloud_sidebar_workspace(&mut self, workspace: &str) -> bool {
-        let before = self.cloud_sidebar.workspaces.len();
-        self.cloud_sidebar
+    /// Archiving `workspace` starts: drop its row at once and keep it out of
+    /// every list until the server confirms. False when it is not listed.
+    pub(crate) fn begin_cloud_sidebar_archive(&mut self, workspace: &str) -> bool {
+        let Some(index) = self
+            .cloud_sidebar
             .workspaces
-            .retain(|row| row["workspaceId"].as_str() != Some(workspace));
+            .iter()
+            .position(|row| row["workspaceId"].as_str() == Some(workspace))
+        else {
+            return false;
+        };
+        let row = self.cloud_sidebar.workspaces.remove(index);
+        self.cloud_sidebar.pending_archive.insert(
+            workspace.to_owned(),
+            PendingArchive {
+                row,
+                acknowledged: None,
+            },
+        );
         self.cloud_sidebar.workspaces_revision =
             self.cloud_sidebar.workspaces_revision.wrapping_add(1);
-        self.cloud_sidebar.workspaces.len() != before
+        true
+    }
+    /// The server accepted the archive. The row stays hidden until a fresh
+    /// list no longer shows it active; a fresh list is asked for right away.
+    pub(crate) fn acknowledge_cloud_sidebar_archive(
+        &mut self,
+        workspace: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pending) = self.cloud_sidebar.pending_archive.get_mut(workspace) {
+            pending.acknowledged = Some(std::time::Instant::now());
+        }
+        self.cloud_sidebar.workspaces_revision =
+            self.cloud_sidebar.workspaces_revision.wrapping_add(1);
+        self.retry_cloud_sidebar(cx);
+    }
+    /// The archive failed: put the row back unless a list already has it.
+    pub(crate) fn fail_cloud_sidebar_archive(&mut self, workspace: &str) -> bool {
+        let Some(pending) = self.cloud_sidebar.pending_archive.remove(workspace) else {
+            return false;
+        };
+        if !self
+            .cloud_sidebar
+            .workspaces
+            .iter()
+            .any(|row| row["workspaceId"].as_str() == Some(workspace))
+        {
+            self.cloud_sidebar.workspaces.push(pending.row);
+        }
+        self.cloud_sidebar.workspaces_revision =
+            self.cloud_sidebar.workspaces_revision.wrapping_add(1);
+        true
+    }
+    #[cfg(test)]
+    pub(crate) fn cloud_sidebar_archive_pending(&self, workspace: &str) -> bool {
+        self.cloud_sidebar.pending_archive.contains_key(workspace)
     }
     pub(super) fn clear_cloud_sidebar(&mut self) {
         self.cloud_sidebar = Catalog::default();
@@ -232,13 +302,31 @@ impl AppState {
                 self.cloud_sidebar.projects_fresh = !provisional;
             }
             Part::Workspaces => {
+                // A fresh list confirms an acknowledged archive once it no
+                // longer lists the task as active; one still unconfirmed past
+                // its window yields to the server's list.
+                if !provisional {
+                    self.cloud_sidebar
+                        .pending_archive
+                        .retain(|workspace, pending| {
+                            let Some(acknowledged) = pending.acknowledged else {
+                                return true;
+                            };
+                            let active = rows.iter().any(|row| {
+                                row["workspaceId"].as_str() == Some(workspace.as_str())
+                                    && !archived_row(row)
+                            });
+                            active && acknowledged.elapsed() < ARCHIVE_CONFIRM_WINDOW
+                        });
+                }
+                let pending = &self.cloud_sidebar.pending_archive;
                 self.cloud_sidebar.workspaces = rows
                     .iter()
                     .filter(|row| {
-                        !matches!(
-                            row["state"].as_str(),
-                            Some("deleted" | "archived" | "archiving")
-                        ) && !matches!(row["desiredState"].as_str(), Some("deleted" | "archived"))
+                        !archived_row(row)
+                            && !row["workspaceId"]
+                                .as_str()
+                                .is_some_and(|id| pending.contains_key(id))
                     })
                     .cloned()
                     .collect();
@@ -477,10 +565,111 @@ mod cache_tests {
         let refreshed = state.cloud_sidebar_workspaces_revision();
         assert_ne!(refreshed, start);
         // Archiving from the sidebar hides the row before the event arrives.
-        assert!(state.hide_cloud_sidebar_workspace("saved"));
+        assert!(state.begin_cloud_sidebar_archive("saved"));
         assert!(state.cloud_sidebar_workspaces().is_empty());
         assert_ne!(state.cloud_sidebar_workspaces_revision(), refreshed);
-        assert!(!state.hide_cloud_sidebar_workspace("saved"));
+        assert!(!state.begin_cloud_sidebar_archive("saved"));
+    }
+    fn listed(provisional: bool, rows: Value) -> Value {
+        json!({"accountId":"owner","organizationId":null,"apiOrigin":"https://cloud.test","provisional":provisional,"workspaces":rows})
+    }
+    fn ids(state: &AppState) -> Vec<String> {
+        state
+            .cloud_sidebar_workspaces()
+            .iter()
+            .filter_map(|row| row["workspaceId"].as_str().map(str::to_owned))
+            .collect()
+    }
+    #[gpui::test]
+    fn archived_rows_stay_hidden_through_stale_lists_until_the_server_confirms(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| AppState::new());
+        let active = json!([
+            {"workspaceId":"kept","state":"paused","initialSessionId":"k"},
+            {"workspaceId":"gone","state":"paused","initialSessionId":"g"}]);
+        state.update(cx, |state, cx| {
+            state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+            assert!(state.apply_sidebar_part(Part::Workspaces, &listed(false, active.clone())));
+            assert!(state.begin_cloud_sidebar_archive("gone"));
+            assert_eq!(ids(state), ["kept"]);
+            // While the archive is in flight, a list read before the server
+            // recorded it still lists the task as active; it stays hidden.
+            assert!(state.apply_sidebar_part(Part::Workspaces, &listed(false, active.clone())));
+            assert_eq!(ids(state), ["kept"]);
+            // Acknowledged, the next stale list (read replica, or a read
+            // that raced the archive) still cannot bring it back.
+            state.acknowledge_cloud_sidebar_archive("gone", cx);
+            assert!(state.apply_sidebar_part(Part::Workspaces, &listed(false, active.clone())));
+            assert_eq!(ids(state), ["kept"]);
+            assert!(state.cloud_sidebar_archive_pending("gone"));
+            // Nor can a saved list painted again.
+            state.cloud_sidebar.workspaces_fresh = false;
+            assert!(state.apply_sidebar_part(Part::Workspaces, &listed(true, active.clone())));
+            assert_eq!(ids(state), ["kept"]);
+            // The server confirms: the task is listed as archiving.
+            let confirmed = json!([
+                {"workspaceId":"kept","state":"paused","initialSessionId":"k"},
+                {"workspaceId":"gone","state":"archiving","desiredState":"archived","initialSessionId":"g"}]);
+            assert!(state.apply_sidebar_part(Part::Workspaces, &listed(false, confirmed)));
+            assert_eq!(ids(state), ["kept"]);
+            assert!(!state.cloud_sidebar_archive_pending("gone"));
+        });
+    }
+    #[gpui::test]
+    fn a_task_absent_from_a_fresh_list_confirms_its_archive(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        state.update(cx, |state, cx| {
+            state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+            state.apply_sidebar_part(
+                Part::Workspaces,
+                &listed(false, json!([{"workspaceId":"gone","state":"paused"}])),
+            );
+            assert!(state.begin_cloud_sidebar_archive("gone"));
+            // A list before the acknowledgement never clears the hold.
+            state.apply_sidebar_part(Part::Workspaces, &listed(false, json!([])));
+            assert!(state.cloud_sidebar_archive_pending("gone"));
+            state.acknowledge_cloud_sidebar_archive("gone", cx);
+            state.apply_sidebar_part(Part::Workspaces, &listed(false, json!([])));
+            assert!(!state.cloud_sidebar_archive_pending("gone"));
+        });
+    }
+    #[gpui::test]
+    fn an_unconfirmed_archive_yields_to_the_server_after_its_window(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| AppState::new());
+        let active = json!([{"workspaceId":"task","state":"paused","initialSessionId":"s"}]);
+        state.update(cx, |state, cx| {
+            state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+            state.apply_sidebar_part(Part::Workspaces, &listed(false, active.clone()));
+            assert!(state.begin_cloud_sidebar_archive("task"));
+            state.acknowledge_cloud_sidebar_archive("task", cx);
+            let pending = state.cloud_sidebar.pending_archive.get_mut("task").unwrap();
+            pending.acknowledged = Some(std::time::Instant::now() - ARCHIVE_CONFIRM_WINDOW);
+            state.apply_sidebar_part(Part::Workspaces, &listed(false, active));
+            assert_eq!(ids(state), ["task"]);
+            assert!(!state.cloud_sidebar_archive_pending("task"));
+        });
+    }
+    #[test]
+    fn a_failed_archive_restores_the_row() {
+        let mut state = AppState::new();
+        state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+        let active = json!([
+            {"workspaceId":"kept","state":"paused","initialSessionId":"k"},
+            {"workspaceId":"task","state":"paused","initialSessionId":"s","title":"Fix login"}]);
+        state.apply_sidebar_part(Part::Workspaces, &listed(false, active));
+        assert!(state.begin_cloud_sidebar_archive("task"));
+        assert_eq!(ids(&state), ["kept"]);
+        let revision = state.cloud_sidebar_workspaces_revision();
+        assert!(state.fail_cloud_sidebar_archive("task"));
+        assert_eq!(ids(&state), ["kept", "task"]);
+        assert_eq!(
+            state.cloud_sidebar_workspace("task").unwrap()["title"],
+            "Fix login"
+        );
+        assert_ne!(state.cloud_sidebar_workspaces_revision(), revision);
+        assert!(!state.cloud_sidebar_archive_pending("task"));
+        assert!(!state.fail_cloud_sidebar_archive("task"));
     }
     #[test]
     fn denial_and_account_org_or_api_changes_do_not_resurrect_saved_catalog() {

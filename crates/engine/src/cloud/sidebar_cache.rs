@@ -1,5 +1,8 @@
 //! Read-only catalog snapshots, never compute authority or agent credentials.
 use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 const PROJECTS: &str = zuse_protocol::methods::CLOUD_PROJECTS;
 const LIST: &str = zuse_protocol::methods::CLOUD_WORKSPACES;
 pub(super) fn supports(method: &str) -> bool {
@@ -10,7 +13,49 @@ fn namespace(origin: &str, account: &str, organization: Option<&str>, method: &s
         &serde_json::to_vec(&(origin, account, organization, method)).unwrap(),
     )
 }
+/// How long a task archived here stays out of saved lists. A list read that
+/// started before the server recorded the archive can land afterwards; it
+/// must not put the row back on disk, where a restart would show it again.
+const ARCHIVED_HOLD: Duration = Duration::from_secs(10 * 60);
+static ARCHIVED: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+fn recently_archived(workspace: &str) -> bool {
+    let mut archived = ARCHIVED.lock().unwrap_or_else(|e| e.into_inner());
+    archived.retain(|_, at| at.elapsed() < ARCHIVED_HOLD);
+    archived.contains_key(workspace)
+}
+/// A task was archived: drop it from the saved list now and keep it out of
+/// lists saved over the next few minutes.
+pub(super) fn archived(origin: &str, account: &str, organization: Option<&str>, workspace: &str) {
+    ARCHIVED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(workspace.to_owned(), Instant::now());
+    let key = namespace(origin, account, organization, LIST);
+    if let Some(saved) = zuse_cloud_projection::protected_metadata::read(&key) {
+        zuse_cloud_projection::protected_metadata::write(
+            &key,
+            &without_workspace(saved, workspace),
+        );
+    }
+}
+/// A task came back from the archive; saved lists may list it again.
+pub(super) fn unarchived(workspace: &str) {
+    ARCHIVED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(workspace);
+}
+fn without_workspace(mut saved: Value, workspace: &str) -> Value {
+    if let Some(rows) = saved["workspaces"].as_array_mut() {
+        rows.retain(|row| row["workspaceId"].as_str() != Some(workspace));
+    }
+    saved
+}
 fn snapshot(method: &str, value: &Value) -> Value {
+    snapshot_without(method, value, &recently_archived)
+}
+fn snapshot_without(method: &str, value: &Value, hidden: &dyn Fn(&str) -> bool) -> Value {
     let (rows, fields): (&Value, &[&str]) = if method == PROJECTS {
         (
             &value["data"]["projects"],
@@ -56,6 +101,9 @@ fn snapshot(method: &str, value: &Value) -> Value {
     let mut saved = vec![];
     let mut partial = false;
     for row in rows.as_array().into_iter().flatten() {
+        if method == LIST && row["workspaceId"].as_str().is_some_and(hidden) {
+            continue;
+        }
         let mut clean = serde_json::Map::new();
         for key in fields {
             if let Some(value) = row.get(*key) {
@@ -144,5 +192,36 @@ mod tests {
         assert_eq!(v["workspaces"][0]["agent"], "codex");
         assert!(!v.to_string().contains("private text"));
         assert!(!v.to_string().contains("connection-secret"));
+    }
+    #[test]
+    fn archived_tasks_leave_the_saved_list_and_stale_lists_cannot_save_them_again() {
+        let saved = snapshot(
+            LIST,
+            &json!({"workspaces":[{"workspaceId":"kept","state":"paused"},{"workspaceId":"gone","state":"paused"}]}),
+        );
+        // Archiving rewrites the saved list without the task, so a restart
+        // paints only the rows that are still listed.
+        let saved = without_workspace(saved, "gone");
+        assert_eq!(saved["workspaces"].as_array().unwrap().len(), 1);
+        assert_eq!(saved["workspaces"][0]["workspaceId"], "kept");
+        // A list read before the server recorded the archive still lists the
+        // task as paused; it is not saved back.
+        let stale = snapshot_without(
+            LIST,
+            &json!({"workspaces":[{"workspaceId":"kept","state":"paused"},{"workspaceId":"gone","state":"paused"}]}),
+            &|id| id == "gone",
+        );
+        assert_eq!(stale["workspaces"].as_array().unwrap().len(), 1);
+        assert_eq!(stale["workspaces"][0]["workspaceId"], "kept");
+    }
+    #[test]
+    fn unarchived_tasks_are_saved_again() {
+        ARCHIVED
+            .lock()
+            .unwrap()
+            .insert("restored-task".into(), Instant::now());
+        assert!(recently_archived("restored-task"));
+        unarchived("restored-task");
+        assert!(!recently_archived("restored-task"));
     }
 }
