@@ -287,7 +287,15 @@ impl RpcService for DeferredEngineRpc {
             && params["attachmentTransfers"]
                 .as_array()
                 .is_some_and(|files| !files.is_empty());
+        // The early AuthRpc only knows the workspace session. Once the engine is
+        // assembled, its AuthRpc also carries the signed-in account, which cloud
+        // calls need when workspace sync is off.
         if AuthRpc::handles(method) && !launch_files {
+            if matches!(*self.state.borrow(), DeferredEngineState::Ready)
+                && let Some(service) = self.service.get()
+            {
+                return service.handle(method, params).await;
+            }
             return self.auth.handle(method, params).await;
         }
 
@@ -5259,6 +5267,57 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn ready_engine_answers_cloud_calls_with_the_signed_in_account() {
+        struct Assembled;
+        #[async_trait]
+        impl RpcService for Assembled {
+            async fn handle(
+                &self,
+                method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, RpcError> {
+                RpcReply::value(&serde_json::json!({ "assembled": method }))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let auth = zuse_engine::auth::Auth::new(zuse_engine::auth::AuthConfig::new(
+            "http://127.0.0.1:1",
+            dir.path().to_path_buf(),
+        ));
+        let (state_tx, state_rx) = tokio::sync::watch::channel(DeferredEngineState::Waiting);
+        let service = Arc::new(tokio::sync::OnceCell::new());
+        let deferred = DeferredEngineRpc {
+            auth: AuthRpc::new(auth),
+            engine_info: EngineInfo {
+                device_id: "owner-device".into(),
+                workspace_scope: WorkspaceScope::Local,
+                cursor_sdk_version: None,
+                capabilities: zuse_protocol::capabilities::current(),
+            },
+            state: state_rx,
+            service: service.clone(),
+        };
+        let early = deferred
+            .handle(methods::CLOUD_PROJECTS, serde_json::json!({}))
+            .await;
+        assert!(
+            early.is_err(),
+            "before assembly only the workspace session answers"
+        );
+
+        let _ = service.set(Arc::new(Assembled) as Arc<dyn RpcService>);
+        state_tx.send_replace(DeferredEngineState::Ready);
+        let RpcReply::Value(value) = deferred
+            .handle(methods::CLOUD_PROJECTS, serde_json::json!({}))
+            .await
+            .unwrap()
+        else {
+            panic!("expected a value");
+        };
+        assert_eq!(value["assembled"], methods::CLOUD_PROJECTS);
     }
 
     #[tokio::test]
