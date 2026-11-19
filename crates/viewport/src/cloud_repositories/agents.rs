@@ -1,6 +1,7 @@
 //! Connection setup shared by native and web. Secrets are cleared after submission.
 use super::agent_login_binding::Binding;
 use super::*;
+use crate::cloud_settings::kit::{self, Tone};
 use zuse_protocol::{cloud_computers::AgentId, cloud_connections::*};
 
 pub(super) struct AgentView {
@@ -752,26 +753,49 @@ impl RepositoryPanel {
                 })
                 .unwrap_or_else(|| "Connect your account or API key".into());
             let expected_owner = self.owner.clone();
-            body = body.child(cs::setting_row(
+            // Unconnected agents say so in their description; a pill only
+            // marks a connection that exists.
+            let pill = connection.map(|c| match c.state {
+                ConnectionState::Connected => kit::pill("Connected", Tone::Ready),
+                ConnectionState::Pending => kit::pill("Verifying", Tone::Progress),
+                ConnectionState::ReconnectRequired => kit::pill("Reconnect", Tone::Attention),
+                ConnectionState::Error => kit::pill("Failed", Tone::Error),
+                ConnectionState::Revoked => kit::pill("Disconnected", Tone::Neutral),
+            });
+            let glyph = match agent {
+                AgentId::Claude => "claude-mark",
+                AgentId::Codex => "codex-mark",
+                AgentId::Grok => "grok-mark",
+            };
+            body = body.child(kit::row_item(
                 i == 0,
+                Some(kit::icon_tile(glyph, 28.).into_any_element()),
                 label,
                 description,
                 Some(
-                    cs::button(
-                        SharedString::from(format!("cloud-agent-{}", agent.as_str())),
-                        if connection.is_some() {
-                            "Manage"
-                        } else {
-                            "Connect"
-                        },
-                        false,
-                        busy,
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_agent(agent, expected_owner.clone(), cx)
-                    }))
-                    .into_any_element(),
+                    row()
+                        .items_center()
+                        .gap(px(10.))
+                        .when_some(pill, |v, pill| v.child(pill))
+                        .child(
+                            cs::button(
+                                SharedString::from(format!("cloud-agent-{}", agent.as_str())),
+                                if connection.is_some() {
+                                    "Manage"
+                                } else {
+                                    "Connect"
+                                },
+                                false,
+                                busy,
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    this.open_agent(agent, expected_owner.clone(), cx)
+                                },
+                            )),
+                        )
+                        .into_any_element(),
                 ),
             ));
         }
@@ -1117,9 +1141,9 @@ impl RepositoryPanel {
                     .child(error.clone()),
             );
         }
-        cs::group(
+        kit::section(
             "Coding agents",
-            Some("Connect once, then choose the account for each cloud task."),
+            "Cloud chats sign in with your own subscription or API key. Connect once, then pick the account per chat. Agents on this computer live under Providers & accounts.",
             Some(
                 cs::button("refresh-cloud-agents", "Refresh", false, busy, false)
                     .on_click(cx.listener(|this, _, _, cx| {

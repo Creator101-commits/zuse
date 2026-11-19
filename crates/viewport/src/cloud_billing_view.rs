@@ -513,7 +513,12 @@ fn usage_amount(item: &BillingUsageItem, by_minutes: bool) -> String {
     }
 }
 
-/// Zuse credits: balance, amount picker and purchase. Shared by both layouts.
+/// Machine minutes a credit amount in cents buys at the plan rate.
+fn credit_minutes(cents: i64) -> i64 {
+    zuse_protocol::cloud_billing::plans::credit_machine_minutes(cents.saturating_mul(10_000))
+}
+/// "Buy more minutes": balance, pack picker and purchase, in machine minutes
+/// with the price underneath. Shared by both layouts.
 fn credits_body<T: 'static>(
     data: &Data<'_>,
     focus: &[FocusHandle; 4],
@@ -535,13 +540,7 @@ fn credits_body<T: 'static>(
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child(s::title_text(
-                        if data.credits.is_some_and(|b| b.funding == "shared-credits") {
-                            "Zuse credits".to_owned()
-                        } else {
-                            tr(cx, msg::settings::prepaid_title)
-                        },
-                    ))
+                    .child(s::title_text("Minutes credit".to_owned()))
                     .child(
                         div()
                             .rounded(px(7.))
@@ -553,7 +552,14 @@ fn credits_body<T: 'static>(
                             .text_color(palette::rgb(TEXT))
                             .child(SharedString::from(
                                 data.credits
-                                    .map(|b| format!("{} available", cents(b.credit_cents)))
+                                    .map(|b| {
+                                        format!(
+                                            "about {} machine minutes of credit",
+                                            crate::cloud_settings::kit::thousands(credit_minutes(
+                                                b.credit_cents
+                                            ))
+                                        )
+                                    })
                                     .unwrap_or_else(|| "Balance unavailable".into()),
                             )),
                     ),
@@ -606,7 +612,12 @@ fn credits_body<T: 'static>(
     for (i, amount) in [1000, 2500, 5000, 10000].into_iter().enumerate() {
         let handles = focus.clone();
         let selected = data.credit_amount == amount;
-        let label = cents(amount);
+        let minutes = format!(
+            "{} minutes",
+            crate::cloud_settings::kit::thousands(credit_minutes(amount))
+        );
+        let price = format!("${}", amount / 100);
+        let label = format!("{minutes} · {price}");
         let mut fill = s::frame_bg().opacity(0.5);
         if selected {
             fill = palette::tone(
@@ -622,10 +633,11 @@ fn credits_body<T: 'static>(
                 .aria_selected(selected)
                 .track_focus(&focus[i].clone().tab_stop(enabled && selected))
                 .tab_index(if enabled && selected { 0 } else { -1 })
-                .h(px(28.))
+                .py(px(6.))
                 .px(px(12.))
                 .rounded(px(7.))
                 .flex()
+                .flex_col()
                 .items_center()
                 .justify_center()
                 .bg(fill)
@@ -643,7 +655,14 @@ fn credits_body<T: 'static>(
                     v.cursor_pointer().hover(|v| v.bg(s::frame_bg()))
                 })
                 .focus_visible(|v| v.border_2().border_color(palette::rgb(0x89ca21)))
-                .child(SharedString::from(label))
+                .child(SharedString::from(minutes))
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .line_height(px(14.))
+                        .text_color(palette::rgb(MUTED))
+                        .child(SharedString::from(price)),
+                )
                 .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
                     if !enabled {
                         return;
@@ -691,12 +710,12 @@ fn credits_body<T: 'static>(
                             .text_size(px(12.))
                             .line_height(px(16.))
                             .text_color(palette::rgb(MUTED))
-                            .child(tr(cx, msg::settings::prepaid_amount)),
+                            .child("Minutes pack"),
                     )
                     .child(options),
             )
             .child(
-                button("buy-prepaid-credits", "Buy credits", true, !enabled, busy).on_click(
+                button("buy-prepaid-credits", "Buy minutes", true, !enabled, busy).on_click(
                     cx.listener(move |this, _, window, cx| {
                         if enabled {
                             act(this, Action::BuyCredits, window, cx)

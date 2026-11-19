@@ -3,6 +3,10 @@
 //! Run under Xvfb with `ZUSE_OPEN_ROUTE=settings/<section>`, then capture.
 //! `FIXTURE_PLAN` picks the plan state (cloud, trial, overage, max, hold,
 //! trial-hold, none) and `FIXTURE_THEME=light` the light theme.
+//! `FIXTURE_THEME=light` renders the light theme. `FIXTURE_FRESH=1` answers
+//! as a just-subscribed account: no GitHub, repositories or agent accounts,
+//! and the standard machine. `FIXTURE_ONBOARDING=<step>` opens first-run
+//! onboarding at `welcome`, `repositories`, `setup`, `agents` or `start`.
 use chrono::{Duration, Utc};
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use serde_json::{Value, json};
@@ -336,10 +340,32 @@ fn sessions() -> SessionsPage {
 struct Controller {
     start: i64,
     plan: PlanState,
+    /// A just-subscribed account with nothing set up yet.
+    fresh: bool,
 }
 #[async_trait::async_trait]
 impl RpcService for Controller {
     async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
+        if self.fresh {
+            match method {
+                methods::CLOUD_PROJECTS => return bound(json!({"projects": []})),
+                methods::CLOUD_GITHUB => {
+                    return bound(json!({"configured": true, "canManageInstallations": true,
+                        "user": null, "installations": [], "repositories": []}));
+                }
+                methods::CLOUD_AGENT_CONNECTIONS => {
+                    return bound(json!({"connections": [], "supportsDeviceReconnect": true}));
+                }
+                methods::CLOUD_MACHINE => {
+                    return bound(
+                        json!({"revision": 0, "createdAt": now(), "imageState": "none",
+                        "imageError": null, "recipe": {"version": 1, "setupScript": "", "skills": [],
+                        "instructions": "", "files": [], "setupTimeoutSeconds": 900}}),
+                    );
+                }
+                _ => {}
+            }
+        }
         match method {
             methods::LOCAL_DEVICE => RpcReply::value(
                 &json!({"deviceId":"fixture-local","workspaceScope":"local","capabilities":[]}),
@@ -408,11 +434,8 @@ fn main() {
     let _enter = runtime.enter();
     let plan = PlanState::from_env();
     let start = now() - if plan.trial() { 3 } else { 5 } * DAY - 3 * 3_600_000;
-    let client = zuse_rpc::memory_client(Arc::new(Controller { start, plan }));
-    let mode = match std::env::var("FIXTURE_THEME").as_deref() {
-        Ok("light") => appearance::AppearanceMode::Light,
-        _ => appearance::AppearanceMode::Dark,
-    };
+    let fresh = std::env::var("FIXTURE_FRESH").is_ok();
+    let client = zuse_rpc::memory_client(Arc::new(Controller { start, plan, fresh }));
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().to_path_buf();
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {
@@ -425,6 +448,11 @@ fn main() {
             settings.terminal_font_family.clone(), settings.terminal_font_size,
             settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
         theme_library::init(data.clone(), cx);
+        let mode = if std::env::var("FIXTURE_THEME").as_deref() == Ok("light") {
+            appearance::AppearanceMode::Light
+        } else {
+            appearance::AppearanceMode::Dark
+        };
         appearance::init(mode, settings.theme_selection,
             settings.accent, settings.surface, cx);
         history::init(settings.git_history_columns, settings.git_history_column_widths,
@@ -461,9 +489,18 @@ fn main() {
         cx.activate(true);
         let out = std::env::var("FIXTURE_OUT").ok();
         let compute = std::env::var("FIXTURE_COMPUTE").is_ok();
+        let onboarding = std::env::var("FIXTURE_ONBOARDING").ok();
         cx.spawn(async move |cx| {
             let delay = std::env::var("FIXTURE_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2500);
             cx.background_executor().timer(std::time::Duration::from_millis(delay)).await;
+            if let Some(step) = onboarding {
+                window
+                    .update(cx, |shell, window, cx| {
+                        shell.open_cloud_onboarding(Some(step.as_str()), window, cx)
+                    })
+                    .unwrap();
+                cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            }
             if compute {
                 window.update(cx, |shell, _, cx| shell.fixture_usage_compute(cx)).unwrap();
                 cx.background_executor().timer(std::time::Duration::from_millis(2000)).await;

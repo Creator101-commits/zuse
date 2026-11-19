@@ -1038,7 +1038,7 @@ pub fn billing<T: 'static>(
         .is_some_and(|b| b.available || b.credit_cents > 0 || b.debit_cents > 0)
     {
         root = root.child(group(
-            "Credits",
+            "Buy more minutes",
             None,
             None,
             credits_body(data, focus, cx, act),

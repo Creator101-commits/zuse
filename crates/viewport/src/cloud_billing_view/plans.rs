@@ -351,16 +351,6 @@ pub(super) fn trial_offer<T: 'static>(
             .bg(s::card_bg())
             .child(
                 div()
-                    .absolute()
-                    .right_0()
-                    .top_0()
-                    .bottom_0()
-                    .w(px(112.))
-                    .opacity(0.35)
-                    .child(crate::dither::fill_color(lime(), 0.)),
-            )
-            .child(
-                div()
                     .relative()
                     .flex()
                     .items_center()
@@ -392,11 +382,10 @@ pub(super) fn trial_offer<T: 'static>(
                             .child(s::description_text(TRIAL_COPY)),
                     )
                     .child(
-                        crate::styling::dither_action(
+                        crate::cloud_settings::kit::primary_button(
                             "cloud-plan-trial",
                             "Try for $1",
                             !disabled,
-                            true,
                         )
                         .on_click(cx.listener(
                             move |this, _, window, cx| {

@@ -49,43 +49,6 @@ fn badge_base(warning: bool, outline: bool) -> Div {
 pub(crate) fn badge(label: impl Into<SharedString>, warning: bool, outline: bool) -> Div {
     badge_base(warning, outline).child(div().flex_none().child(label.into()))
 }
-pub(crate) fn badge_with_icon(
-    label: impl Into<SharedString>,
-    glyph: &'static str,
-    window: &Window,
-) -> Div {
-    let label = label.into();
-    let mut font = window.text_style().font();
-    font.weight = FontWeight::MEDIUM;
-    let line = window.text_system().shape_line(
-        label.clone(),
-        px(10.),
-        &[TextRun {
-            len: label.len(),
-            font,
-            color: window.text_style().color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }],
-        None,
-    );
-    // Reserve the shaped label, icon, gap and padding together in both layout hosts.
-    badge_base(false, false)
-        .w(line.width() + px(26.))
-        .whitespace_nowrap()
-        .gap(px(4.))
-        .child(
-            icon(glyph)
-                .size(px(10.))
-                .text_color(palette::tone(
-                    hsla(133.9 / 360., 0.606, 0.488, 1.),
-                    hsla(131.4 / 360., 0.734, 0.31, 1.),
-                ))
-                .opacity(0.8),
-        )
-        .child(div().flex_none().child(label))
-}
 pub(crate) fn group(
     title: &'static str,
     help: Option<&'static str>,
