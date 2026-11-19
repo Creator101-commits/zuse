@@ -39,6 +39,7 @@ pub mod creation_sources;
 pub mod creation_style;
 mod custom_acp;
 pub mod dither;
+pub mod dither_columns;
 mod draft_journal;
 mod environment;
 pub mod git_controls;

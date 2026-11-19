@@ -111,7 +111,8 @@ pub(super) fn card(inputs: Inputs<'_>) -> Card {
                 exact: summary.created.clone(),
             }),
         setup: setup(row),
-        environment: summary.provider.clone().unwrap_or_else(|| "Cloud".into()),
+        // One Cloud option: the infrastructure behind a computer is never shown.
+        environment: "Cloud".into(),
         status: summary.label,
         tone: summary.tone,
         action,
@@ -197,7 +198,6 @@ mod tests {
             tone,
             sleeping: label == "Sleeping",
             repository: Some("zuse".into()),
-            provider: Some("Boxd".into()),
             branch: None,
             created: Some("Nov 14, 9:30 AM".into()),
             size: Some("Large".into()),
@@ -243,7 +243,10 @@ mod tests {
         assert_eq!(created.relative, "3 days ago");
         assert_eq!(created.exact.as_deref(), Some("Nov 14, 9:30 AM"));
         assert_eq!(card.setup, Some(("Setup succeeded", Tone::Running)));
-        assert_eq!(card.environment, "Boxd");
+        assert_eq!(card.environment, "Cloud");
+        assert!(!zuse_protocol::cloud_billing::plans::names_infrastructure(
+            &card.environment
+        ));
         assert_eq!(card.status, "Running");
         assert_eq!(card.action, Some(StatusAction::Restart));
         assert_eq!(card.startup, None);
@@ -258,7 +261,6 @@ mod tests {
     fn rows_without_data_are_omitted() {
         let mut bare = summary("Running", Tone::Running);
         bare.repository = None;
-        bare.provider = None;
         bare.created = None;
         let card = build(&bare, &json!({"state": "ready"}), &json!(null), false);
         assert_eq!(card.repository, None);

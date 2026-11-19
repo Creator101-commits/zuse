@@ -35,7 +35,6 @@ enum Pick {
     Cloud(usize),
     ChooseCloudProject,
     ConfigureCloud,
-    Provider(String),
     Size(String),
     Connection(String),
     AgentSetup,
@@ -52,19 +51,23 @@ impl WorkspaceView {
                 .unwrap_or_else(|| json!({"providers":[]})),
         )
     }
+    /// Plan sizes for new computers; empty from older servers.
+    fn cloud_plan_sizes(&self) -> Vec<zuse_protocol::cloud_billing::plans::SizeOption> {
+        serde_json::from_value(self.cloud.capabilities["computerSizes"].clone()).unwrap_or_default()
+    }
+    /// New computers use the account's default provider (or the first ready
+    /// one); people choose only a size. Provider ids are never shown.
     pub(super) fn reconcile_cloud_computer(&mut self) {
-        if self.cloud.compute_provider.is_none() {
-            self.cloud.compute_provider = self.preferences.cloud_provider.clone();
-            self.cloud.compute_size = self
-                .cloud
-                .compute_provider
-                .as_ref()
-                .and_then(|provider| self.preferences.cloud_sizes.get(provider))
-                .cloned();
-        }
         let Some(rows) = self.cloud.capabilities["providers"].as_array() else {
             return;
         };
+        let wanted = self.cloud.capabilities["defaultProvider"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| self.cloud.compute_provider.clone());
+        if self.cloud.compute_size.is_none() {
+            self.cloud.compute_size = self.preferences.cloud_sizes.get("cloud").cloned();
+        }
         let available = |p: &&Value| {
             p["configured"] == true
                 && p["managedBaseReady"] == true
@@ -74,9 +77,25 @@ impl WorkspaceView {
         let provider = rows
             .iter()
             .filter(available)
-            .find(|p| p["id"].as_str() == self.cloud.compute_provider.as_deref())
+            .find(|p| p["id"].as_str() == wanted.as_deref())
             .or_else(|| rows.iter().filter(available).next());
         self.cloud.compute_provider = provider.and_then(|p| p["id"].as_str()).map(str::to_owned);
+        let plan_sizes = self.cloud_plan_sizes();
+        if !plan_sizes.is_empty() {
+            if !plan_sizes
+                .iter()
+                .any(|s| s.available && Some(&s.id) == self.cloud.compute_size.as_ref())
+            {
+                self.cloud.compute_size = plan_sizes
+                    .iter()
+                    .find(|s| {
+                        s.available && s.id == zuse_protocol::cloud_billing::plans::DEFAULT_SIZE
+                    })
+                    .or_else(|| plan_sizes.iter().find(|s| s.available))
+                    .map(|s| s.id.clone());
+            }
+            return;
+        }
         let sizes = provider.and_then(|p| p["sizes"].as_array());
         if !sizes.is_some_and(|rows| {
             rows.iter()
@@ -88,21 +107,27 @@ impl WorkspaceView {
                 .map(str::to_owned);
         }
     }
-    fn cloud_provider_label(&self, id: &str) -> String {
-        if self.cloud.capabilities["stagingCandidate"]["providerId"] == id {
-            format!("{id} · Internal test")
+    /// "Cloud · Standard · 4 vCPU · 16 GB".
+    fn cloud_computer_label(&self) -> String {
+        let size = self.cloud.compute_size.as_deref().unwrap_or_default();
+        let label = self
+            .cloud_plan_sizes()
+            .into_iter()
+            .find(|s| s.id == size)
+            .map(|s| s.label)
+            .or_else(|| zuse_protocol::cloud_billing::plans::size_label(size).map(str::to_owned))
+            .unwrap_or_else(|| size.to_owned());
+        if label.is_empty() {
+            "Cloud".into()
         } else {
-            id.into()
+            format!("Cloud · {label}")
         }
     }
     fn remember_cloud_computer(&mut self) {
-        if let (Some(provider), Some(size)) =
-            (&self.cloud.compute_provider, &self.cloud.compute_size)
-        {
-            self.preferences.cloud_provider = Some(provider.clone());
+        if let Some(size) = &self.cloud.compute_size {
             self.preferences
                 .cloud_sizes
-                .insert(provider.clone(), size.clone());
+                .insert("cloud".into(), size.clone());
             self.save_preferences();
         }
     }
@@ -166,25 +191,34 @@ impl WorkspaceView {
         cx: &App,
     ) -> Vec<(String, &'static str, Pick, bool, Option<&'static str>)> {
         let mut choices = vec![];
-        if kind == "computer" {
-            if let Some(providers) = self.cloud.capabilities["providers"].as_array() {
-                for provider in providers.iter().filter(|p| {
-                    p["configured"] == true
-                        && p["managedBaseReady"] == true
-                        && p["preservesDisk"] == true
-                }) {
-                    let Some(id) = provider["id"].as_str() else {
-                        continue;
-                    };
-                    choices.push((
-                        self.cloud_provider_label(id),
-                        "cloud-dither",
-                        Pick::Provider(id.into()),
-                        self.cloud.compute_provider.as_deref() == Some(id),
-                        None,
-                    ));
-                }
+        let plan_sizes = self.cloud_plan_sizes();
+        if kind == "computer" && !plan_sizes.is_empty() {
+            for size in plan_sizes {
+                // A size the plan lacks opens Cloud settings, where Billing
+                // offers the upgrade.
+                let (label, pick) = match size.requires_plan.filter(|_| !size.available) {
+                    Some(plan) => (
+                        format!("{} · {}", size.label, plan.plan().name),
+                        Pick::ConfigureCloud,
+                    ),
+                    None => (size.label.clone(), Pick::Size(size.id.clone())),
+                };
+                choices.push((
+                    label,
+                    "monitor",
+                    pick,
+                    self.cloud.compute_size.as_deref() == Some(size.id.as_str()),
+                    None,
+                ));
             }
+            choices.push((
+                "Environment and connections…".into(),
+                "settings",
+                Pick::ConfigureCloud,
+                false,
+                None,
+            ));
+        } else if kind == "computer" {
             if let Some(provider) =
                 self.cloud.capabilities["providers"]
                     .as_array()
@@ -482,16 +516,6 @@ impl WorkspaceView {
                 self.settings = true;
                 self.select_settings_section(crate::settings_view::Section::Cloud, cx);
             }
-            Pick::Provider(id) => {
-                self.cloud.compute_size = self.preferences.cloud_sizes.get(&id).cloned();
-                self.cloud.compute_provider = Some(id);
-                self.reconcile_cloud_computer();
-                if let Some(catalog) = self.cloud_computer_catalog() {
-                    self.receive_cloud_models(catalog, cx);
-                }
-                self.cloud.connection = None;
-                self.remember_cloud_computer();
-            }
             Pick::Size(id) => {
                 self.cloud.compute_size = Some(id);
                 self.remember_cloud_computer();
@@ -732,13 +756,7 @@ impl WorkspaceView {
                 |view| {
                     view.child(self.creation_chip(
                         "computer",
-                        format!(
-                            "{} · {}",
-                            self.cloud_provider_label(
-                                self.cloud.compute_provider.as_deref().unwrap_or("Computer")
-                            ),
-                            self.cloud.compute_size.as_deref().unwrap_or("default")
-                        ),
+                        self.cloud_computer_label(),
                         "monitor",
                         cx,
                     ))

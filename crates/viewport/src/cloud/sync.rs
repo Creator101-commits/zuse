@@ -522,10 +522,6 @@ impl WorkspaceView {
                 ))
                 .child(item("Repository", repo))
                 .child(item(
-                    "Provider",
-                    target["providerId"].as_str().unwrap_or("Cloud").into(),
-                ))
-                .child(item(
                     "Status",
                     target["state"].as_str().unwrap_or("Cloud").into(),
                 ))

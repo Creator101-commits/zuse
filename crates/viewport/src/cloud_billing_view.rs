@@ -8,9 +8,11 @@ use crate::{
 use gpui::{prelude::*, *};
 use serde_json::Value;
 use zuse_i18n::messages as msg;
-use zuse_model::cloud_billing::{cents, usd};
+use zuse_model::cloud_billing::{about_hours, cents, machine_minutes, per_minute, usd};
 mod pages;
+pub mod plans;
 pub use pages::{Machine, billing, compute};
+use zuse_protocol::cloud_billing::plans::PlanCatalog;
 use zuse_protocol::cloud_billing::{
     BillingStatus, BillingSummary, BillingUsageItem, PrepaidBalance,
 };
@@ -19,8 +21,12 @@ use zuse_protocol::cloud_billing::{
 pub enum Action {
     Refresh,
     RefreshCredits,
-    Subscription,
+    /// Check out a cloud plan offer. While subscribed the server answers
+    /// with the portal link that switches plans, or converts a trial.
+    Checkout(&'static str),
     ManageSubscription,
+    /// Show and focus the pay-as-you-go cap editor.
+    RaiseCap,
     SaveCap,
     SelectCredit(i64),
     BuyCredits,
@@ -42,6 +48,8 @@ pub struct Data<'a> {
     pub subscribed: Option<bool>,
     pub pending: Pending,
     pub summary: Option<&'a BillingSummary>,
+    /// Plans from the entitlements read; absent on older servers.
+    pub catalog: Option<&'a PlanCatalog>,
     pub usage: &'a [BillingUsageItem],
     pub credits: Option<&'a PrepaidBalance>,
     pub credit_amount: i64,
@@ -60,6 +68,7 @@ pub fn hosting<T: 'static>(
 ) -> Div {
     let busy = data.pending.subscription;
     let disabled = data.subscribed.is_none() || busy;
+    let data_subscribed = data.subscribed == Some(true);
     let mut controls = div().flex().items_center().gap(px(6.));
     if data.subscribed == Some(true) {
         controls = controls.child(badge("In use", false, false));
@@ -67,7 +76,7 @@ pub fn hosting<T: 'static>(
     let label = if data.subscribed == Some(true) {
         "Manage subscription"
     } else {
-        "Subscribe · $40/month"
+        "Subscribe · from $20/month"
     };
     if data.subscribed.is_none() {
         controls = controls.child(badge(
@@ -97,7 +106,16 @@ pub fn hosting<T: 'static>(
             )
             .on_click(cx.listener(move |this, _, window, cx| {
                 if !disabled {
-                    act(this, Action::Subscription, window, cx)
+                    act(
+                        this,
+                        if data_subscribed {
+                            Action::ManageSubscription
+                        } else {
+                            Action::Checkout(zuse_protocol::cloud_billing::plans::CLOUD_OFFER)
+                        },
+                        window,
+                        cx,
+                    )
                 }
             })),
         );
@@ -143,7 +161,11 @@ pub fn hosting<T: 'static>(
                 .child(error.to_owned()),
         );
     }
-    root.child(group("Hosting",Some("Hosting pays for the machines. Agents and GitHub use your own accounts, connected through Zuse or already signed in on your snapshot."),None,body))
+    root = root.child(group("Hosting",Some("Hosting pays for the machines. Agents and GitHub use your own accounts, connected through Zuse or already signed in on your snapshot."),None,body));
+    if data.subscribed == Some(false) {
+        root = root.child(plans::plans_group(data, cx, act));
+    }
+    root
 }
 
 pub fn usage<T: 'static>(
@@ -169,47 +191,97 @@ pub fn usage<T: 'static>(
             };
             let mut rows = div().flex().flex_col();
             let mut first = true;
-            if percent >= 50 {
+            let by_minutes = summary.plan.as_ref();
+            if let Some(p) = by_minutes {
+                if let Some(banner) =
+                    plans::hold_banner(summary, data.pending.subscription, cx, act)
+                {
+                    rows = rows.child(div().p(px(12.)).child(banner));
+                    first = false;
+                }
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .px(px(12.))
+                        .py(px(12.))
+                        .when(!first, |v| v.border_t_1().border_color(palette::rgb(BORDER)))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(12.))
+                                .child(s::details(plans::plan_title(p), plans::allowance_line(p)))
+                                .when(p.trial, |row| {
+                                    let busy = data.pending.subscription;
+                                    row.child(
+                                        button("cloud-trial-start-plan", "Start Cloud now", true, busy, busy)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                if !busy {
+                                                    act(
+                                                        this,
+                                                        Action::Checkout(
+                                                            zuse_protocol::cloud_billing::plans::CLOUD_OFFER,
+                                                        ),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                }
+                                            })),
+                                    )
+                                }),
+                        )
+                        .child(plans::minutes_block(p, None)),
+                );
+                if let Some(extra) = plans::extra_line(p) {
+                    rows = rows.child(setting_row(false, "Pay as you go", extra, None));
+                }
+                first = false;
+            } else if percent >= 50 {
                 rows=rows.child(setting_row(first,if percent>=100{"Billing hold"}else{"Usage warning"},if percent>=100{"The overage cap is exhausted. New billable operations are blocked and running compute is being paused.".to_owned()}else{format!("You have used {percent}% of this period's overage cap.")},Some(badge(SharedString::from(format!("{percent}%")),true,false).into_any_element())));
                 first = false;
             }
-            rows = rows.child(setting_row(
-                first,
-                SharedString::from(if summary.shared_credits {
-                    format!(
-                        "{} credits remaining",
-                        usd(summary.included_remaining_micros)
-                    )
-                } else {
-                    format!(
-                        "{} of {} included used",
-                        usd(summary.included_used_micros),
-                        usd(summary.included_provider_cost_micros)
-                    )
-                }),
-                SharedString::from(if summary.shared_credits {
-                    format!(
-                        "{} monthly credits · {} subscription before tax",
-                        usd(summary.included_provider_cost_micros),
-                        usd(summary.base_price_micros)
-                    )
-                } else {
-                    format!(
-                        "{} remaining · {} overage · {} invoice estimate before tax",
-                        usd(summary.included_remaining_micros),
-                        usd(summary.overage_charge_micros),
-                        usd(summary.current_invoice_estimate_micros)
-                    )
-                }),
-                None,
-            ));
-            if !summary.shared_credits {
+            if by_minutes.is_none() {
+                rows = rows.child(setting_row(
+                    first,
+                    SharedString::from(if summary.shared_credits {
+                        format!(
+                            "{} credits remaining",
+                            usd(summary.included_remaining_micros)
+                        )
+                    } else {
+                        format!(
+                            "{} of {} included used",
+                            usd(summary.included_used_micros),
+                            usd(summary.included_provider_cost_micros)
+                        )
+                    }),
+                    SharedString::from(if summary.shared_credits {
+                        format!(
+                            "{} monthly credits · {} subscription before tax",
+                            usd(summary.included_provider_cost_micros),
+                            usd(summary.base_price_micros)
+                        )
+                    } else {
+                        format!(
+                            "{} remaining · {} overage · {} invoice estimate before tax",
+                            usd(summary.included_remaining_micros),
+                            usd(summary.overage_charge_micros),
+                            usd(summary.current_invoice_estimate_micros)
+                        )
+                    }),
+                    None,
+                ));
+            }
+            if by_minutes.map_or(!summary.shared_credits, |h| h.pay_as_you_go) {
                 let busy = data.pending.cap;
                 let disabled = data.pending.loading || busy;
                 rows = rows.child(setting_row(
                     false,
-                    "Monthly overage cap",
-                    "Builds and running workspaces pause when this pre-tax limit is reached.",
+                    "Pay-as-you-go cap",
+                    "Monthly limit on usage beyond your plan, before tax. Cloud computers pause when it is reached.",
                     Some(
                         div()
                             .flex()
@@ -241,7 +313,7 @@ pub fn usage<T: 'static>(
                 ));
             }
             let recent = if data.usage.is_empty() {
-                "No completed sandbox runs in this billing period.".to_owned()
+                "No completed cloud computer runs in this billing period.".to_owned()
             } else {
                 data.usage
                     .iter()
@@ -251,7 +323,7 @@ pub fn usage<T: 'static>(
                             "{} {}: {}{}",
                             item.usage_kind.as_deref().unwrap_or(&item.resource_kind),
                             item.resource_id,
-                            usd(item.provider_cost_micros),
+                            usage_amount(item, by_minutes.is_some()),
                             if item.status == "provisional" {
                                 " (provisional)"
                             } else {
@@ -300,9 +372,8 @@ pub fn usage<T: 'static>(
                             item.resource_id
                         )),
                         SharedString::from(format!(
-                            "{} · {} · {}",
-                            usd(item.provider_cost_micros),
-                            item.provider,
+                            "{} · {}",
+                            usage_amount(item, by_minutes.is_some()),
                             item.status
                         )),
                         None,
@@ -324,10 +395,12 @@ pub fn usage<T: 'static>(
             let paused = summary.status == BillingStatus::BillingHold;
             group(
                 "Usage and billing",
-                Some(if summary.shared_credits {
-                    "$40/month includes $40 of shared credits for compute, storage and Zuse-billed models."
+                Some(if by_minutes.is_some() {
+                    "Plans include machine minutes. A 4 vCPU / 16 GB cloud computer uses 4 per awake minute; asleep computers and their storage use none."
+                } else if summary.shared_credits {
+                    "Your plan includes shared credits for compute, storage and Zuse-billed models."
                 } else {
-                    "$40/month includes $35 of sandbox compute and image storage. Additional usage has a 5% markup."
+                    "Your plan includes cloud compute and image storage. Additional usage has a 5% markup."
                 }),
                 Some(
                     badge(if paused { "Paused" } else { "Active" }, paused, false)
@@ -415,6 +488,29 @@ pub fn usage<T: 'static>(
         ));
     }
     root
+}
+
+/// One usage entry: machine minutes (with the hours hint and, for larger
+/// computers, how fast they use them) when the plan counts them, otherwise
+/// its cost.
+fn usage_amount(item: &BillingUsageItem, by_minutes: bool) -> String {
+    match item.machine_minutes.filter(|_| by_minutes) {
+        Some(minutes) => {
+            let rate = item
+                .machine_rate
+                .unwrap_or(zuse_protocol::cloud_billing::plans::DEFAULT_RATE);
+            let mut text = format!(
+                "{} ({})",
+                machine_minutes(minutes),
+                about_hours(minutes, rate)
+            );
+            if rate != zuse_protocol::cloud_billing::plans::DEFAULT_RATE {
+                text = format!("{text} · {}", per_minute(rate));
+            }
+            text
+        }
+        None => usd(item.provider_cost_micros),
+    }
 }
 
 /// Zuse credits: balance, amount picker and purchase. Shared by both layouts.
@@ -614,7 +710,7 @@ fn credits_body<T: 'static>(
             .text_size(px(12.))
             .line_height(px(19.5))
             .text_color(palette::rgb(MUTED))
-            .child(if data.credits.is_some_and(|b|b.funding=="shared-credits") { "Your subscription adds $40 in credits each month. Cloud compute and models billed by Zuse use this balance. Top-ups add to it. Your own agent subscriptions are billed separately.".to_owned() } else { tr(cx, msg::settings::prepaid_description) }),
+            .child(if data.credits.is_some_and(|b|b.funding=="shared-credits") { "Your subscription adds credits each month. Cloud compute and models billed by Zuse use this balance. Top-ups add to it. Your own agent subscriptions are billed separately.".to_owned() } else { tr(cx, msg::settings::prepaid_description) }),
     );
     if data.credits.is_some_and(|b| !b.available) {
         credits = credits.child(

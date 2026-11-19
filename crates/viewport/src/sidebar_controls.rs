@@ -247,7 +247,7 @@ impl SidebarControls {
             self.request(
                 "checkout",
                 methods::CLOUD_BILLING_CHECKOUT,
-                json!({"offerId":"cloud-workspace-standard-v1"}),
+                json!({"offerId": zuse_protocol::cloud_billing::plans::CLOUD_OFFER}),
                 cx,
             );
         } else if self.subscribed == Some(true) || self.plan_error.is_some() {

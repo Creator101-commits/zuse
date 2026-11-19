@@ -315,10 +315,8 @@ impl Shell {
             .or_else(|| metadata["repositoryUrl"].as_str())
             .unwrap_or("Cloud repository")
             .to_owned();
-        let environment = metadata["providerId"]
-            .as_str()
-            .unwrap_or("Cloud")
-            .to_owned();
+        // One Cloud option: the infrastructure behind it is never shown.
+        let environment = "Cloud".to_owned();
         let status = match metadata["state"].as_str() {
             Some("ready") => "Running",
             Some("paused") => "Paused",

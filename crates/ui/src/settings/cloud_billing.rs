@@ -85,7 +85,7 @@ impl CloudView {
             CloudView::Compute => ("Usage", ""),
             CloudView::Billing => (
                 "Billing",
-                "Your Cloud plan, what's left this cycle, credits and payment.",
+                "Your Cloud plan, the machine minutes left this cycle, and invoices.",
             ),
         }
     }
@@ -113,6 +113,7 @@ pub struct CloudBillingPage {
     portal_task: Option<Task<()>>,
     subscription_task: Option<Task<()>>,
     subscribed: Option<bool>,
+    catalog: Option<zuse_protocol::cloud_billing::plans::PlanCatalog>,
     credits: Option<zuse_protocol::cloud_billing::PrepaidBalance>,
     credit_task: Option<Task<()>>,
     credit_amount: i64,
@@ -129,7 +130,7 @@ pub struct CloudBillingPage {
     workspace_task: Option<Task<()>>,
     cap_request: Option<(i64, String)>,
     credit_request: Option<(i64, String)>,
-    checkout_request: Option<String>,
+    checkout_request: Option<(&'static str, String)>,
     /// The account feed subscription for `events_owner`. Billing and machine
     /// image views refetch on its hints instead of polling.
     events: Option<Task<()>>,
@@ -308,6 +309,7 @@ impl CloudBillingPage {
             portal_task: None,
             subscription_task: None,
             subscribed: None,
+            catalog: None,
             credits: None,
             credit_task: None,
             credit_amount: 2500,
@@ -618,6 +620,8 @@ impl CloudBillingPage {
                             &value["data"],
                             chrono::Utc::now().timestamp_millis(),
                         );
+                        this.catalog =
+                            serde_json::from_value(value["data"]["catalog"].clone()).ok();
                         if this.subscribed == Some(false)
                             && this.error.as_deref()
                                 == Some("An active cloud billing period is required.")
@@ -639,7 +643,10 @@ impl CloudBillingPage {
             });
         }));
     }
-    fn billing_link(&mut self, force_portal: bool, cx: &mut Context<Self>) {
+    /// Opens the billing portal (`offer: None`) or checks out a plan offer.
+    /// While subscribed, checkout answers with the portal link that switches
+    /// plans, or converts a trial to Cloud with nothing to open.
+    pub(crate) fn billing_link(&mut self, offer: Option<&'static str>, cx: &mut Context<Self>) {
         if self.portal_task.is_some() {
             return;
         }
@@ -649,23 +656,16 @@ impl CloudBillingPage {
         let Some(engine) = self.state.read(cx).engine().map(|e| e.controller()) else {
             return;
         };
-        let subscribed = if force_portal {
-            true
-        } else if let Some(value) = self.subscribed {
-            value
-        } else {
-            return;
-        };
+        let subscribed = offer.is_none();
         self.error = None;
-        let checkout_key = if subscribed {
-            None
-        } else {
-            Some(
-                self.checkout_request
-                    .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
-                    .clone(),
-            )
-        };
+        let checkout_key = offer.map(|offer| match &self.checkout_request {
+            Some((pending, key)) if *pending == offer => key.clone(),
+            _ => {
+                let key = uuid::Uuid::new_v4().to_string();
+                self.checkout_request = Some((offer, key.clone()));
+                key
+            }
+        });
         let expected = owner.clone();
         let job = gpui_tokio::Tokio::spawn(cx, async move {
             engine
@@ -681,7 +681,7 @@ impl CloudBillingPage {
                         if subscribed {
                             json!({})
                         } else {
-                            json!({"offerId":"cloud-workspace-standard-v1","idempotencyKey":checkout_key})
+                            json!({"offerId":offer,"idempotencyKey":checkout_key})
                         },
                     ),
                 )
@@ -695,6 +695,13 @@ impl CloudBillingPage {
                 }
                 this.portal_task = None;
                 match result {
+                    Ok(Ok(value))
+                        if bound(&value, &owner) && value["data"]["trialConverted"] == true =>
+                    {
+                        this.checkout_request = None;
+                        this.notice = Some("Cloud started. Your trial has ended.".into());
+                        this.load(false, cx);
+                    }
                     Ok(Ok(value)) if bound(&value, &owner) => {
                         if let Some(url) = value["data"][if subscribed {
                             "portalUrl"
@@ -892,6 +899,7 @@ impl Render for CloudBillingPage {
             self.portal_task = None;
             self.subscription_task = None;
             self.subscribed = None;
+            self.catalog = None;
             self.credits = None;
             self.credit_task = None;
             self.credit_amount = 2500;
@@ -999,6 +1007,7 @@ impl Render for CloudBillingPage {
                 cap: busy && self.cap_request.is_some(),
             },
             summary: self.summary.as_ref(),
+            catalog: self.catalog.as_ref(),
             usage: &self.items,
             credits: self.credits.as_ref(),
             credit_amount: self.credit_amount,
@@ -1013,8 +1022,14 @@ impl Render for CloudBillingPage {
             match action {
                 view::Action::Refresh => this.load(false, cx),
                 view::Action::RefreshCredits => this.load_credits(false, cx),
-                view::Action::Subscription => this.billing_link(false, cx),
-                view::Action::ManageSubscription => this.billing_link(true, cx),
+                view::Action::Checkout(offer) => this.billing_link(Some(offer), cx),
+                view::Action::ManageSubscription => this.billing_link(None, cx),
+                view::Action::RaiseCap => {
+                    if this.view != CloudView::Billing {
+                        cx.emit(Navigate::Cloud(CloudView::Billing));
+                    }
+                    this.cap.update(cx, |input, cx| input.focus(cx));
+                }
                 view::Action::SaveCap => this.save(cx),
                 view::Action::SelectCredit(amount) => this.credit_amount = amount,
                 view::Action::BuyCredits => this.load_credits(true, cx),

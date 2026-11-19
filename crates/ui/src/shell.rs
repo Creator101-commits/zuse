@@ -157,6 +157,7 @@ actions!(
         OpenSettings,
         OpenDevices,
         OpenCloudSettings,
+        OpenBilling,
         NextSession,
         PrevSession,
         ArchiveSession
@@ -15983,6 +15984,9 @@ impl Render for Shell {
             }))
             .on_action(cx.listener(|this, _: &OpenCloudSettings, _, cx| {
                 this.open_settings(SettingsSection::Cloud, cx)
+            }))
+            .on_action(cx.listener(|this, _: &OpenBilling, _, cx| {
+                this.open_settings(SettingsSection::Billing, cx)
             }))
             .on_action(cx.listener(|this, command: &DesktopCommand, window, cx| {
                 this.desktop_command(command.0, window, cx);

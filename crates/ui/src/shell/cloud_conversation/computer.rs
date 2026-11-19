@@ -85,7 +85,6 @@ pub(in crate::shell) struct ComputerSummary {
     pub tone: Tone,
     pub sleeping: bool,
     pub repository: Option<String>,
-    pub provider: Option<String>,
     pub branch: Option<String>,
     pub created: Option<String>,
     pub size: Option<String>,
@@ -353,7 +352,7 @@ fn issue_code(code: &str) -> Option<(&'static str, &'static str)> {
     match code {
         "cloud_retained_machine_missing" => Some((
             "This computer no longer exists",
-            "Its provider no longer has this computer, so it can't wake. Recreate it from this menu, or start a new chat. This conversation is saved.",
+            "This computer no longer exists in Cloud, so it can't wake. Recreate it from this menu, or start a new chat. This conversation is saved.",
         )),
         "repository_preparation_failed"
         | "github_repository_access_denied"
@@ -793,30 +792,20 @@ impl CloudConversation {
                         .to_owned()
                 })
             });
-        let provider = row["providerId"].as_str().map(|id| match id {
-            "boxd" => "Boxd".to_owned(),
-            "e2b" => "E2B".to_owned(),
-            "daytona" => "Daytona".to_owned(),
-            other => {
-                let mut chars = other.chars();
-                chars
-                    .next()
-                    .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                    .unwrap_or_default()
-            }
-        });
         ComputerSummary {
             label,
             tone,
             sleeping: state == "paused",
             repository,
-            provider,
             branch: self.branch_label(),
             size: row["computerSizeId"]
                 .as_str()
                 .or_else(|| self.config["sizeId"].as_str())
                 .filter(|size| !size.is_empty())
                 .map(|size| {
+                    if let Some(label) = zuse_protocol::cloud_billing::plans::size_label(size) {
+                        return label.to_owned();
+                    }
                     let mut chars = size.chars();
                     chars
                         .next()

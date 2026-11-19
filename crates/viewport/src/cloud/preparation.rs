@@ -332,7 +332,7 @@ pub(crate) fn issue(code: &str) -> Option<Issue> {
         "cloud_retained_machine_missing" => (
             "Computer starting",
             "This computer no longer exists",
-            "Its provider no longer has this computer, so it can't wake. Recreate it from the computer menu, or start a new chat. This conversation is saved.",
+            "This computer no longer exists in Cloud, so it can't wake. Recreate it from the computer menu, or start a new chat. This conversation is saved.",
             Recovery::Operator,
         ),
         "staging_candidate_computer_limit" => (
