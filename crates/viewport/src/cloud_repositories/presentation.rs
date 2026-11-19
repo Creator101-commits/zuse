@@ -1,33 +1,46 @@
 //! Cloud Setup catalog presentation. Mutations remain owned by RepositoryPanel.
 use super::*;
 use crate::cloud_settings::kit;
-use crate::localization::message as tr;
 use crate::tooltip::TooltipExt as _;
-use zuse_i18n::messages as msg;
 pub(super) fn avatar(name: &str, url: Option<&str>, size: f32) -> AnyElement {
     let owner = name.split('/').next().unwrap_or(name);
-    let fallback = owner.chars().take(2).collect::<String>().to_uppercase();
+    let letters = if size < 22. { 1 } else { 2 };
+    let fallback = owner
+        .chars()
+        .take(letters)
+        .collect::<String>()
+        .to_uppercase();
     let frame = div()
         .size(px(size))
         .flex_none()
-        .rounded(px(7.))
+        .rounded_full()
         .overflow_hidden()
         .bg(s::frame_bg())
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(9.))
-        .text_color(palette::rgb(TEXT));
-    if let Some(url) = url {
-        frame
+        .text_size(px((size * 0.45).round().max(9.)))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(palette::rgb(MUTED));
+    match url {
+        // An image that can't load keeps the initials tile.
+        Some(url) => frame
             .child(
                 img(SharedString::from(url.to_owned()))
                     .size_full()
-                    .object_fit(ObjectFit::Cover),
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(move || {
+                        div()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(fallback.clone())
+                            .into_any_element()
+                    }),
             )
-            .into_any_element()
-    } else {
-        frame.child(fallback).into_any_element()
+            .into_any_element(),
+        None => frame.child(fallback).into_any_element(),
     }
 }
 /// "18h ago", "3w ago", "4y ago" for a GitHub ISO timestamp.
@@ -86,18 +99,10 @@ impl RepositoryPanel {
             .as_ref()
             .is_some_and(|g| g.installations.iter().any(|i| !i.suspended))
     }
-    /// GitHub's page for changing which repositories the app can see.
-    fn github_manage_url(&self) -> Option<String> {
-        let install = self
-            .github
-            .as_ref()?
-            .installations
-            .iter()
-            .find(|i| !i.suspended)?;
-        Some(installation_url(install))
-    }
     /// A "…" button that opens a small menu of `items` below it. One menu is
-    /// open at a time; clicking elsewhere closes it.
+    /// open at a time; clicking elsewhere closes it. Opened from the
+    /// keyboard, its first item takes focus; arrows move, Enter or Space
+    /// chooses, Esc closes back to the button.
     pub(super) fn overflow_menu(
         &self,
         id: SharedString,
@@ -108,499 +113,61 @@ impl RepositoryPanel {
     ) -> AnyElement {
         let open = self.overflow.as_ref() == Some(&id);
         let toggle = id.clone();
+        let count = items.len().min(self.menu_focus.len());
         let mut trigger = div().relative().child(
-            cs::icon_button(id.clone(), "more-horizontal", label, disabled, false).on_click(
-                cx.listener(move |this, _, _, cx| {
+            cs::icon_button(id.clone(), "more-horizontal", label, disabled, false)
+                .when(open, |b| b.track_focus(&self.menu_trigger))
+                .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
                     this.overflow = if this.overflow.as_ref() == Some(&toggle) {
                         None
                     } else {
                         Some(toggle.clone())
                     };
+                    if this.overflow.is_some() && e.is_keyboard() && count > 0 {
+                        window.focus(&this.menu_focus[0], cx);
+                    }
                     cx.notify();
-                }),
-            ),
+                })),
         );
         if open && !disabled {
+            let handles: Vec<FocusHandle> = self.menu_focus[..count].to_vec();
             let mut menu = kit::menu_surface()
                 .id(SharedString::from(format!("{id}-menu")))
                 .role(Role::Menu)
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.overflow = None;
                     cx.notify();
-                }));
-            for item in items {
-                let run = item.run.clone();
-                menu = menu.child(
-                    kit::menu_item(item.id, item.glyph, item.label, item.danger).on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.overflow = None;
-                            run(this, window, cx);
-                            cx.notify();
-                        }),
-                    ),
-                );
-            }
-            trigger = trigger.child(
-                div()
-                    .absolute()
-                    .right(px(0.))
-                    .top(relative(1.))
-                    .child(deferred(
-                        anchored()
-                            .anchor(Anchor::TopRight)
-                            .offset(point(px(0.), px(4.)))
-                            .snap_to_window_with_margin(px(8.))
-                            .child(menu),
-                    )),
-            );
-        }
-        trigger.into_any_element()
-    }
-    fn picker_link(
-        id: &'static str,
-        glyph: &'static str,
-        label: &'static str,
-        handle: &FocusHandle,
-        enabled: bool,
-    ) -> Stateful<Div> {
-        div()
-            .id(id)
-            .role(Role::Button)
-            .aria_label(label)
-            .track_focus(&handle.clone().tab_stop(enabled))
-            .tab_index(0)
-            .h(px(30.))
-            .px(px(8.))
-            .rounded(px(7.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .text_size(px(12.))
-            .text_color(palette::rgb(TEXT))
-            .when(!enabled, |v| v.opacity(0.5))
-            .when(enabled, |v| {
-                v.cursor_pointer().hover(|v| v.bg(s::frame_bg()))
-            })
-            .focus_visible(|v| v.border_1().border_color(palette::rgb(0x89ca21)))
-            .child(icon(glyph).size(px(14.)).text_color(palette::rgb(MUTED)))
-            .child(div().flex_1().min_w_0().truncate().child(label))
-            .child(
-                icon("arrow-up-right")
-                    .size(px(12.))
-                    .text_color(palette::rgb(MUTED)),
-            )
-    }
-    fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.picker = false;
-        window.focus(&self.picker_trigger, cx);
-        cx.notify();
-    }
-    fn picker_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.repository_busy() || !self.can_manage() || !self.github_connected() {
-            return;
-        }
-        self.picker = !self.picker;
-        self.selected.clear();
-        self.error = None;
-        if self.picker {
-            self.refresh(cx);
-            window.focus(&self.search.focus_handle(cx), cx);
-        } else {
-            window.focus(&self.picker_trigger, cx);
-        }
-        cx.notify();
-    }
-    fn available_repositories(&self, cx: &App) -> (usize, Vec<GithubRepository>) {
-        let included = self
-            .projects
-            .iter()
-            .map(|p| {
-                p.repository_identity
-                    .trim_start_matches("github.com/")
-                    .to_lowercase()
-            })
-            .collect::<BTreeSet<_>>();
-        let search = self.search.read(cx).value(cx).trim().to_lowercase();
-        let available = self
-            .github
-            .as_ref()
-            .map(|g| {
-                g.repositories
-                    .iter()
-                    .filter(|r| !included.contains(&r.name_with_owner.to_lowercase()))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let count = available.len();
-        // Installations keep their GitHub order; newest pushes first within one.
-        let order = |name: &str| {
-            self.github
-                .as_ref()
-                .and_then(|g| {
-                    g.installations
-                        .iter()
-                        .position(|i| i.account_login.eq_ignore_ascii_case(owner_of(name)))
-                })
-                .unwrap_or(usize::MAX)
-        };
-        let mut available = available;
-        available.sort_by(|a, b| {
-            order(&a.name_with_owner)
-                .cmp(&order(&b.name_with_owner))
-                .then_with(|| {
-                    owner_of(&a.name_with_owner)
-                        .to_lowercase()
-                        .cmp(&owner_of(&b.name_with_owner).to_lowercase())
-                })
-                .then_with(|| b.updated_at.cmp(&a.updated_at))
-        });
-        (
-            count,
-            available
-                .into_iter()
-                .filter(|r| {
-                    search.is_empty()
-                        || r.name_with_owner.to_lowercase().contains(&search)
-                        || r.description
-                            .as_deref()
-                            .unwrap_or("")
-                            .to_lowercase()
-                            .contains(&search)
-                })
-                .collect(),
-        )
-    }
-    fn add_action(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let busy = self.repository_busy();
-        let disabled = busy || !self.github_connected() || !self.can_manage();
-        let empty = self.projects.is_empty();
-        let mut trigger = div().relative().child(
-            kit::primary_button(
-                "add-cloud-repositories",
-                if empty {
-                    "Add your first repository"
-                } else {
-                    "Add repository"
-                },
-                !disabled,
-            )
-            .track_focus(&self.picker_trigger.clone().tab_stop(!disabled))
-            .when(!disabled, |b| {
-                b.on_click(cx.listener(|this, _, window, cx| this.picker_action(window, cx)))
-            }),
-        );
-        if self.picker {
-            let (available, repos) = self.available_repositories(cx);
-            let empty_matches = repos.is_empty();
-            let mut focus = vec![self.search.focus_handle(cx)];
-            if !busy {
-                focus.push(self.picker_refresh.clone());
-            }
-            let mut choices = column()
-                .id("cloud-repository-choices")
-                .max_h(px(336.))
-                .overflow_y_scroll()
-                .p(px(4.))
-                .rounded(px(7.))
-                .bg(s::frame_bg().opacity(0.3));
-            let mut owner: Option<String> = None;
-            for repo in repos {
-                let name = repo.name_with_owner.clone();
-                let repo_owner = owner_of(&name).to_owned();
-                if owner.as_deref() != Some(repo_owner.as_str()) {
-                    choices = choices.child(
-                        div()
-                            .px(px(8.))
-                            .pt(px(if owner.is_none() { 4. } else { 10. }))
-                            .pb(px(4.))
-                            .text_size(px(10.))
-                            .line_height(px(13.5))
-                            .text_color(palette::rgb(MUTED))
-                            .child(repo_owner.clone()),
-                    );
-                    owner = Some(repo_owner);
-                }
-                let updated = ago(&repo.updated_at);
-                let selected = self.selected.contains(&name);
-                let handle = self
-                    .choice_focus
-                    .entry(name.clone())
-                    .or_insert_with(|| cx.focus_handle())
-                    .clone();
-                focus.push(handle.clone());
-                choices = choices.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "cloud-repository-choice-{name}"
-                        )))
-                        .role(Role::Button)
-                        .aria_label(SharedString::from(name.clone()))
-                        .aria_selected(selected)
-                        .track_focus(&handle.clone().tab_stop(true))
-                        .tab_index(0)
-                        .h(px(32.))
-                        .px(px(8.))
-                        .rounded(px(7.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .cursor_pointer()
-                        .hover(|v| v.bg(s::frame_bg()))
-                        .when(selected, |v| v.bg(s::frame_bg().opacity(0.6)))
-                        .focus_visible(|v| v.border_1().border_color(palette::rgb(0x89ca21)))
-                        .child(avatar(&name, repo.owner_avatar_url.as_deref(), 20.))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(12.))
-                                .text_color(palette::rgb(TEXT))
-                                .child(name.clone()),
-                        )
-                        .when(repo.is_private, |v| {
-                            v.child(
-                                icon("access-ask")
-                                    .size(px(12.))
-                                    .text_color(palette::rgb(MUTED)),
-                            )
-                        })
-                        .when_some(updated, |v, updated| {
-                            v.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(11.))
-                                    .text_color(palette::rgb(MUTED))
-                                    .child(updated),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex_none()
-                                .size(px(14.))
-                                .rounded(px(4.))
-                                .border_1()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .when(!selected, |v| v.border_color(palette::rgb(BORDER)))
-                                .when(selected, |v| {
-                                    let lime = palette::tone(
-                                        hsla(83. / 360., 0.72, 0.46, 1.),
-                                        hsla(83. / 360., 0.74, 0.43, 1.),
-                                    );
-                                    v.border_color(lime)
-                                        .bg(lime.opacity(0.18))
-                                        .child(icon("check").size(px(10.)).text_color(lime))
-                                }),
-                        )
-                        .on_key_down(|e: &KeyDownEvent, _, cx| {
-                            if matches!(e.keystroke.key.as_str(), "space" | "enter") {
-                                cx.stop_propagation();
-                            }
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if !this.selected.remove(&name) {
-                                this.selected.insert(name.clone());
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
-            if empty_matches {
-                choices = choices.child(
-                    div()
-                        .px(px(8.))
-                        .py(px(20.))
-                        .text_center()
-                        .text_size(px(11.))
-                        .line_height(px(16.))
-                        .text_color(palette::rgb(MUTED))
-                        .child(if available == 0 {
-                            crate::localization::text("settings-cloud_workspace_repositories_every_available_repository_is_already_included", cx)
-                        } else {
-                            crate::localization::text("settings-cloud_workspace_repositories_no_repositories_match_this_search", cx)
-                        }),
-                );
-            }
-            let manage_url = self.github_manage_url();
-            let can_install = !busy && self.can_manage();
-            if manage_url.is_some() {
-                focus.push(self.picker_manage.clone());
-            }
-            if can_install {
-                focus.push(self.picker_install.clone());
-            }
-            let github_links = column()
-                .px(px(4.))
-                .child(
-                    div()
-                        .px(px(8.))
-                        .pb(px(4.))
-                        .text_size(px(10.))
-                        .line_height(px(13.5))
-                        .text_color(palette::rgb(MUTED))
-                        .child("Don't see a repository?"),
-                )
-                .child(
-                    Self::picker_link(
-                        "cloud-picker-manage-access",
-                        "site-github",
-                        "Manage repository access on GitHub",
-                        &self.picker_manage,
-                        manage_url.is_some(),
-                    )
-                    .on_click(move |_, _, cx| {
-                        if let Some(url) = &manage_url {
-                            cx.open_url(url);
-                        }
-                    }),
-                )
-                .child(
-                    Self::picker_link(
-                        "cloud-picker-install-account",
-                        "plus",
-                        "Install on another GitHub account",
-                        &self.picker_install,
-                        can_install,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if !this.repository_busy() && this.can_manage() {
-                            this.call(
-                                "github-install",
-                                methods::CLOUD_GITHUB_INSTALL,
-                                json!({}),
-                                cx,
-                            );
-                        }
-                    })),
-                );
-            let count = self.selected.len();
-            let can_add = count > 0 && !busy && self.can_manage();
-            if can_add {
-                focus.push(self.picker_add.clone());
-            }
-            let menu = column()
-                .id("cloud-repository-picker")
-                .role(Role::Dialog)
-                .aria_label(tr(cx, msg::projects::masters_guide_repositories_title))
-                .key_context("CloudRepositoryPicker")
-                .on_action(cx.listener(|this, _: &CloseRepositoryPicker, window, cx| {
-                    this.close_picker(window, cx);
-                    cx.stop_propagation();
                 }))
-                .track_focus(&self.picker_focus)
-                .w(px(
-                    544_f32.min(f32::from(window.viewport_size().width) - 16.)
-                ))
-                .p(px(8.))
-                .gap(px(8.))
-                .rounded(px(10.))
-                .bg(palette::tone(hsla(132. / 360., 0.05, 0.105, 1.), white()))
-                .border_1()
-                .border_color(s::card_border())
-                .shadow_lg()
-                .occlude()
                 .capture_key_down(cx.listener(move |this, e: &KeyDownEvent, window, cx| {
+                    let at = handles.iter().position(|h| h.is_focused(window));
+                    let step = |delta: usize| at.map_or(0, |i| (i + delta) % handles.len().max(1));
                     match e.keystroke.key.as_str() {
                         "escape" => {
-                            this.close_picker(window, cx);
-                            cx.stop_propagation();
+                            this.overflow = None;
+                            window.focus(&this.menu_trigger, cx);
                         }
-                        "tab" => {
-                            let current =
-                                focus.iter().position(|f| f.is_focused(window)).unwrap_or(0);
-                            let next = if e.keystroke.modifiers.shift {
-                                (current + focus.len() - 1) % focus.len()
-                            } else {
-                                (current + 1) % focus.len()
-                            };
-                            window.focus(&focus[next], cx);
-                            cx.stop_propagation();
+                        "down" if !handles.is_empty() => window.focus(&handles[step(1)], cx),
+                        "up" if !handles.is_empty() => {
+                            window.focus(&handles[step(handles.len() - 1)], cx)
                         }
-                        _ => {}
+                        _ => return,
                     }
-                }))
-                .on_mouse_down_out(cx.listener(|this, _, window, cx| this.close_picker(window, cx)))
-                .child(
-                    row()
-                        .gap(px(8.))
-                        .child(s::field().h(px(28.)).flex_1().child(self.search.clone()))
-                        .child(
-                            cs::icon_button(
-                                "refresh-repository-picker",
-                                "refresh",
-                                "Refresh GitHub repositories",
-                                busy,
-                                busy,
-                            )
-                            .track_focus(&self.picker_refresh.clone().tab_stop(!busy))
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-                        ),
-                )
-                .child(choices)
-                .child(github_links)
-                .child(
-                    row()
-                        .h(px(28.))
-                        .px(px(4.))
-                        .justify_between()
-                        .gap(px(12.))
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(palette::rgb(MUTED))
-                                .child(if count == 0 {
-                                    format!("{available} available")
-                                } else {
-                                    format!("{count} selected")
-                                }),
-                        )
-                        .child(
-                            cs::button(
-                                "connect-selected-repositories",
-                                if count == 0 {
-                                    "Add".to_owned()
-                                } else {
-                                    format!("Add {count}")
-                                },
-                                true,
-                                !can_add,
-                                false,
-                            )
-                            .track_focus(&self.picker_add.clone().tab_stop(can_add))
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    if this.repository_busy()
-                                        || this.selected.is_empty()
-                                        || !this.can_manage()
-                                    {
-                                        return;
-                                    }
-                                    this.queue = this
-                                        .github
-                                        .as_ref()
-                                        .map(|g| {
-                                            g.repositories
-                                                .iter()
-                                                .filter(|r| {
-                                                    this.selected.contains(&r.name_with_owner)
-                                                })
-                                                .cloned()
-                                                .collect()
-                                        })
-                                        .unwrap_or_default();
-                                    this.close_picker(window, cx);
-                                    this.selected.clear();
-                                    this.error = None;
-                                    this.notice = None;
-                                    this.connect_next(cx);
-                                    cx.notify();
-                                },
-                            )),
-                        ),
-                );
+                    cx.stop_propagation();
+                    cx.notify();
+                }));
+            for (i, item) in items.into_iter().enumerate() {
+                let run = item.run.clone();
+                let row = kit::menu_item(item.id, item.glyph, item.label, item.danger)
+                    .focus_visible(|v| v.bg(s::frame_bg()))
+                    .when_some(self.menu_focus.get(i), |row, handle| {
+                        row.track_focus(handle)
+                    });
+                menu = menu.child(row.on_click(cx.listener(move |this, _, window, cx| {
+                    this.overflow = None;
+                    run(this, window, cx);
+                    cx.notify();
+                })));
+            }
             trigger = trigger.child(
                 div()
                     .absolute()
@@ -617,13 +184,13 @@ impl RepositoryPanel {
         }
         trigger.into_any_element()
     }
-    pub(super) fn repositories(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    pub(super) fn repositories(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Div {
         let busy = self.repository_busy();
         let can_manage = self.can_manage();
-        let empty = self.projects.is_empty();
+        let empty = self.projects.is_empty() && self.adding.is_empty();
         let mut body = column();
         if empty {
-            body = body.child(if busy {
+            body = body.child(if busy && self.github.is_none() {
                 kit::empty_state(
                     "dither-branch",
                     crate::localization::text(
@@ -640,7 +207,7 @@ impl RepositoryPanel {
                     "dither-branch",
                     "No repositories yet",
                     "",
-                    Some(self.add_action(window, cx)),
+                    Some(self.add_action(cx)),
                 )
             });
         }
@@ -740,6 +307,37 @@ impl RepositoryPanel {
                     .child(overflow),
             );
         }
+        // Chosen in the palette, still connecting: shown at once.
+        for (i, lower) in self.adding.iter().enumerate() {
+            let repo = self.github.as_ref().and_then(|g| {
+                g.repositories
+                    .iter()
+                    .find(|r| r.name_with_owner.eq_ignore_ascii_case(lower))
+            });
+            let name = repo.map_or(lower.clone(), |r| r.name_with_owner.clone());
+            body = body.child(
+                row()
+                    .h(px(48.))
+                    .gap(px(10.))
+                    .px(px(12.))
+                    .when(i > 0 || !self.projects.is_empty(), |v| {
+                        v.border_t_1()
+                            .border_color(palette::rgb(BORDER).opacity(0.4))
+                    })
+                    .child(avatar(
+                        &name,
+                        repo.and_then(|r| r.owner_avatar_url.as_deref()),
+                        24.,
+                    ))
+                    .child(s::title_text(name.clone()).flex_1().min_w_0().truncate())
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette::rgb(MUTED))
+                            .child("Adding…"),
+                    ),
+            );
+        }
         if let Some(error) = &self.error {
             body = body.child(
                 div()
@@ -757,7 +355,7 @@ impl RepositoryPanel {
         let header_action = if empty {
             None
         } else {
-            Some(self.add_action(window, cx))
+            Some(self.add_action(cx))
         };
         kit::section(
             "Repositories",
@@ -944,10 +542,16 @@ impl RepositoryPanel {
 impl Render for RepositoryPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.viewport = window.viewport_size();
+        let page = self.render_page(window, cx);
+        let palette =
+            (self.picker && self.github_connected()).then(|| self.render_palette(window, cx));
+        let toast = self.render_toast(window, cx);
         div()
             .key_context("CloudSettingsPanel")
             .on_action(cx.listener(|this, _: &SaveChanges, _, cx| this.save_changes(cx)))
-            .child(self.render_page(window, cx))
+            .child(page)
+            .children(palette)
+            .children(toast)
     }
 }
 impl RepositoryPanel {
