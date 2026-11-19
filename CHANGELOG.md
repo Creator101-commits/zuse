@@ -9,6 +9,10 @@
 
 ## 0.27.1 - 2026-11-19
 
+### Added
+
+- Remote access you choose and trust: phones pair by QR, link or SSH (tunnelling through SSH when the computer only listens locally), Wi-Fi and Tailscale/Headscale can be offered separately, and Settings → Remote access has one card with a styled pairing QR that switches to connected once the device pairs. `zuse pair --json` prints the pairing for scripts.
+
 ### Fixed
 
 - Cloud works for signed-in accounts that don't use workspace sync: the cloud sidebar, Billing, Usage and new cloud chats no longer fail with "Sign in to access cloud workspaces" or "Could not load cloud workspaces".
