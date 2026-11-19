@@ -41,7 +41,15 @@ impl Provider for Boxd {
         let inherited = Boxd::inspect(self, &machine.id).await?;
         let current = inherited.as_ref().map(|m| (m.vcpu, m.memory_bytes));
         if current != Some((Some(vcpu), Some(memory))) {
+            let started = std::time::Instant::now();
             self.resize(&machine.id, vcpu, memory).await?;
+            tracing::info!(
+                machine = %machine.id,
+                vcpu,
+                memory_mib,
+                duration_ms = started.elapsed().as_millis() as u64,
+                "Cloud machine resized to its plan size"
+            );
         }
         Ok(machine)
     }

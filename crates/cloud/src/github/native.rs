@@ -1059,6 +1059,12 @@ fn signing_key(pem: &[u8]) -> anyhow::Result<jsonwebtoken::EncodingKey> {
     Ok(jsonwebtoken::EncodingKey::from_rsa_der(der.as_bytes()))
 }
 
+/// Guests accept a Git grant lease of at most one hour by their own clock.
+/// Lease a little less, so a guest clock that is still settling after a cold
+/// boot (a resized machine boots fresh, before NTP converges) never sees a
+/// valid grant as further than an hour away and rejects it as expired.
+const GUEST_LEASE_MS: i64 = 3_600_000 - 120_000;
+
 // GitHub may issue a fresh scoped token whose lifetime exceeds the remaining
 // parent lifetime. Never misrepresent the local authorization lease as upstream
 // bearer expiry: GitHub alone controls the latter. The guest revalidates authority
@@ -1086,7 +1092,7 @@ fn scoped_token_expiry(
     Ok(ScopedTokenExpiry {
         authority_expires_at: provider_expires_at
             .min(parent.unwrap_or(i64::MAX))
-            .min(at.saturating_add(3_600_000)),
+            .min(at.saturating_add(GUEST_LEASE_MS)),
         provider_expires_at,
     })
 }
