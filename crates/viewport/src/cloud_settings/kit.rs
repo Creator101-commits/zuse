@@ -165,6 +165,17 @@ pub fn quantity(
         })
 }
 
+/// The solid primary action: accent fill, high-contrast label, hover and
+/// pressed states. Dither stays on meters, progress and charts.
+pub fn primary_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    enabled: bool,
+) -> Stateful<Div> {
+    crate::cloud_settings::style::button(id, label, true, !enabled, false)
+        .when(enabled, |v| v.active(|v| v.opacity(0.82)))
+}
+
 /// Where one step of a sequence stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepMark {
@@ -174,18 +185,21 @@ pub enum StepMark {
     Upcoming,
 }
 
-/// Segmented, dithered step progress: done segments are solid, the current
-/// one half lit, skipped ones a faint dust, upcoming ones only the track.
+/// Segmented step progress: the current step is a solid accent bar, done
+/// steps a full dithered accent fill, skipped ones a full muted fill and
+/// upcoming ones only the dotted track.
 pub fn step_progress(marks: &[StepMark]) -> Div {
     let mut bar = div().flex().items_center().gap(px(4.)).w_full();
     for mark in marks {
-        let (fraction, color) = match mark {
-            StepMark::Done => (1.0, accent()),
-            StepMark::Current => (0.5, accent()),
-            StepMark::Skipped => (1.0, Hsla::from(palette::rgb(MUTED)).opacity(0.45)),
-            StepMark::Upcoming => (0.0, accent()),
+        let segment = match mark {
+            StepMark::Current => div().w_full().h(px(4.)).rounded(px(1.)).bg(accent()),
+            StepMark::Done => meter_colored(1.0, 4., accent()),
+            StepMark::Skipped => {
+                meter_colored(1.0, 4., Hsla::from(palette::rgb(MUTED)).opacity(0.45))
+            }
+            StepMark::Upcoming => meter_colored(0.0, 4., accent()),
         };
-        bar = bar.child(div().flex_1().child(meter_colored(fraction, 4., color)));
+        bar = bar.child(div().flex_1().child(segment));
     }
     bar
 }

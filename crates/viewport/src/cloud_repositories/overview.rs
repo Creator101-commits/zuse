@@ -235,15 +235,10 @@ impl RepositoryPanel {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.onboarding_reopen(cx)))
                 } else {
-                    crate::styling::dither_action(
-                        "cloud-guide-open",
-                        "Continue setup",
-                        self.can_manage(),
-                        true,
-                    )
-                    .when(self.can_manage(), |b| {
-                        b.on_click(cx.listener(|this, _, _, cx| this.onboarding_reopen(cx)))
-                    })
+                    kit::primary_button("cloud-guide-open", "Continue setup", self.can_manage())
+                        .when(self.can_manage(), |b| {
+                            b.on_click(cx.listener(|this, _, _, cx| this.onboarding_reopen(cx)))
+                        })
                 }),
         );
         s::frame().child(s::card().child(card))

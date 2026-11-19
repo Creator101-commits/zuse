@@ -148,13 +148,11 @@ pub(super) fn save_bar(
                     )
                 })
                 .child(
-                    crate::styling::dither_action(
+                    crate::cloud_settings::kit::primary_button(
                         SharedString::from(format!("{id}-save")),
                         if busy { "Saving…" } else { "Save changes" },
                         ready,
-                        true,
                     )
-                    .tab_index(if ready { 0 } else { -1 })
                     .when(ready, |b| {
                         b.on_click(cx.listener(move |this, _, _, cx| save(this, cx)))
                     }),

@@ -576,23 +576,21 @@ impl RepositoryPanel {
             );
         }
         actions = actions.child(
-            crate::styling::dither_action("onboarding-continue", label, enabled, true)
-                .tab_index(if enabled { 0 } else { -1 })
-                .when(enabled, |b| {
-                    b.on_click(cx.listener(move |this, _, _, cx| match current {
-                        Step::Start => {
-                            let progress = this.onboarding_progress();
-                            if let Some(missing) = progress.first_missing() {
-                                this.onboarding.go(missing);
-                            } else {
-                                this.onboarding.finish();
-                                cx.emit(StartChat);
-                            }
-                            cx.notify();
+            kit::primary_button("onboarding-continue", label, enabled).when(enabled, |b| {
+                b.on_click(cx.listener(move |this, _, _, cx| match current {
+                    Step::Start => {
+                        let progress = this.onboarding_progress();
+                        if let Some(missing) = progress.first_missing() {
+                            this.onboarding.go(missing);
+                        } else {
+                            this.onboarding.finish();
+                            cx.emit(StartChat);
                         }
-                        _ => this.onboarding_update(cx, |o, p| o.advance(p)),
-                    }))
-                }),
+                        cx.notify();
+                    }
+                    _ => this.onboarding_update(cx, |o, p| o.advance(p)),
+                }))
+            }),
         );
         let waiting = match current {
             Step::Repositories if !done => "Add a repository to continue, or skip for now",
