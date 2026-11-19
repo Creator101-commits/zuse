@@ -29,11 +29,21 @@ impl Provider for Boxd {
         request.validate()?;
         self.verify_artifact(request.artifact, request.artifact_binding)
             .await?;
-        if request.size != "default" {
-            return Err(ProviderError::Rejected);
+        // Plans sell `default` (4 vCPU / 16 GB) and `large` (8 vCPU / 32 GB).
+        let (vcpu, memory_mib) = zuse_protocol::cloud_billing::plans::size_resources(request.size)
+            .ok_or(ProviderError::Rejected)?;
+        let machine = self
+            .create_from_snapshot(request.artifact, request.name, true)
+            .await?;
+        // A machine inherits its snapshot's size. Resize only when it differs,
+        // before the runtime starts; snapshots built at the plan size skip this.
+        let memory = u64::from(memory_mib) * 1_048_576;
+        let inherited = Boxd::inspect(self, &machine.id).await?;
+        let current = inherited.as_ref().map(|m| (m.vcpu, m.memory_bytes));
+        if current != Some((Some(vcpu), Some(memory))) {
+            self.resize(&machine.id, vcpu, memory).await?;
         }
-        self.create_from_snapshot(request.artifact, request.name, true)
-            .await
+        Ok(machine)
     }
     async fn sleep(&self, id: &str) -> Result<ProviderOperation, ProviderError> {
         self.hibernate(id).await?;

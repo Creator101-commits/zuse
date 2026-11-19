@@ -1,6 +1,12 @@
 //! Settings review fixture: the real Shell over a scripted engine with
 //! synthetic Cloud, billing and usage data. Nothing here is a live account.
 //! Run under Xvfb with `ZUSE_OPEN_ROUTE=settings/<section>`, then capture.
+//! `FIXTURE_PLAN` picks the plan state (cloud, trial, overage, max, hold,
+//! trial-hold, none) and `FIXTURE_THEME=light` the light theme.
+//! `FIXTURE_THEME=light` renders the light theme. `FIXTURE_FRESH=1` answers
+//! as a just-subscribed account: no GitHub, repositories or agent accounts,
+//! and the standard machine. `FIXTURE_ONBOARDING=<step>` opens first-run
+//! onboarding at `welcome`, `repositories`, `setup`, `agents` or `start`.
 use chrono::{Duration, Utc};
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use serde_json::{Value, json};
@@ -84,44 +90,155 @@ const TITLES: [&str; 5] = [
     "Find the flaky sync test",
 ];
 
-fn usage_items(start: i64) -> Value {
+/// Which plan state the fixture shows (`FIXTURE_PLAN`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PlanState {
+    /// Cloud, a third of the way through its machine minutes.
+    Cloud,
+    /// The $1 trial, part used.
+    Trial,
+    /// Cloud past its allowance, paying as it goes under the cap.
+    Overage,
+    /// Cloud Max with a large computer.
+    Max,
+    /// Cloud with the pay-as-you-go cap reached: computers paused.
+    Hold,
+    /// The trial used up: computers paused.
+    TrialHold,
+    /// Not subscribed: plans and the $1 trial.
+    None,
+}
+impl PlanState {
+    fn from_env() -> Self {
+        match std::env::var("FIXTURE_PLAN").as_deref() {
+            Ok("trial") => Self::Trial,
+            Ok("overage") => Self::Overage,
+            Ok("max") => Self::Max,
+            Ok("hold") => Self::Hold,
+            Ok("trial-hold") => Self::TrialHold,
+            Ok("none") => Self::None,
+            _ => Self::Cloud,
+        }
+    }
+    fn trial(self) -> bool {
+        matches!(self, Self::Trial | Self::TrialHold)
+    }
+}
+
+fn usage_items(start: i64, plan: PlanState) -> Value {
     let mut items = vec![];
     let mut n = 0;
-    for day in 0..6i64 {
+    // Busier days push the overage states past the allowance.
+    let scale = match plan {
+        PlanState::Overage | PlanState::Hold => 16,
+        PlanState::Max => 6,
+        PlanState::Trial | PlanState::TrialHold => 3,
+        _ => 4,
+    };
+    let days = if plan.trial() { 4 } else { 6 };
+    for day in 0..days {
         for (i, (ws, _, _)) in MACHINES.iter().enumerate() {
             if (day + i as i64) % 3 == 2 {
                 continue;
             }
-            let minutes = 12 + ((day * 7 + i as i64 * 11) % 40);
+            let awake = (12 + ((day * 7 + i as i64 * 11) % 40)) * scale;
+            let large = plan == PlanState::Max && i == 1;
+            let rate = if large { 8 } else { 4 };
             let begin = start + day * DAY + (i as i64 + 9) * 3_600_000;
             n += 1;
             items.push(json!({"entryId": format!("e{n:04}"), "resourceKind": "workspace", "resourceId": ws,
-                "provider": "boxd", "startedAt": begin, "endedAt": begin + minutes * 60_000,
-                "vcpuCount": if i == 1 { 4 } else { 2 }, "memoryMib": if i == 1 { 8192 } else { 4096 },
-                "providerCostMicros": minutes * if i == 1 { 9_000 } else { 4_500 }, "status": "confirmed"}));
+                "provider": "cloud", "startedAt": begin, "endedAt": begin + awake * 60_000,
+                "vcpuCount": if large { 8 } else { 4 }, "memoryMib": if large { 32_768 } else { 16_384 },
+                "providerCostMicros": awake * rate * 595, "status": "confirmed",
+                "awakeMs": awake * 60_000, "machineRate": rate, "machineMinutes": awake * rate}));
         }
     }
     for (k, day) in [0i64, 3].iter().enumerate() {
         let begin = start + day * DAY + 8 * 3_600_000;
         items.push(json!({"entryId": format!("b{k}"), "resourceKind": "build", "resourceId": format!("build-{k}"),
-            "provider": "boxd", "startedAt": begin, "endedAt": begin + 9 * 60_000, "vcpuCount": 4, "memoryMib": 8192,
-            "providerCostMicros": 81_000, "status": "confirmed"}));
+            "provider": "cloud", "startedAt": begin, "endedAt": begin + 9 * 60_000, "vcpuCount": 4, "memoryMib": 16_384,
+            "providerCostMicros": 21_420, "status": "confirmed", "awakeMs": 9 * 60_000, "machineRate": 4, "machineMinutes": 36}));
     }
     items.push(json!({"entryId": "s0", "resourceKind": "other", "usageKind": "snapshot-storage", "resourceId": "image",
-        "provider": "boxd", "startedAt": start, "endedAt": now(), "vcpuCount": 0, "memoryMib": 0,
-        "providerCostMicros": 310_000, "status": "provisional"}));
+        "provider": "cloud", "startedAt": start, "endedAt": now(), "vcpuCount": 0, "memoryMib": 0,
+        "providerCostMicros": 310_000, "status": "provisional", "machineMinutes": 0}));
     let begin = now() - 25 * 60_000;
-    items.push(json!({"entryId": "live", "resourceKind": "workspace", "resourceId": "ws-guide", "provider": "boxd",
-        "startedAt": begin, "endedAt": now(), "vcpuCount": 2, "memoryMib": 4096, "providerCostMicros": 112_500, "status": "provisional"}));
+    items.push(json!({"entryId": "live", "resourceKind": "workspace", "resourceId": "ws-guide", "provider": "cloud",
+        "startedAt": begin, "endedAt": now(), "vcpuCount": 4, "memoryMib": 16_384, "providerCostMicros": 59_500,
+        "status": "provisional", "awakeMs": 25 * 60_000, "machineRate": 4, "machineMinutes": 100}));
     json!({"items": items})
 }
 
-fn summary(start: i64) -> Value {
-    json!({"currency": "USD", "status": "active", "periodStart": start, "periodEnd": start + 30 * DAY,
-        "basePriceMicros": 40_000_000, "includedProviderCostMicros": 35_000_000, "providerCostMicros": 8_420_000,
-        "storageCostMicros": 310_000, "includedUsedMicros": 8_420_000, "includedRemainingMicros": 26_580_000,
-        "overageProviderCostMicros": 0, "overageChargeMicros": 0, "overageCapMicros": 20_000_000,
-        "markupBasisPoints": 500, "currentInvoiceEstimateMicros": 40_000_000, "usageProvisional": false})
+/// Machine minutes the synthetic usage adds up to, so the plan agrees with it.
+fn used_minutes(start: i64, plan: PlanState) -> i64 {
+    usage_items(start, plan)["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| item["machineMinutes"].as_i64())
+        .sum()
+}
+
+fn summary(start: i64, plan: PlanState) -> Value {
+    let end = start + if plan.trial() { 7 * DAY } else { 30 * DAY };
+    let used = used_minutes(start, plan);
+    let (id, name, price, included, max) = match plan {
+        PlanState::Trial | PlanState::TrialHold => {
+            ("cloud-trial", "Cloud trial", 1_000_000, 8_400, false)
+        }
+        PlanState::Max => ("cloud-max", "Cloud Max", 50_000_000, 84_000, true),
+        _ => ("cloud", "Cloud", 20_000_000, 33_600, false),
+    };
+    let cap = 25_000_000i64;
+    let used = match plan {
+        PlanState::TrialHold => used.max(included),
+        // The cap reached: $25 of extra minutes past the allowance.
+        PlanState::Hold => included + 42_000,
+        _ => used,
+    };
+    let extra = (used - included).max(0);
+    let charge = zuse_protocol::cloud_billing::plans::machine_minutes_micros(extra);
+    let (hold, reason) = match plan {
+        PlanState::Hold => (true, Some("cap-reached")),
+        PlanState::TrialHold => (true, Some("trial-allowance-used")),
+        _ => (false, None),
+    };
+    let mut plan_usage = json!({"planId": id, "planName": name, "priceMicros": price, "trial": plan.trial(),
+        "renewsAt": end, "includedMachineMinutes": included, "usedMachineMinutes": used.min(included) + extra,
+        "remainingMachineMinutes": (included - used).max(0), "extraMachineMinutes": if plan.trial() { 0 } else { extra },
+        "extraChargeMicros": if plan.trial() { 0 } else { charge }, "overageCapMicros": cap, "payAsYouGo": !plan.trial(),
+        "usageHold": hold, "defaultMachineRate": 4, "maxVcpus": if max { 8 } else { 4 },
+        "maxMemoryMib": if max { 32_768 } else { 16_384 }});
+    if let Some(reason) = reason {
+        plan_usage["holdReason"] = json!(reason);
+    }
+    if plan.trial() {
+        plan_usage["trialEndsAt"] = json!(end);
+    }
+    json!({"currency": "USD", "status": "active", "periodStart": start, "periodEnd": end,
+        "basePriceMicros": price, "includedProviderCostMicros": price, "providerCostMicros": 8_420_000,
+        "storageCostMicros": 310_000, "includedUsedMicros": 8_420_000, "includedRemainingMicros": 11_580_000,
+        "overageProviderCostMicros": 0, "overageChargeMicros": charge, "overageCapMicros": cap,
+        "markupBasisPoints": 0, "currentInvoiceEstimateMicros": price + charge, "usageProvisional": false,
+        "plan": plan_usage})
+}
+
+fn entitlements(start: i64, plan: PlanState) -> Value {
+    let catalog = zuse_protocol::cloud_billing::plans::catalog(
+        plan == PlanState::None,
+        &|_| true,
+        zuse_protocol::cloud_billing::plans::ENTERPRISE_CONTACT_FALLBACK,
+    );
+    let offer = match plan {
+        PlanState::Max => "cloud-pro-v1",
+        _ => "cloud-starter-v1",
+    };
+    let entitlements = if plan == PlanState::None {
+        json!([])
+    } else {
+        json!([{"offerId": offer, "status": "active", "paidThrough": start + 30 * DAY}])
+    };
+    json!({"entitlements": entitlements, "catalog": catalog})
 }
 
 fn tokens(scale: u64) -> Summary {
@@ -222,10 +339,33 @@ fn sessions() -> SessionsPage {
 
 struct Controller {
     start: i64,
+    plan: PlanState,
+    /// A just-subscribed account with nothing set up yet.
+    fresh: bool,
 }
 #[async_trait::async_trait]
 impl RpcService for Controller {
     async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
+        if self.fresh {
+            match method {
+                methods::CLOUD_PROJECTS => return bound(json!({"projects": []})),
+                methods::CLOUD_GITHUB => {
+                    return bound(json!({"configured": true, "canManageInstallations": true,
+                        "user": null, "installations": [], "repositories": []}));
+                }
+                methods::CLOUD_AGENT_CONNECTIONS => {
+                    return bound(json!({"connections": [], "supportsDeviceReconnect": true}));
+                }
+                methods::CLOUD_MACHINE => {
+                    return bound(
+                        json!({"revision": 0, "createdAt": now(), "imageState": "none",
+                        "imageError": null, "recipe": {"version": 1, "setupScript": "", "skills": [],
+                        "instructions": "", "files": [], "setupTimeoutSeconds": 900}}),
+                    );
+                }
+                _ => {}
+            }
+        }
         match method {
             methods::LOCAL_DEVICE => RpcReply::value(
                 &json!({"deviceId":"fixture-local","workspaceScope":"local","capabilities":[]}),
@@ -261,11 +401,16 @@ impl RpcService for Controller {
                 {"secretId": "sec-1", "name": "DATABASE_URL", "revision": 1, "updatedAt": now() - 3 * DAY},
                 {"secretId": "sec-2", "name": "STRIPE_TEST_KEY", "revision": 2, "updatedAt": now() - DAY}
             ]})),
-            methods::CLOUD_BILLING_SUMMARY => bound(summary(self.start)),
-            methods::CLOUD_BILLING_USAGE => bound(usage_items(self.start)),
-            methods::CLOUD_BILLING_ENTITLEMENTS => bound(
-                json!({"entitlements": [{"offerId": "cloud-workspace-standard-v1", "status": "active", "paidThrough": self.start + 30 * DAY}]}),
-            ),
+            methods::CLOUD_BILLING_SUMMARY | methods::CLOUD_BILLING_USAGE
+                if self.plan == PlanState::None =>
+            {
+                Err(RpcError::Failed(
+                    "An active cloud billing period is required.".into(),
+                ))
+            }
+            methods::CLOUD_BILLING_SUMMARY => bound(summary(self.start, self.plan)),
+            methods::CLOUD_BILLING_USAGE => bound(usage_items(self.start, self.plan)),
+            methods::CLOUD_BILLING_ENTITLEMENTS => bound(entitlements(self.start, self.plan)),
             methods::CLOUD_PREPAID_BALANCE => bound(
                 json!({"available": true, "creditCents": 1250, "debitCents": 0, "currency": "USD"}),
             ),
@@ -287,8 +432,10 @@ fn main() {
     tracing_subscriber::fmt().with_env_filter("error").init();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let _enter = runtime.enter();
-    let start = now() - 5 * DAY - 3 * 3_600_000;
-    let client = zuse_rpc::memory_client(Arc::new(Controller { start }));
+    let plan = PlanState::from_env();
+    let start = now() - if plan.trial() { 3 } else { 5 } * DAY - 3 * 3_600_000;
+    let fresh = std::env::var("FIXTURE_FRESH").is_ok();
+    let client = zuse_rpc::memory_client(Arc::new(Controller { start, plan, fresh }));
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().to_path_buf();
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {
@@ -301,7 +448,12 @@ fn main() {
             settings.terminal_font_family.clone(), settings.terminal_font_size,
             settings.code_font_family.clone(), settings.code_font_size, fonts, cx);
         theme_library::init(data.clone(), cx);
-        appearance::init(appearance::AppearanceMode::Dark, settings.theme_selection,
+        let mode = if std::env::var("FIXTURE_THEME").as_deref() == Ok("light") {
+            appearance::AppearanceMode::Light
+        } else {
+            appearance::AppearanceMode::Dark
+        };
+        appearance::init(mode, settings.theme_selection,
             settings.accent, settings.surface, cx);
         history::init(settings.git_history_columns, settings.git_history_column_widths,
             settings.git_history_column_order, settings.git_history_author_display, cx);
@@ -318,6 +470,7 @@ fn main() {
             s.spaces_synced = true;
             s.chats_synced = true;
             s.apply_cloud_account(json!({"user":{"id": OWNER,"email":"you@example.com"},"orgId":null}));
+            s.fixture_cloud_subscription(plan != PlanState::None);
             s.chats = MACHINES.iter().zip(TITLES).map(|((_, chat, branch), title)| serde_json::from_value(json!({
                 "id": chat, "deviceId": "fixture-local", "title": title, "branch": branch, "archived": false,
                 "createdAt": "2026-11-02T12:00:00Z"})).unwrap()).collect();
@@ -336,9 +489,18 @@ fn main() {
         cx.activate(true);
         let out = std::env::var("FIXTURE_OUT").ok();
         let compute = std::env::var("FIXTURE_COMPUTE").is_ok();
+        let onboarding = std::env::var("FIXTURE_ONBOARDING").ok();
         cx.spawn(async move |cx| {
             let delay = std::env::var("FIXTURE_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2500);
             cx.background_executor().timer(std::time::Duration::from_millis(delay)).await;
+            if let Some(step) = onboarding {
+                window
+                    .update(cx, |shell, window, cx| {
+                        shell.open_cloud_onboarding(Some(step.as_str()), window, cx)
+                    })
+                    .unwrap();
+                cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+            }
             if compute {
                 window.update(cx, |shell, _, cx| shell.fixture_usage_compute(cx)).unwrap();
                 cx.background_executor().timer(std::time::Duration::from_millis(2000)).await;

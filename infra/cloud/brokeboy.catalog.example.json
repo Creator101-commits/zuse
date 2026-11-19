@@ -1,6 +1,16 @@
 {
   "features": [{"id":"zuse-usd","kind":"consumable"}],
   "plans": [{
+    "id":"cloud-starter-v1", "name":"Cloud", "kind":"subscription",
+    "currency":"usd", "amount":"20", "interval":"month",
+    "stripePriceId":"price_REPLACE_WITH_CLOUD_PRICE",
+    "items":[{"feature":"zuse-usd","included":"20","reset":"month"}]
+  },{
+    "id":"cloud-pro-v1", "name":"Cloud Max", "kind":"subscription",
+    "currency":"usd", "amount":"50", "interval":"month",
+    "stripePriceId":"price_REPLACE_WITH_CLOUD_MAX_PRICE",
+    "items":[{"feature":"zuse-usd","included":"50","reset":"month"}]
+  },{
     "id":"cloud-workspace-standard-v1", "name":"Zuse", "kind":"subscription",
     "currency":"usd", "amount":"40", "interval":"month",
     "stripePriceId":"price_REPLACE_WITH_EXISTING_CLOUD_PRICE",

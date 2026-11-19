@@ -8,6 +8,7 @@ pub(super) struct Billing {
     owner: Option<(String, Option<String>)>,
     requests: HashMap<u64, (&'static str, Option<(String, Option<String>)>)>,
     subscribed: Option<bool>,
+    catalog: Option<zuse_protocol::cloud_billing::plans::PlanCatalog>,
     credits: Option<zuse_protocol::cloud_billing::PrepaidBalance>,
     credit_amount: Option<i64>,
     credit_error: Option<String>,
@@ -77,7 +78,9 @@ impl WorkspaceView {
             ),
         );
     }
-    fn open_billing_portal(&mut self, force_portal: bool, cx: &mut Context<Self>) {
+    /// The billing portal (`offer: None`) or checkout for a plan offer. While
+    /// subscribed, checkout answers with the portal link that switches plans.
+    fn open_billing_portal(&mut self, offer: Option<&'static str>, cx: &mut Context<Self>) {
         if self.billing.owner.is_none()
             || self
                 .billing
@@ -87,25 +90,12 @@ impl WorkspaceView {
         {
             return;
         }
-        let subscribed = if force_portal {
-            true
-        } else if let Some(value) = self.billing.subscribed {
-            value
-        } else {
-            return;
+        let id = match offer {
+            Some(offer) => {
+                self.call_billing(methods::CLOUD_BILLING_CHECKOUT, json!({"offerId":offer}))
+            }
+            None => self.call_billing(methods::CLOUD_BILLING_PORTAL, json!({})),
         };
-        let id = self.call_billing(
-            if subscribed {
-                methods::CLOUD_BILLING_PORTAL
-            } else {
-                methods::CLOUD_BILLING_CHECKOUT
-            },
-            if subscribed {
-                json!({})
-            } else {
-                json!({"offerId":"cloud-workspace-standard-v1"})
-            },
-        );
         self.billing
             .requests
             .insert(id, ("portal", self.billing.owner.clone()));
@@ -266,6 +256,7 @@ impl WorkspaceView {
                 &value["data"],
                 chrono::Utc::now().timestamp_millis(),
             );
+            self.billing.catalog = serde_json::from_value(value["data"]["catalog"].clone()).ok();
             if self.billing.subscribed == Some(false)
                 && self.billing.error.as_deref()
                     == Some("An active cloud billing period is required.")
@@ -277,6 +268,12 @@ impl WorkspaceView {
                     Some("Could not read the subscription. Refresh to retry.".into());
             }
         } else if kind == "portal" {
+            if value["data"]["trialConverted"] == true {
+                // The trial ended and Cloud started; nothing to open.
+                cx.notify();
+                self.refresh_billing(false);
+                return true;
+            }
             if let Some(url) = value["data"]["portalUrl"]
                 .as_str()
                 .or_else(|| value["data"]["checkoutUrl"].as_str())
@@ -385,6 +382,7 @@ impl WorkspaceView {
                 cap: pending("cap"),
             },
             summary: self.billing.summary.as_ref(),
+            catalog: self.billing.catalog.as_ref(),
             usage: &self.billing.items,
             credits: self.billing.credits.as_ref(),
             credit_amount: self.billing.credit_amount.unwrap_or(2500),
@@ -403,8 +401,12 @@ impl WorkspaceView {
             match action {
                 view::Action::Refresh => this.refresh_billing(false),
                 view::Action::RefreshCredits => this.refresh_credits(false, cx),
-                view::Action::Subscription => this.open_billing_portal(false, cx),
-                view::Action::ManageSubscription => this.open_billing_portal(true, cx),
+                view::Action::Checkout(offer) => this.open_billing_portal(Some(offer), cx),
+                view::Action::ManageSubscription => this.open_billing_portal(None, cx),
+                view::Action::RaiseCap => {
+                    this.billing.tab = crate::cloud_settings::Tab::Usage;
+                    this.billing_cap.update(cx, |input, cx| input.focus(cx));
+                }
                 view::Action::SaveCap => this.save_billing_cap(cx),
                 view::Action::SelectCredit(amount) => this.billing.credit_amount = Some(amount),
                 view::Action::BuyCredits => this.refresh_credits(true, cx),

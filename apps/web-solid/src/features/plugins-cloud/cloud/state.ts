@@ -4,17 +4,20 @@ import { createStore, reconcile } from "solid-js/store";
 import { onConnected, rpc } from "@/core/connection";
 import { M } from "@/core/methods";
 import { bound, boundReply, errorText, newId, openExternal, owner, ownerKey, type Owner } from "../account";
-import { capDollars, capMicros, cloudSubscribed, STANDARD_OFFER } from "./money";
+import { capDollars, capMicros, cloudSubscribed } from "./money";
+import { cloudErrorText, defaultProvider, readCatalog } from "./plans";
 import type {
   AccountImage,
   BillingSummary,
   BillingUsageItem,
   CloudAgent,
+  CloudCapabilities,
   CloudContextProject,
   CloudProject,
   GithubCatalog,
   GithubRepository,
   Head,
+  PlanCatalog,
   PrepaidBalance,
   Workspace,
 } from "./types";
@@ -24,6 +27,10 @@ interface Billing {
   loading: boolean;
   subscribed: boolean | null;
   subscriptionLoading: boolean;
+  /** Plans for sale; the static plans until entitlements load. */
+  catalog: PlanCatalog | null;
+  /** Offer whose checkout is opening. */
+  checkoutBusy: string | null;
   summary: BillingSummary | null;
   usage: BillingUsageItem[];
   cursor: string | null;
@@ -77,6 +84,7 @@ interface Context {
   loading: boolean;
   projects: CloudContextProject[];
   agents: CloudAgent[];
+  capabilities: CloudCapabilities | null;
   error: string | null;
 }
 interface History {
@@ -93,6 +101,8 @@ const initial = () => ({
     loading: false,
     subscribed: null,
     subscriptionLoading: false,
+    catalog: null,
+    checkoutBusy: null,
     summary: null,
     usage: [],
     cursor: null,
@@ -109,7 +119,7 @@ const initial = () => ({
   repos: { loaded: false, projects: [], github: null, listing: false, githubLoading: false, connecting: [], removing: null, error: null, notice: null } as Repositories,
   image: { value: null, loading: false, building: false, deleting: false, error: null } as Image,
   workspaces: { loaded: false, loading: false, rows: [], error: null, pending: {}, rowError: null } as Workspaces,
-  context: { loaded: false, loading: false, projects: [], agents: [], error: null } as Context,
+  context: { loaded: false, loading: false, projects: [], agents: [], capabilities: null, error: null } as Context,
   launches: [] as Launch[],
   history: { workspaceId: null, sessionId: null, head: null, loading: false, error: null } as History,
 });
@@ -144,7 +154,7 @@ onConnected(() => {
   // A dropped connection fails in-flight work; clear busy flags so the user can check and retry.
   generation++;
   batch(() => {
-    setCloud("billing", { loading: false, subscriptionLoading: false, portalBusy: false, creditsBusy: false, capBusy: false });
+    setCloud("billing", { loading: false, subscriptionLoading: false, checkoutBusy: null, portalBusy: false, creditsBusy: false, capBusy: false });
     setCloud("repos", { listing: false, githubLoading: false, connecting: [], removing: null });
     setCloud("image", { loading: false, building: false, deleting: false });
     setCloud("workspaces", { loading: false, pending: {} });
@@ -163,7 +173,7 @@ async function call<T>(method: string, params: Record<string, unknown>, who: Own
     return { value: reply as T };
   } catch (error) {
     if (mine !== generation || ownerKey(owner()) !== ownerKey(who)) return null;
-    return { error: errorText(error) };
+    return { error: cloudErrorText(errorText(error)) };
   }
 }
 
@@ -182,7 +192,7 @@ export async function loadBilling(more = false) {
   setCloud("billing", { loaded: true, loading: true, error: null });
   const [summary, page] = await Promise.all([
     call<unknown>(M.CLOUD_BILLING_SUMMARY, {}, who),
-    call<unknown>(M.CLOUD_BILLING_USAGE, { limit: 10, cursor: more ? cloud.billing.cursor : null }, who),
+    call<unknown>(M.CLOUD_BILLING_USAGE, { limit: 100, cursor: more ? cloud.billing.cursor : null }, who),
   ]);
   if (!summary || !page) return;
   setCloud("billing", "loading", false);
@@ -214,28 +224,48 @@ async function loadSubscription() {
   if (!result) return;
   setCloud("billing", "subscriptionLoading", false);
   if ("error" in result) return setCloud("billing", "error", result.error);
-  const subscribed = cloudSubscribed(data(result.value), Date.now());
+  const value = data(result.value);
+  const subscribed = cloudSubscribed(value, Date.now());
   batch(() => {
     setCloud("billing", "subscribed", subscribed);
+    setCloud("billing", "catalog", reconcile(readCatalog(value)));
     if (subscribed === false && cloud.billing.error === "An active cloud billing period is required.") setCloud("billing", "error", null);
     if (subscribed === null) setCloud("billing", "error", "Could not read the subscription. Refresh to retry.");
   });
 }
 
-/** Opens checkout when unsubscribed, otherwise the billing portal. */
-export async function openBilling(forcePortal: boolean) {
+/** Opens the billing portal, where the subscription, payment details and invoices are managed. */
+export async function openBilling() {
   const who = owner();
   if (!who || cloud.billing.portalBusy) return;
-  const subscribed = forcePortal || cloud.billing.subscribed;
-  if (subscribed === null) return;
   setCloud("billing", { portalBusy: true, error: null });
-  const result = await call<unknown>(subscribed ? M.CLOUD_BILLING_PORTAL : M.CLOUD_BILLING_CHECKOUT, subscribed ? {} : { offerId: STANDARD_OFFER }, who);
+  const result = await call<unknown>(M.CLOUD_BILLING_PORTAL, {}, who);
   if (!result) return;
   setCloud("billing", "portalBusy", false);
   if ("error" in result) return setCloud("billing", "error", result.error);
-  const url = data<Record<string, unknown>>(result.value)?.[subscribed ? "portalUrl" : "checkoutUrl"];
+  const url = data<{ portalUrl?: unknown }>(result.value)?.portalUrl;
   if (typeof url === "string" && url.startsWith("https://")) openExternal(url);
-  else setCloud("billing", "error", "The billing provider returned an invalid portal link.");
+  else setCloud("billing", "error", "The billing portal returned an invalid link.");
+}
+
+/**
+ * Buys or switches to a plan. New subscriptions open checkout; a plan change opens the billing portal link the
+ * server returns. Starting Cloud during a trial ends the trial at once and returns no link, so billing just refreshes.
+ */
+export async function checkout(offerId: string) {
+  const who = owner();
+  if (!who || cloud.billing.checkoutBusy) return;
+  setCloud("billing", { checkoutBusy: offerId, error: null, notice: null });
+  const result = await call<unknown>(M.CLOUD_BILLING_CHECKOUT, { offerId }, who);
+  if (!result) return;
+  setCloud("billing", "checkoutBusy", null);
+  if ("error" in result) return setCloud("billing", "error", result.error);
+  const reply = data<{ checkoutUrl?: unknown; trialConverted?: unknown }>(result.value);
+  if (typeof reply?.checkoutUrl === "string" && reply.checkoutUrl.startsWith("https://")) openExternal(reply.checkoutUrl);
+  else if (reply?.trialConverted === true) {
+    setCloud("billing", "notice", "Cloud has started.");
+    void loadBilling();
+  } else setCloud("billing", "error", "Checkout returned an invalid link. Try again.");
 }
 
 export async function loadCredits(buy: boolean) {
@@ -414,15 +444,16 @@ export async function loadContext() {
   const who = owner();
   if (!who || cloud.context.loading) return;
   setCloud("context", { loaded: true, loading: true, error: null });
-  const result = await call<{ projects?: CloudContextProject[]; agentCatalog?: { providers?: CloudAgent[] } }>(M.CLOUD_CONTEXT, {}, who, false);
+  const result = await call<unknown>(M.CLOUD_CONTEXT, {}, who, false);
   if (!result) return;
   setCloud("context", "loading", false);
   if ("error" in result) return setCloud("context", "error", result.error);
-  const value = result.value as { accountId?: string; projects?: CloudContextProject[]; agentCatalog?: { providers?: CloudAgent[] } };
+  const value = result.value as { accountId?: string; projects?: CloudContextProject[]; agentCatalog?: { providers?: CloudAgent[] }; computerCapabilities?: CloudCapabilities | null };
   if (value.accountId !== who.accountId) return setCloud("context", "error", "Your account changed. Reopen this view.");
   setCloud("context", {
     projects: Array.isArray(value.projects) ? value.projects : [],
     agents: Array.isArray(value.agentCatalog?.providers) ? value.agentCatalog!.providers! : [],
+    capabilities: value.computerCapabilities && typeof value.computerCapabilities === "object" ? value.computerCapabilities : null,
   });
 }
 
@@ -451,7 +482,8 @@ export async function launch(draft: LaunchDraft | null, retryKey?: string) {
     const project = draft.project;
     drafts.set(key, {
       projectId: project.projectId,
-      providerId: project.providerId,
+      // New computers run where the server says; the project's bound provider is the fallback.
+      providerId: defaultProvider(cloud.context.capabilities) ?? project.providerId,
       baseRef: project.defaultBranch ?? "main",
       ...(draft.branch.trim() ? { branch: draft.branch.trim() } : {}),
       agent: draft.agent,
@@ -485,7 +517,7 @@ export async function launch(draft: LaunchDraft | null, retryKey?: string) {
     const uncertain = (error as { outcomeUnknown?: boolean }).outcomeUnknown === true;
     setCloud("launches", (row) => row.key === key, {
       state: uncertain ? "uncertain" : "failed",
-      message: uncertain ? "The connection dropped before the cloud confirmed this chat. Retry sends the same request, so it cannot start twice." : errorText(error),
+      message: uncertain ? "The connection dropped before the cloud confirmed this chat. Retry sends the same request, so it cannot start twice." : cloudErrorText(errorText(error)),
     });
   }
 }
@@ -507,6 +539,8 @@ export async function loadRepositories() {
   if (!who || cloud.repos.listing || cloud.repos.githubLoading) return;
   setCloud("repos", { loaded: true, listing: true, githubLoading: true, error: null });
   void loadImage();
+  // Image builds send the provider new computers run on.
+  if (!cloud.context.loaded) void loadContext();
   const [list, github] = await Promise.all([call<unknown>(M.CLOUD_PROJECTS, {}, who), call<unknown>(M.CLOUD_GITHUB, {}, who)]);
   if (!list || !github) return;
   batch(() => {
@@ -622,7 +656,12 @@ export async function buildImage(mode: "update" | "rebuild") {
   if (!value || value.state === "building" || value.state === "auth-broken") return;
   if (!buildKey) buildKey = { mode, key: newId() };
   setCloud("image", { building: true, error: null });
-  receiveImage(await call<unknown>(M.CLOUD_IMAGE_BUILD, { mode: buildKey.mode, providerId: "boxd", idempotencyKey: buildKey.key }, who), "build");
+  // Without a known provider the server builds for its default.
+  const providerId = defaultProvider(cloud.context.capabilities) ?? value.providerId ?? null;
+  receiveImage(
+    await call<unknown>(M.CLOUD_IMAGE_BUILD, { mode: buildKey.mode, ...(providerId ? { providerId } : {}), idempotencyKey: buildKey.key }, who),
+    "build",
+  );
 }
 
 export async function deleteImage(snapshotId: string) {

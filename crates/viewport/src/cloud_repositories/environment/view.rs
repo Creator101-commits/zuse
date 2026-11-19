@@ -2,6 +2,7 @@
 //! and secrets, with one save bar for the whole recipe.
 use super::super::form;
 use super::*;
+use crate::cloud_settings::kit;
 
 impl RepositoryPanel {
     fn environment_tabs(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -272,21 +273,28 @@ impl RepositoryPanel {
     ) -> Div {
         let mut root = column().gap(px(16.));
         if self.projects.is_empty() {
-            return root.child(form::section(
-                "No repositories yet",
-                "Add a repository first. Then give it setup commands, services and secrets here.",
-                Some(
-                    cs::button(
-                        "environment-add-repository",
-                        "Add repository",
-                        true,
-                        false,
-                        false,
-                    )
-                    .on_click(cx.listener(|_, _, _, cx| cx.emit(OpenPage(CloudPage::Repositories))))
-                    .into_any_element(),
+            return root.child(kit::section(
+                "Environments",
+                "Each repository can have its own setup commands, services and secrets.",
+                None,
+                kit::empty_state(
+                    "dither-sliders",
+                    "No repositories yet",
+                    "Add a repository first. Then give it setup commands, services and secrets here.",
+                    Some(
+                        cs::button(
+                            "environment-add-repository",
+                            "Add repository",
+                            true,
+                            false,
+                            false,
+                        )
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(OpenPage(CloudPage::Repositories))),
+                        )
+                        .into_any_element(),
+                    ),
                 ),
-                div(),
             ));
         }
         if self.projects.len() > 1 {
@@ -310,10 +318,10 @@ impl RepositoryPanel {
                 ));
             }
             Some(version) if version.source == EnvironmentSource::Repository => {
-                root = root.child(form::section(
+                root = root.child(kit::section(
                     "Managed by the repository",
                     "This repository's .zuse/setup.json defines its setup. Edit that file to change commands or services.",
-                    None,
+                    Some(kit::pill("From .zuse/setup.json", kit::Tone::Neutral).into_any_element()),
                     div(),
                 ));
                 if self.environment.project.is_some() {

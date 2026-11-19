@@ -1,3 +1,5 @@
+-- Online computers of accounts whose billing period is on hold.
+-- `/*HOLD*/` is replaced with the hold columns this schema has (see idle.rs).
 SELECT w.workspace_id
 FROM api_cloud_workspaces w
 JOIN zuse_rust_control_owners o
@@ -26,6 +28,6 @@ WHERE ($1::text[] IS NULL OR w.account_id=ANY($1))
   AND COALESCE(w.request_config#>>'{runtimeActivation,phase}','') NOT IN ('preparing','launching','confirming','rolling-back')
   AND (w.request_config#>>'{rustRecreation,operationId}' IS NULL OR w.request_config#>>'{rustRecreation,phase}' IN ('ready','cancelled'))
   AND COALESCE(w.request_config#>>'{rustLifecycleOperation,phase}','ready')='ready'
-  AND EXISTS(SELECT 1 FROM api_cloud_billing_periods p WHERE p.account_id=w.account_id AND p.shared_credit_account AND p.shared_credit_hold AND p.period_start<=$2 AND p.period_end>$2)
+  AND EXISTS(SELECT 1 FROM api_cloud_billing_periods p WHERE p.account_id=w.account_id AND /*HOLD*/ AND p.period_start<=$2 AND p.period_end>$2)
 ORDER BY w.next_action_at,w.workspace_id
 LIMIT 1

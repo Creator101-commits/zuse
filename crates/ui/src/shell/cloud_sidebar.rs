@@ -939,7 +939,7 @@ mod tests {
         assert_eq!(peek.title, "Cloud chat");
         assert_eq!(peek.project.as_deref(), Some("Hello-World"));
         assert_eq!(peek.branch.as_deref(), Some("task/cloud"));
-        assert_eq!(peek.place_label(), "Cloud · Boxd · Running");
+        assert_eq!(peek.place_label(), "Cloud · Running");
         // Leaving the row closes it.
         cx.simulate_mouse_move(
             gpui::point(row.left() + px(1.0), row.bottom() + px(400.0)),

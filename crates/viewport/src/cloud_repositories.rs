@@ -20,12 +20,14 @@ mod agents;
 mod environment;
 mod form;
 mod github;
-mod guide;
 mod images;
 mod machine;
+mod onboarding;
 mod overview;
+mod plan;
 mod presentation;
 mod secrets;
+pub use onboarding::StartChat;
 gpui::actions!(
     cloud_setup_overlay,
     [CloseRepositoryPicker, CloseImageHistory]
@@ -105,11 +107,19 @@ pub struct RepositoryPanel {
     selected: BTreeSet<String>,
     queue: Vec<GithubRepository>,
     keys: BTreeMap<String, String>,
-    guide: guide::GuideState,
+    onboarding: onboarding::Onboarding,
+    /// The host's settled answer to "is this account subscribed?"; `None`
+    /// until it knows, when the panel's own entitlement read decides.
+    host_subscribed: Option<bool>,
+    /// The plan from the account's entitlements, and its billing summary.
+    plan_tier: Option<(plan::Tier, bool)>,
+    plan_read: bool,
+    plan_summary: Option<Value>,
     page: CloudPage,
 }
 impl EventEmitter<Request> for RepositoryPanel {}
 impl EventEmitter<OpenPage> for RepositoryPanel {}
+impl EventEmitter<StartChat> for RepositoryPanel {}
 impl RepositoryPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         images::bind_keys(cx);
@@ -160,7 +170,11 @@ impl RepositoryPanel {
             selected: BTreeSet::new(),
             queue: vec![],
             keys: BTreeMap::new(),
-            guide: Default::default(),
+            onboarding: Default::default(),
+            host_subscribed: None,
+            plan_tier: None,
+            plan_read: false,
+            plan_summary: None,
             page: CloudPage::All,
         }
     }
@@ -185,6 +199,10 @@ impl RepositoryPanel {
         self.machine.reset(cx);
         self.secrets.reset(cx);
         self.storage_usage = None;
+        self.onboarding = Default::default();
+        self.plan_tier = None;
+        self.plan_read = false;
+        self.plan_summary = None;
         self.owner = owner;
         self.loaded = false;
         self.projects.clear();
@@ -253,7 +271,67 @@ impl RepositoryPanel {
         self.call("agents", methods::CLOUD_AGENT_CONNECTIONS, json!({}), cx);
         self.load_machine(cx);
         self.refresh_image(cx);
+        self.call(
+            "plan-entitlements",
+            methods::CLOUD_BILLING_ENTITLEMENTS,
+            json!({}),
+            cx,
+        );
+        self.call(
+            "plan-summary",
+            methods::CLOUD_BILLING_SUMMARY,
+            json!({}),
+            cx,
+        );
         cx.notify();
+    }
+    /// The host's settled subscription answer (`None` while it is still
+    /// checking). Onboarding only ever appears for subscribed accounts.
+    pub fn set_cloud_subscribed(&mut self, subscribed: Option<bool>, cx: &mut Context<Self>) {
+        if self.host_subscribed != subscribed {
+            self.host_subscribed = subscribed;
+            cx.notify();
+        }
+    }
+    fn cloud_subscribed(&self) -> bool {
+        self.host_subscribed
+            .unwrap_or(self.plan_read && self.plan_tier.is_some())
+    }
+    /// Whether the first-run onboarding fills the Overview page right now.
+    pub fn onboarding_active(&self) -> bool {
+        matches!(self.page, CloudPage::Overview | CloudPage::All)
+            && !self.agent_recovery_open()
+            && self.onboarding_visible()
+    }
+    pub(crate) fn plan_glance(&self) -> Option<plan::PlanGlance> {
+        let (tier, trial) = self.plan_tier?;
+        Some(plan::PlanGlance::new(
+            tier,
+            trial,
+            self.plan_summary.as_ref(),
+        ))
+    }
+    fn receive_plan(&mut self, kind: &str, result: Result<Value, String>, owner: &Owner) {
+        // Plan reads only decorate onboarding and the Machine page; a failed
+        // read never surfaces as a page error.
+        let Ok(value) = result else {
+            if kind == "plan-entitlements" {
+                self.plan_read = true;
+            }
+            return;
+        };
+        if value["accountId"].as_str() != Some(owner.0.as_str())
+            || value["organizationId"].as_str() != owner.1.as_deref()
+        {
+            return;
+        }
+        if kind == "plan-entitlements" {
+            self.plan_read = true;
+            self.plan_tier =
+                plan::tier_from_entitlements(&value["data"], chrono::Utc::now().timestamp_millis());
+        } else {
+            self.plan_summary = Some(value["data"].clone());
+        }
     }
     pub fn receive(&mut self, id: u64, result: Result<Value, String>, cx: &mut Context<Self>) {
         let Some(pending) = self.pending.remove(&id) else {
@@ -264,6 +342,11 @@ impl RepositoryPanel {
         }
         if matches!(pending.kind, "image" | "image-build" | "image-delete") {
             self.receive_image(pending, result, cx);
+            return;
+        }
+        if pending.kind.starts_with("plan-") {
+            self.receive_plan(pending.kind, result, &pending.owner);
+            cx.notify();
             return;
         }
         let value = match result {

@@ -10,11 +10,12 @@ pub use settlement::{BoxdSettlementConfig, SettlementReport};
 pub use storage::{SnapshotSettlementConfig, SnapshotSettlementReport};
 pub mod native;
 mod payments;
+pub(crate) mod plans;
 use crate::error::ApiError;
 pub use catalog::BillingControl;
 pub use payments::{
-    CheckoutSummary, CreditDispute, CreditEvent, CreditPurchase, CustomerPage, PaymentEvent,
-    PaymentProviders, PortalProvider, Subscription,
+    CheckoutOutcome, CheckoutSummary, CreditDispute, CreditEvent, CreditPurchase, CustomerPage,
+    PaymentEvent, PaymentProviders, PortalProvider, Subscription,
 };
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
@@ -60,6 +61,9 @@ pub(crate) async fn require_capacity(
             _ => Err(ApiError::forbidden("cloud_billing_hold")),
         };
     }
+    if let Some(result) = plan_capacity(&period) {
+        return result;
+    }
     let id = period["period_id"].as_str().ok_or_else(invalid)?;
     let totals:(i64,i64,i64)=sqlx::query_as("SELECT (SELECT COALESCE(SUM(amount_micros),0)::bigint FROM api_cloud_billing_ledger WHERE period_id=$1 AND kind='provider-cost'),(SELECT COALESCE(SUM(amount_micros),0)::bigint FROM api_cloud_billing_ledger WHERE period_id=$1 AND kind='overage-charge'),(SELECT COALESCE(SUM(provider_cost_micros),0)::bigint FROM api_cloud_billing_reservations WHERE period_id=$1 AND expires_at>$2)")
         .bind(id).bind(now).fetch_one(&mut **tx).await?;
@@ -92,6 +96,9 @@ pub(crate) fn validate_capacity_snapshot(
             _ => Err(ApiError::forbidden("cloud_billing_hold")),
         };
     }
+    if let Some(result) = plan_capacity(&period) {
+        return result;
+    }
     period["period_id"].as_str().ok_or_else(invalid)?;
     let totals: (i64, i64, i64) = serde_json::from_value(totals.clone()).map_err(|_| invalid())?;
     if held(
@@ -104,6 +111,19 @@ pub(crate) fn validate_capacity_snapshot(
         return Err(ApiError::forbidden("cloud_billing_hold"));
     }
     Ok(())
+}
+/// Machine-minute periods: the usage hold, recomputed whenever usage settles
+/// or the cap changes, decides capacity. `None` for periods with original terms.
+fn plan_capacity(period: &Value) -> Option<Result<(), ApiError>> {
+    plans::period_plan(period)?;
+    Some(match period["status"].as_str() {
+        Some("active" | "pending" | "manual") if period["usage_hold"] == true => {
+            Err(ApiError::forbidden("cloud_usage_hold"))
+        }
+        Some("active" | "pending" | "manual") => Ok(()),
+        Some("grace" | "billing-hold" | "ended") => Err(ApiError::forbidden("cloud_billing_hold")),
+        _ => Err(invalid()),
+    })
 }
 fn invalid() -> ApiError {
     ApiError::unavailable("cloud_billing_policy_invalid")
@@ -170,6 +190,33 @@ mod tests {
         period["shared_credit_hold"] = serde_json::json!(false);
         period["status"] = serde_json::json!("billing-hold");
         assert!(validate_capacity_snapshot(Some(period), &serde_json::json!([0, 0, 0])).is_err());
+    }
+    #[test]
+    fn machine_minute_periods_use_the_usage_hold() {
+        let mut period = serde_json::json!({"period_id":"p","currency":"USD","status":"active","price_catalog_version":plans::CATALOG_VERSION,"plan_id":"cloud","usage_hold":false});
+        // Ledger totals far past any provider-cost allowance do not hold a plan period.
+        assert!(
+            validate_capacity_snapshot(
+                Some(period.clone()),
+                &serde_json::json!([900_000_000, 0, 0])
+            )
+            .is_ok()
+        );
+        period["usage_hold"] = serde_json::json!(true);
+        assert_eq!(
+            validate_capacity_snapshot(Some(period.clone()), &serde_json::json!([0, 0, 0]))
+                .unwrap_err()
+                .code,
+            "cloud_usage_hold"
+        );
+        period["usage_hold"] = serde_json::json!(false);
+        period["status"] = serde_json::json!("grace");
+        assert_eq!(
+            validate_capacity_snapshot(Some(period), &serde_json::json!([0, 0, 0]))
+                .unwrap_err()
+                .code,
+            "cloud_billing_hold"
+        );
     }
     #[test]
     fn capacity_matches_cumulative_ledger_and_live_reservations() {

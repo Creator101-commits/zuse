@@ -11,9 +11,9 @@ use serde_json::Value;
 pub(super) enum PeekPlace {
     /// This computer, or another of the account's computers by name.
     Local { device: Option<String> },
-    /// A cloud computer: its provider and machine state, when known.
+    /// A cloud computer and its machine state, when known. The
+    /// infrastructure behind it is never shown.
     Cloud {
-        provider: Option<String>,
         machine: Option<&'static str>,
         online: bool,
     },
@@ -84,10 +84,7 @@ impl ChatPeek {
             PeekPlace::Local {
                 device: Some(device),
             } => format!("Local · {device}"),
-            PeekPlace::Cloud {
-                provider, machine, ..
-            } => std::iter::once("Cloud")
-                .chain(provider.as_deref())
+            PeekPlace::Cloud { machine, .. } => std::iter::once("Cloud")
                 .chain(*machine)
                 .collect::<Vec<_>>()
                 .join(" · "),
@@ -108,15 +105,6 @@ pub(super) fn cloud_machine(state: Option<&str>) -> (Option<&'static str>, bool)
         Some(_) => (Some("Starting"), false),
         None => (None, false),
     }
-}
-
-/// A provider id as a name: `boxd` reads "Boxd".
-fn provider_label(id: &str) -> String {
-    let mut chars = id.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-        .unwrap_or_default()
 }
 
 fn non_empty(text: Option<&str>) -> Option<String> {
@@ -190,11 +178,7 @@ pub(super) fn cloud_peek(
                 .unwrap_or("New session"),
         )),
         project,
-        place: PeekPlace::Cloud {
-            provider: non_empty(row["providerId"].as_str()).map(|id| provider_label(&id)),
-            machine,
-            online,
-        },
+        place: PeekPlace::Cloud { machine, online },
         branch: non_empty(row["branch"].as_str()),
         agent: super::cloud_conversation::cloud_harness(row),
         model: non_empty(row["model"].as_str()),
@@ -428,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn a_cloud_task_shows_provider_machine_branch_and_agent_when_listed() {
+    fn a_cloud_task_shows_machine_branch_and_agent_but_never_its_provider() {
         let row = json!({
             "workspaceId": "task-1", "providerId": "boxd", "state": "ready",
             "title": "Cloud chat", "branch": "task/branch-1", "agent": "zuse"
@@ -444,7 +428,10 @@ mod tests {
                 PeekLine::Status,
             ]
         );
-        assert_eq!(peek.place_label(), "Cloud · Boxd · Running");
+        assert_eq!(peek.place_label(), "Cloud · Running");
+        assert!(!zuse_protocol::cloud_billing::plans::names_infrastructure(
+            &peek.place_label()
+        ));
         assert!(matches!(peek.place, PeekPlace::Cloud { online: true, .. }));
 
         let bare = cloud_peek(&json!({"workspaceId": "task-2"}), None, None, "");

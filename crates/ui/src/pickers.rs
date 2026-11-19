@@ -3945,7 +3945,7 @@ impl Pickers {
             device_label = "This computer".into();
         }
         if let Some(project) = &self.state.read(cx).cloud_project {
-            device_label = SharedString::from("Cloud sandbox · boxd");
+            device_label = SharedString::from("Cloud");
             project_label = SharedString::from(
                 project["displayName"]
                     .as_str()

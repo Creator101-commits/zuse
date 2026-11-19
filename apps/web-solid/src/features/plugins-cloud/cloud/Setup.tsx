@@ -350,10 +350,10 @@ function ImageGroup() {
   const label = () => (buildRetry() ? "Retry request" : ({ "not-built": "Build image", "auth-broken": "Rebuild image", failed: "Retry build" } as Record<string, string>)[state()] ?? "Update image");
   const failed = () => state() === "failed" || state() === "auth-broken";
   return (
-    <Group title="Cloud image" help="Build an image for the selected provider. Existing chats keep their current environment.">
+    <Group title="Cloud image" help="Build the image new cloud computers start from. Existing chats keep their current environment.">
       <Show
         when={image()}
-        fallback={<Row title={cloud.image.error ? "Image status unavailable" : "Checking cloud image…"} description="Checking whether this provider needs a build." />}
+        fallback={<Row title={cloud.image.error ? "Image status unavailable" : "Checking cloud image…"} description="Checking whether the image needs a build." />}
       >
         <Show
           when={state() === "ready" && !starting()}
@@ -393,13 +393,11 @@ function ImageGroup() {
       </Show>
       <div class="pc-provider">
         <div class="pc-provider-id">
-          <span class="pc-provider-radio" aria-hidden="true" />
-          <Icon name="cloud-boxd" size={16} />
-          <span class="pc-row-title">boxd</span>
-          <Badge tone="outline">Recommended</Badge>
+          <Icon name="cloud" size={16} />
+          <span class="pc-row-title">Cloud</span>
           <span class="pc-row-description">Billed by Zuse</span>
         </div>
-        <button type="button" class="pc-provider-logs" aria-label="View boxd build logs" onClick={() => setHistory(true)}>
+        <button type="button" class="pc-provider-logs" aria-label="View build logs" onClick={() => setHistory(true)}>
           <span class="pc-row-description">Zuse image</span>
           {imageStatus(state())}
           <span class="pc-row-description">Logs</span>
@@ -451,7 +449,7 @@ function BuildHistory(props: { open: boolean; onClose: () => void }) {
   const current = () => Math.min(page(), pages() - 1);
   return (
     <Show when={props.open}>
-      <Dialog open onOpenChange={(next) => !next && props.onClose()} title="View boxd build logs">
+      <Dialog open onOpenChange={(next) => !next && props.onClose()} title="Build logs">
         <div class="pc-builds">
           <Show when={builds()[0]} fallback={<p class="pc-muted">No image builds yet.</p>}>
             {(first) => <Build build={first()} first initiallyOpen />}
@@ -556,12 +554,17 @@ export function ImageStorage() {
     <Show when={storage()}>
       {(value) => {
         const deleting = () => value().state === "deleting";
+        const included = () => !!cloud.billing.summary?.plan;
         const enabled = () => !cloud.image.loading && !cloud.image.building && !cloud.image.deleting && cloud.image.value?.state !== "building" && !deleting() && canManageRepositories();
         return (
-          <Group title="Image storage" help={`${usd(value().monthlyCostMicros)} per 30 days, prorated while retained.`}>
-            <Row title="Retained images" description="Storage uses your $35 cloud allowance. Additional usage has the existing 5% markup and overage cap." action={<Badge tone="outline">1</Badge>} />
+          <Group title="Image storage" help={included() ? "Included in your plan while retained." : `${usd(value().monthlyCostMicros)} per 30 days, prorated while retained.`}>
             <Row
-              title="boxd"
+              title="Retained images"
+              description={included() ? "Image storage is included in your plan." : "Storage counts toward your cloud usage and overage cap."}
+              action={<Badge tone="outline">1</Badge>}
+            />
+            <Row
+              title="Cloud image"
               description={
                 deleting()
                   ? "Image deletion pending. Existing workspaces are preserved."
@@ -575,11 +578,13 @@ export function ImageStorage() {
                 </Action>
               }
             />
-            <Row
-              title="Storage usage this period"
-              description="Included in your cloud usage totals."
-              action={<Badge tone="outline">{cloud.billing.summary ? usd(cloud.billing.summary.storageCostMicros) : "—"}</Badge>}
-            />
+            <Show when={!included()}>
+              <Row
+                title="Storage usage this period"
+                description="Included in your cloud usage totals."
+                action={<Badge tone="outline">{cloud.billing.summary ? usd(cloud.billing.summary.storageCostMicros) : "—"}</Badge>}
+              />
+            </Show>
             <Show when={value().lastError}>{(error) => <Note error>Cleanup will retry: {error()}</Note>}</Show>
             <Show when={cloud.image.error}>
               {(error) => (

@@ -71,13 +71,8 @@ impl RuntimeControl {
             .bind(zuse_protocol::cloud_task_commands::MODE)
             .fetch_one(&self.pool)
             .await?;
-        let installed: bool = crate::db::schema::present(
-            &self.pool,
-            "SELECT to_regclass('zuse_brokeboy_compute_charges') IS NOT NULL",
-        )
-        .await?;
-        let credit: Option<i64> = if installed {
-            sqlx::query_scalar(include_str!("credit_deadline.sql"))
+        let credit: Option<i64> = if let Some(hold) = self.hold_condition().await? {
+            sqlx::query_scalar(&include_str!("credit_deadline.sql").replace("/*HOLD*/", hold))
                 .bind(self.creation_accounts.filter())
                 .bind(now)
                 .bind(zuse_protocol::cloud_task_commands::MODE)
@@ -140,22 +135,41 @@ impl RuntimeControl {
         self.admit_credit_or_idle_sleep(tx, row, generation, now, "idle-timeout")
             .await
     }
-    async fn credit_sleep_once(&self, now: i64) -> Result<bool, ApiError> {
-        let installed: bool = crate::db::schema::present(
+    /// The billing hold condition over period `p` for this schema: the
+    /// shared-credit hold (optional migration 0033) and the plan usage hold
+    /// (migration 0054). `None` when neither exists.
+    async fn hold_condition(&self) -> Result<Option<&'static str>, ApiError> {
+        let shared = crate::db::schema::present(
             &self.pool,
             "SELECT to_regclass('zuse_brokeboy_compute_charges') IS NOT NULL",
         )
         .await?;
-        if !installed {
+        let usage = crate::db::schema::present(
+            &self.pool,
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='api_cloud_billing_periods' AND column_name='usage_hold')",
+        )
+        .await?;
+        Ok(match (shared, usage) {
+            (true, true) => {
+                Some("((p.shared_credit_account AND p.shared_credit_hold) OR p.usage_hold)")
+            }
+            (true, false) => Some("(p.shared_credit_account AND p.shared_credit_hold)"),
+            (false, true) => Some("p.usage_hold"),
+            (false, false) => None,
+        })
+    }
+    async fn credit_sleep_once(&self, now: i64) -> Result<bool, ApiError> {
+        let Some(hold) = self.hold_condition().await? else {
             return Ok(false);
-        }
-        let candidate: Option<String> = sqlx::query_scalar(include_str!("credit_candidates.sql"))
-            .bind(self.creation_accounts.filter())
-            .bind(now)
-            .bind(now)
-            .bind(zuse_protocol::cloud_task_commands::MODE)
-            .fetch_optional(&self.pool)
-            .await?;
+        };
+        let candidate: Option<String> =
+            sqlx::query_scalar(&include_str!("credit_candidates.sql").replace("/*HOLD*/", hold))
+                .bind(self.creation_accounts.filter())
+                .bind(now)
+                .bind(now)
+                .bind(zuse_protocol::cloud_task_commands::MODE)
+                .fetch_optional(&self.pool)
+                .await?;
         let Some(id) = candidate else {
             return Ok(false);
         };
@@ -164,7 +178,7 @@ impl RuntimeControl {
         if !eligible(&row) {
             return Ok(false);
         }
-        let held:Option<bool>=sqlx::query_scalar("SELECT shared_credit_hold FROM api_cloud_billing_periods WHERE account_id=$1 AND shared_credit_account AND period_start<=$2 AND period_end>$2 ORDER BY period_start DESC LIMIT 1 FOR SHARE").bind(required(&row,"account_id")?).bind(now).fetch_optional(&mut *tx).await?;
+        let held: Option<bool> = sqlx::query_scalar(&format!("SELECT {hold} FROM api_cloud_billing_periods p WHERE account_id=$1 AND period_start<=$2 AND period_end>$2 ORDER BY period_start DESC LIMIT 1 FOR SHARE")).bind(required(&row,"account_id")?).bind(now).fetch_optional(&mut *tx).await?;
         if held != Some(true) {
             return Ok(false);
         }

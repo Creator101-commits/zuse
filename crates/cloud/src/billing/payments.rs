@@ -7,7 +7,7 @@ pub use credits::{CreditDispute, CreditEvent, CreditPurchase};
 pub mod events;
 use crate::{error::ApiError, store::Store};
 use async_trait::async_trait;
-pub use checkout::{CheckoutSummary, CustomerPage};
+pub use checkout::{CheckoutOutcome, CheckoutSummary, CustomerPage};
 pub use events::{PaymentEvent, Subscription};
 use reqwest::{Client, Url};
 use serde_json::{Value, json};
@@ -117,6 +117,10 @@ pub trait PortalProvider: Send + Sync {
         Err(unavailable())
     }
     async fn subscription(&self, _id: &str) -> Result<Subscription, ApiError> {
+        Err(unavailable())
+    }
+    /// End a subscription's trial now so the plan starts and is charged.
+    async fn end_trial(&self, _id: &str) -> Result<(), ApiError> {
         Err(unavailable())
     }
 }
@@ -373,10 +377,26 @@ impl PortalProvider for StripePortal {
     }
     fn supports_checkout(&self, offer: &str) -> bool {
         self.events.is_some()
-            && self
-                .checkout
-                .as_ref()
-                .is_some_and(|c| c.offers.contains_key(offer))
+            && self.checkout.as_ref().is_some_and(|c| {
+                if offer == zuse_protocol::cloud_billing::plans::CLOUD_TRIAL_OFFER {
+                    c.trial_fee.is_some()
+                        && c.offers
+                            .contains_key(zuse_protocol::cloud_billing::plans::CLOUD_OFFER)
+                } else {
+                    c.offers.contains_key(offer)
+                }
+            })
+    }
+    async fn end_trial(&self, id: &str) -> Result<(), ApiError> {
+        // Ends the trial immediately: Stripe invoices the first $20 period now.
+        ProviderHttp::json(
+            self.http
+                .request(reqwest::Method::POST, &["subscriptions", id])?
+                .header("Idempotency-Key", format!("zuse-end-trial:{id}"))
+                .form(&[("trial_end", "now"), ("proration_behavior", "none")]),
+        )
+        .await?;
+        Ok(())
     }
     async fn verify_customer(&self, owner: &str, id: &str) -> Result<(), ApiError> {
         let value = ProviderHttp::json(
@@ -440,10 +460,24 @@ impl PortalProvider for StripePortal {
         offer: &str,
         success: &str,
     ) -> Result<String, ApiError> {
+        use zuse_protocol::cloud_billing::plans;
         let config = self.checkout.as_ref().ok_or_else(unavailable)?;
         let customer = customer.ok_or_else(unavailable)?;
         self.verify_customer(owner, customer).await?;
-        let price = config.offers.get(offer).ok_or_else(unavailable)?;
+        // The trial is a Cloud subscription with a 7-day trial and a one-time
+        // $1 price on its first invoice, paid by a card collected now.
+        let trial = offer == plans::CLOUD_TRIAL_OFFER;
+        let subscribed_offer = if trial { plans::CLOUD_OFFER } else { offer };
+        let price = config
+            .offers
+            .get(subscribed_offer)
+            .ok_or_else(unavailable)?;
+        let trial_fee = if trial {
+            Some(config.trial_fee.as_ref().ok_or_else(unavailable)?)
+        } else {
+            None
+        };
+        let trial_days = plans::TRIAL_DAYS.to_string();
         let success = success.replace("{CHECKOUT_ID}", "{CHECKOUT_SESSION_ID}");
         let mut params = vec![
             ("mode", "subscription"),
@@ -454,9 +488,9 @@ impl PortalProvider for StripePortal {
             ("line_items[0][price]", price.as_str()),
             ("line_items[0][quantity]", "1"),
             ("metadata[account_id]", owner),
-            ("metadata[offer_id]", offer),
+            ("metadata[offer_id]", subscribed_offer),
             ("subscription_data[metadata][account_id]", owner),
-            ("subscription_data[metadata][offer_id]", offer),
+            ("subscription_data[metadata][offer_id]", subscribed_offer),
             (
                 "automatic_tax[enabled]",
                 if config.automatic_tax {
@@ -470,10 +504,25 @@ impl PortalProvider for StripePortal {
             ("customer_update[address]", "auto"),
             ("customer_update[name]", "auto"),
         ];
-        if offer == checkout::CLOUD_OFFER {
+        let mut item = 1;
+        let items = ["line_items[1][price]", "line_items[2][price]"];
+        let quantities = ["line_items[1][quantity]", "line_items[2][quantity]"];
+        if plans::CLOUD_OFFERS.contains(&subscribed_offer) {
             if let Some(overage) = &config.overage {
-                params.push(("line_items[1][price]", overage.as_str()));
+                params.push((items[item - 1], overage.as_str()));
+                item += 1;
             }
+        }
+        if let Some(fee) = trial_fee {
+            params.push((items[item - 1], fee.as_str()));
+            params.push((quantities[item - 1], "1"));
+            params.push(("subscription_data[trial_period_days]", trial_days.as_str()));
+            params.push(("payment_method_collection", "always"));
+            params.push((
+                "subscription_data[trial_settings][end_behavior][missing_payment_method]",
+                "cancel",
+            ));
+            params.push(("subscription_data[metadata][trial]", "first-week"));
         }
         let result = ProviderHttp::json(
             self.http
@@ -518,7 +567,10 @@ impl PortalProvider for StripePortal {
         let value = ProviderHttp::json(
             self.http
                 .request(reqwest::Method::GET, &["subscriptions", id])?
-                .query(&[("expand[]", "customer")]),
+                .query(&[
+                    ("expand[]", "customer"),
+                    ("expand[]", "default_payment_method"),
+                ]),
         )
         .await?;
         self.events

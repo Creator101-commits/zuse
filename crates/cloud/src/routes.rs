@@ -1406,7 +1406,7 @@ async fn entitlements(
 ) -> Result<Json<Value>, ApiError> {
     let access = state.access(&headers, AccessKind::Billing).await?;
     Ok(Json(
-        json!({"entitlements":state.store.entitlements(&access.owner_id).await?}),
+        json!({"entitlements":state.store.entitlements(&access.owner_id).await?,"catalog":state.store.plan_catalog(&access.owner_id).await?}),
     ))
 }
 #[derive(Deserialize)]
@@ -2380,7 +2380,21 @@ async fn billing_checkout(
     let access = state.access(&headers, AccessKind::Billing).await?;
     let Json(body) = body.map_err(|_| ApiError::bad_request("invalid_machine_offer"))?;
     Ok(Json(
-        json!({"checkoutUrl":state.store.billing_checkout_with_key(&access.owner_id,&body.offer_id,chrono::Utc::now().timestamp_millis(),body.idempotency_key.as_deref()).await?}),
+        match state
+            .store
+            .billing_checkout_outcome(
+                &access.owner_id,
+                &body.offer_id,
+                chrono::Utc::now().timestamp_millis(),
+                body.idempotency_key.as_deref(),
+            )
+            .await?
+        {
+            crate::billing::CheckoutOutcome::Url(url) => json!({"checkoutUrl":url}),
+            crate::billing::CheckoutOutcome::TrialConverted => {
+                json!({"checkoutUrl":null,"trialConverted":true})
+            }
+        },
     ))
 }
 #[derive(Deserialize)]

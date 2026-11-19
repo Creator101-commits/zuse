@@ -11,9 +11,6 @@ pub(crate) struct CloudCanvasChoices {
     run: ResolvedRunConfig,
     source: zuse_viewport::creation_sources::SelectionSnapshot,
 }
-#[derive(Default)]
-struct ProviderPreferences(HashMap<(String, Option<String>), String>);
-impl gpui::Global for ProviderPreferences {}
 /// The last cloud context each account and organization received, so a new
 /// composer (every opened cloud chat has one) shows its models at once.
 #[derive(Default)]
@@ -24,8 +21,7 @@ use connections::ConnectionChoices;
 #[derive(Default)]
 pub(super) struct Cloud {
     pub(super) frozen: bool,
-    provider_preference: Option<String>,
-    providers_expanded: bool,
+    sizes_expanded: bool,
     pub(super) task_binding: Option<TaskBinding>,
     owner: Option<String>,
     organization: Option<String>,
@@ -136,15 +132,17 @@ impl Pickers {
             .map(|id| format!("organization:{id}"))
             .or_else(|| self.state.read(cx).cloud_user_id().map(str::to_owned));
         let project = project.filter(|row| row["accountId"].as_str() == expected.as_deref());
-        self.cloud.provider_preference = project
-            .as_ref()
-            .and_then(|row| row["providerId"].as_str())
-            .map(str::to_owned);
+        let provider = providers::select(&self.cloud.context).ok().or_else(|| {
+            project
+                .as_ref()
+                .and_then(|row| row["providerId"].as_str())
+                .map(str::to_owned)
+        });
         self.state.update(cx, |state, cx| {
             state.cloud_project = project.clone();
             cx.notify();
         });
-        if let Some(provider) = self.cloud.provider_preference.clone() {
+        if let Some(provider) = provider {
             self.cloud.catalog = None;
             self.cloud.models.clear();
             self.cloud.harnesses = Loadable::Idle;
@@ -322,27 +320,10 @@ impl Pickers {
         if self.cloud.task_binding.is_some() || self.cloud_launch_frozen() {
             return;
         }
-        let preferred = self.cloud.owner.as_ref().and_then(|owner| {
-            cx.default_global::<ProviderPreferences>()
-                .0
-                .get(&(owner.clone(), self.cloud.organization.clone()))
-                .cloned()
-        });
-        self.cloud.provider_preference = preferred;
-        match providers::select(
-            &self.cloud.context,
-            self.cloud.provider_preference.as_deref(),
-            row["providerId"].as_str(),
-        ) {
-            Ok(provider) => row["providerId"] = json!(provider),
-            Err(_) => {
-                row["providerId"] = self
-                    .cloud
-                    .provider_preference
-                    .as_ref()
-                    .map(|id| json!(id))
-                    .unwrap_or(Value::Null)
-            }
+        // New computers use the account's default provider; a repository's
+        // own provider applies only when the context has none ready.
+        if let Ok(provider) = providers::select(&self.cloud.context) {
+            row["providerId"] = json!(provider);
         }
         let provider = row["providerId"].as_str().unwrap_or("");
         if self.cloud.context["providerAgentCatalogs"].is_object() {
@@ -441,13 +422,7 @@ impl Pickers {
             .or_else(|| state.engine().map(|engine| engine.controller()));
         if self.cloud.owner != owner || self.cloud.organization != organization {
             self.cloud.frozen = false;
-            self.cloud.provider_preference = owner.as_ref().and_then(|id| {
-                cx.default_global::<ProviderPreferences>()
-                    .0
-                    .get(&(id.clone(), organization.clone()))
-                    .cloned()
-            });
-            self.cloud.providers_expanded = false;
+            self.cloud.sizes_expanded = false;
             self.cloud.owner = owner.clone();
             self.cloud.organization = organization.clone();
             self.cloud.context = Value::Null;
@@ -537,12 +512,13 @@ impl Pickers {
             .map(|binding| binding.provider.clone())
             .unwrap_or_else(|| {
                 let project = self.state.read(cx).cloud_project.clone();
-                providers::select(
-                    &value,
-                    self.cloud.provider_preference.as_deref(),
-                    project.as_ref().and_then(|p| p["providerId"].as_str()),
-                )
-                .unwrap_or_else(|_| self.cloud.provider_preference.clone().unwrap_or_default())
+                providers::select(&value).unwrap_or_else(|_| {
+                    project
+                        .as_ref()
+                        .and_then(|p| p["providerId"].as_str())
+                        .unwrap_or_default()
+                        .to_owned()
+                })
             });
         if self.cloud.task_binding.is_none() {
             self.state.update(cx, |state, _| {
@@ -617,104 +593,134 @@ impl Pickers {
             agent,
         )
     }
-    pub(crate) fn cloud_launch_provider(&self, cx: &App) -> Result<String, String> {
+    pub(crate) fn cloud_launch_provider(&self, _cx: &App) -> Result<String, String> {
         if let Some(binding) = &self.cloud.task_binding {
             return Ok(binding.provider.clone());
         }
-        providers::select(
-            &self.cloud.context,
-            self.cloud.provider_preference.as_deref(),
-            self.state
-                .read(cx)
-                .cloud_project
-                .as_ref()
-                .and_then(|p| p["providerId"].as_str()),
-        )
+        providers::select(&self.cloud.context)
     }
     pub(crate) fn cloud_launch_size(&self, provider: &str, cx: &App) -> Result<String, String> {
         let state = self.state.read(cx);
+        // Plan sizes are the same for every provider; provider sizes only
+        // carry over while the provider matches.
+        let plan_sizes = !providers::sizes(&self.cloud.context).is_empty();
         let preferred = state
             .cloud_project
             .as_ref()
-            .filter(|project| project["providerId"] == provider)
+            .filter(|project| plan_sizes || project["providerId"] == provider)
             .and_then(|project| project["sizeId"].as_str());
         providers::size(&self.cloud.context, provider, preferred)
     }
-    fn choose_cloud_provider(&mut self, id: String, cx: &mut Context<Self>) {
-        if self.cloud.task_binding.is_some()
-            || self.cloud_launch_frozen()
-            || !providers::available(&self.cloud.context)
-                .iter()
-                .any(|row| row.id == id)
+    /// The size row shown for new computers: the remembered size while the
+    /// plan allows it, else the default.
+    fn cloud_selected_size(
+        &self,
+        cx: &App,
+    ) -> Option<zuse_protocol::cloud_billing::plans::SizeOption> {
+        let sizes = providers::sizes(&self.cloud.context);
+        let preferred = self
+            .state
+            .read(cx)
+            .cloud_project
+            .as_ref()
+            .and_then(|project| project["sizeId"].as_str().map(str::to_owned));
+        sizes
+            .iter()
+            .find(|s| s.available && Some(&s.id) == preferred.as_ref())
+            .or_else(|| {
+                sizes.iter().find(|s| {
+                    s.available && s.id == zuse_protocol::cloud_billing::plans::DEFAULT_SIZE
+                })
+            })
+            .or_else(|| sizes.iter().find(|s| s.available))
+            .cloned()
+    }
+    fn cloud_computer_title(&self, cx: &App) -> String {
+        match self
+            .cloud_selected_size(cx)
+            .filter(|_| self.cloud.task_binding.is_none())
         {
+            Some(size) => format!("Computer · {}", size.label),
+            None => "Computer · Cloud".to_owned(),
+        }
+    }
+    /// Picking a size the plan lacks opens Billing to upgrade instead.
+    fn choose_cloud_size(
+        &mut self,
+        size: zuse_protocol::cloud_billing::plans::SizeOption,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cloud.task_binding.is_some() || self.cloud_launch_frozen() {
             return;
         }
-        let Some(owner) = self.cloud.owner.clone() else {
+        if !size.available {
+            self.close(cx);
+            window.dispatch_action(Box::new(crate::shell::OpenBilling), cx);
             return;
-        };
-        cx.default_global::<ProviderPreferences>()
-            .0
-            .insert((owner, self.cloud.organization.clone()), id.clone());
-        self.cloud.provider_preference = Some(id.clone());
+        }
+        self.cloud.sizes_expanded = false;
         if let Some(mut project) = self.cloud_destination(cx) {
-            project["providerId"] = json!(id);
+            project["sizeId"] = json!(size.id);
             self.select_cloud(project, cx);
         }
         cx.notify();
     }
+    /// The computer for a new chat: one Cloud option with a size choice. A
+    /// task's computer is fixed.
     fn cloud_computer_rows(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let locked = self.cloud.task_binding.is_some();
-        let provider = self
-            .cloud_launch_provider(cx)
-            .ok()
-            .or_else(|| self.cloud.provider_preference.clone());
+        let sizes = providers::sizes(&self.cloud.context);
+        let selected = self.cloud_selected_size(cx);
+        let expandable = !locked && !sizes.is_empty();
+        let title = self.cloud_computer_title(cx);
         let mut view = div().flex().flex_col().child(
             zuse_viewport::creation_style::option(
                 "cloud-computer-options",
-                format!("Computer · {}", provider.as_deref().unwrap_or("Choose")),
+                title,
                 "monitor",
                 false,
             )
             .debug_selector(|| "cloud-computer-options".into())
-            .child(zuse_viewport::creation_style::meta(if locked {
-                "Task computer"
-            } else if self.cloud.providers_expanded {
-                "▾"
-            } else {
-                "▸"
-            }))
-            .on_click(cx.listener(|this, _, _, cx| {
-                if this.cloud.task_binding.is_none() {
-                    this.cloud.providers_expanded = !this.cloud.providers_expanded;
+            .when(locked || expandable, |row| {
+                row.child(zuse_viewport::creation_style::meta(if locked {
+                    "Task computer"
+                } else if self.cloud.sizes_expanded {
+                    "▾"
+                } else {
+                    "▸"
+                }))
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if expandable {
+                    this.cloud.sizes_expanded = !this.cloud.sizes_expanded;
                     cx.notify();
                 }
             })),
         );
-        if !locked && self.cloud.providers_expanded {
-            for (i, row) in providers::available(&self.cloud.context)
-                .into_iter()
-                .enumerate()
-            {
-                let chosen = provider.as_deref() == Some(row.id.as_str());
-                let id = row.id.clone();
-                let debug_id = format!("cloud-computer-provider-{id}");
-                view =
-                    view.child(
-                        zuse_viewport::creation_style::option(
-                            ("cloud-computer-provider", i),
-                            row.id.to_uppercase(),
-                            "cloud-dither",
-                            chosen,
-                        )
-                        .debug_selector(move || debug_id.clone())
-                        .child(zuse_viewport::creation_style::selection(chosen))
-                        .when_some(row.reason, |view, reason| {
-                            view.child(zuse_viewport::creation_style::meta(reason))
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.choose_cloud_provider(id.clone(), cx)
-                        })),
-                    );
+        if expandable && self.cloud.sizes_expanded {
+            for (i, size) in sizes.into_iter().enumerate() {
+                let chosen = selected.as_ref().is_some_and(|s| s.id == size.id);
+                let debug_id = format!("cloud-computer-size-{}", size.id);
+                let label = providers::size_label(&size);
+                let available = size.available;
+                view = view.child(
+                    zuse_viewport::creation_style::option(
+                        ("cloud-computer-size", i),
+                        label,
+                        "cloud-dither",
+                        chosen,
+                    )
+                    .debug_selector(move || debug_id.clone())
+                    .when(!available, |row| {
+                        row.opacity(0.6)
+                            .child(zuse_viewport::creation_style::meta("Upgrade"))
+                    })
+                    .child(zuse_viewport::creation_style::selection(chosen))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.choose_cloud_size(size.clone(), window, cx)
+                    })),
+                );
             }
         }
         if !locked {
@@ -818,11 +824,6 @@ impl Pickers {
         } else {
             div().into_any_element()
         };
-        let selected_provider = self
-            .cloud_launch_provider(cx)
-            .ok()
-            .or_else(|| self.cloud.provider_preference.clone())
-            .unwrap_or_else(|| "Choose computer".into());
         div()
             .flex()
             .flex_col()
@@ -833,7 +834,7 @@ impl Pickers {
                     .child(
                         zuse_viewport::creation_style::option(
                             "cloud-destination",
-                            format!("Cloud · {selected_provider}"),
+                            "Cloud",
                             "cloud-dither",
                             selected,
                         )
@@ -1005,37 +1006,102 @@ mod project_selection_tests {
         cx.run_until_parked();
     }
     #[gpui::test]
-    fn clicking_computer_provider_keeps_repository_and_loads_its_models(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn computer_row_offers_sizes_and_never_providers(cx: &mut gpui::TestAppContext) {
         cx.update(|cx| {
             gpui_base::init(cx);
             cx.set_global(Theme::dark());
         });
+        let mut context = provider_context();
+        context["computerCapabilities"]["defaultProvider"] = json!("e2b");
+        context["computerCapabilities"]["computerSizes"] = json!([
+            {"id":"default","label":"Standard · 4 vCPU · 16 GB","vcpus":4,"memoryMib":16384,"machineRate":4,"available":true},
+            {"id":"large","label":"Large · 8 vCPU · 32 GB","vcpus":8,"memoryMib":32768,"machineRate":8,"available":false,"requiresPlan":"cloud-max"}
+        ]);
+        let seeded = context.clone();
         let handle=cx.add_window(|_,cx| {
             let state=cx.new(|_| {let mut state=AppState::new();state.apply_cloud_account(json!({"user":{"id":"fixture-user"},"orgId":null}));state});
-            ComputerRows(cx.new(|cx| {let mut pickers=Pickers::new(state,cx);pickers.seed_cloud_creation_for_test(provider_context(),json!({"projectId":"repository","accountId":"fixture-user","providerId":"boxd","repositoryIdentity":"github.com/fixture/repo"}),cx);pickers.cloud.providers_expanded=true;pickers}))
+            ComputerRows(cx.new(|cx| {let mut pickers=Pickers::new(state,cx);pickers.seed_cloud_creation_for_test(seeded,json!({"projectId":"repository","accountId":"fixture-user","providerId":"boxd","repositoryIdentity":"github.com/fixture/repo"}),cx);pickers.cloud.sizes_expanded=true;pickers}))
         });
         cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
             .unwrap();
         {
             let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
-            let row = visual
-                .debug_bounds("cloud-computer-provider-e2b")
-                .expect("actual E2B provider row painted");
-            visual.simulate_click(row.center(), gpui::Modifiers::default());
+            for id in [
+                "cloud-computer-provider-boxd",
+                "cloud-computer-provider-boat",
+                "cloud-computer-provider-e2b",
+                "cloud-computer-provider-daytona",
+            ] {
+                assert!(visual.debug_bounds(id).is_none(), "{id}");
+            }
+            assert!(visual.debug_bounds("cloud-computer-size-default").is_some());
+            // Large needs Cloud Max: clicking it offers the upgrade and keeps Standard.
+            let large = visual
+                .debug_bounds("cloud-computer-size-large")
+                .expect("large size row painted");
+            visual.simulate_click(large.center(), gpui::Modifiers::default());
         }
         cx.run_until_parked();
         handle
             .read_with(cx, |host, cx| {
                 let p = host.0.read(cx);
-                assert_eq!(
-                    p.state.read(cx).cloud_project.as_ref().unwrap()["projectId"],
-                    "repository"
-                );
+                let project = p.state.read(cx).cloud_project.clone().unwrap();
+                assert_eq!(project["projectId"], "repository");
+                // The account default provider, not the repository's hint.
+                assert_eq!(project["providerId"], "e2b");
                 assert_eq!(p.cloud_launch_provider(cx).unwrap(), "e2b");
+                assert_eq!(p.cloud_launch_size("e2b", cx).unwrap(), "default");
                 assert_eq!(p.resolved(cx).model.as_deref(), Some("e2b-model"));
-                assert_eq!(p.cloud.provider_preference.as_deref(), Some("e2b"));
+                let labels: Vec<_> = providers::sizes(&p.cloud.context)
+                    .iter()
+                    .map(providers::size_label)
+                    .chain([p.cloud_computer_title(cx)])
+                    .collect();
+                assert_eq!(
+                    labels,
+                    [
+                        "Standard · 4 vCPU · 16 GB",
+                        "Large · 8 vCPU · 32 GB · Cloud Max",
+                        "Computer · Standard · 4 vCPU · 16 GB"
+                    ]
+                );
+                for label in labels {
+                    assert!(
+                        !zuse_protocol::cloud_billing::plans::names_infrastructure(&label),
+                        "{label}"
+                    );
+                }
+            })
+            .unwrap();
+        // On Cloud Max, Large is selectable and becomes the request's size.
+        handle
+            .update(cx, |host, _, cx| {
+                host.0.update(cx, |p, cx| {
+                    p.cloud.context["computerCapabilities"]["computerSizes"][1]["available"] =
+                        json!(true);
+                    p.cloud.sizes_expanded = true;
+                    cx.notify();
+                })
+            })
+            .unwrap();
+        cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear())
+            .unwrap();
+        {
+            let mut visual = gpui::VisualTestContext::from_window(handle.into(), cx);
+            let large = visual
+                .debug_bounds("cloud-computer-size-large")
+                .expect("large size row painted");
+            visual.simulate_click(large.center(), gpui::Modifiers::default());
+        }
+        cx.run_until_parked();
+        handle
+            .read_with(cx, |host, cx| {
+                let p = host.0.read(cx);
+                assert_eq!(p.cloud_launch_size("e2b", cx).unwrap(), "large");
+                assert_eq!(
+                    p.cloud_computer_title(cx),
+                    "Computer · Large · 8 vCPU · 32 GB"
+                );
             })
             .unwrap();
         handle
@@ -1081,7 +1147,6 @@ mod project_selection_tests {
                 plan: false,
             };
             p.bind_cloud_task(target.clone(), "e2b".into(), Some(choice.clone()), cx);
-            p.choose_cloud_provider("boat".into(), cx);
             state.update(cx, |state, _| {
                 state.connection = crate::state::ConnectionStatus::Failed("Sleeping".into())
             });

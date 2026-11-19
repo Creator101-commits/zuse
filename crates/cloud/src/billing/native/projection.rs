@@ -49,7 +49,7 @@ impl BillingControl {
             .as_array()
             .ok_or_else(|| ApiError::unavailable("invalid_billing_result"))?
         {
-            if value["plan"]["id"] != CLOUD_PLAN {
+            if !cloud_plan(&value["plan"]["id"]) {
                 continue;
             }
             native.validate_compute_plan(&value["plan"])?;
@@ -70,7 +70,8 @@ impl BillingControl {
             );
             self.project_subscription(&mut tx, provider, &event, &sub, now, false)
                 .await?;
-            sqlx::query("UPDATE api_cloud_billing_periods SET shared_credit_account=true,included_provider_cost_micros=40000000 WHERE account_id=$1 AND provider_subscription_id=$2 AND period_start=$3").bind(owner).bind(&sub.id).bind(sub.period_start).execute(&mut *tx).await?;
+            // The wallet grant is the allowance; the wallet balance is the hold.
+            sqlx::query("UPDATE api_cloud_billing_periods SET shared_credit_account=true,included_provider_cost_micros=$4,usage_hold=false,hold_reason=NULL WHERE account_id=$1 AND provider_subscription_id=$2 AND period_start=$3").bind(owner).bind(&sub.id).bind(sub.period_start).bind(plan_credit_micros(&value["plan"])).execute(&mut *tx).await?;
         }
         tx.commit().await?;
         self.sync_credit_capacity(owner).await?;
@@ -191,5 +192,7 @@ fn project(owner: &str, value: &Value) -> Result<crate::billing::Subscription, A
             .filter(|v| *v >= 0)
             .ok_or_else(|| ApiError::unavailable("invalid_billing_result"))?,
         customer: None,
+        trialing: value["status"] == "trialing",
+        card_fingerprint: None,
     })
 }

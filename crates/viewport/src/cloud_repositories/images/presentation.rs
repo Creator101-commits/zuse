@@ -67,7 +67,7 @@ impl RepositoryPanel {
                 } else {
                     "Checking cloud image…"
                 },
-                "Checking whether this provider needs a build.",
+                "Checking whether a build is needed.",
                 None,
             ));
         } else if state == "ready" && !starting {
@@ -207,12 +207,11 @@ impl RepositoryPanel {
                                         ),
                                 )
                                 .child(
-                                    icon("cloud-boxd")
+                                    icon("cloud-dither")
                                         .size(px(16.))
                                         .text_color(palette::rgb(TEXT)),
                                 )
-                                .child(s::title_text("boxd"))
-                                .child(cs::badge("Recommended", false, true))
+                                .child(s::title_text("Cloud"))
                                 .child(s::description_text(tr(
                                     cx,
                                     msg::settings::cloud_hosting_zuse_billed,
@@ -222,7 +221,7 @@ impl RepositoryPanel {
                             div()
                                 .id("cloud-image-history-trigger")
                                 .role(Role::Button)
-                                .aria_label(tr(cx, msg::native::view_boxd_build_logs))
+                                .aria_label("View build logs")
                                 .track_focus(&trigger.clone().tab_stop(true))
                                 .tab_index(0)
                                 .h(px(28.))
@@ -296,7 +295,7 @@ impl RepositoryPanel {
         let mut view = cs::group(
             "Cloud image",
             Some(
-                "Build an image for the selected provider. Existing chats keep their current environment.",
+                "Build an image for your cloud computers. Existing chats keep their current environment.",
             ),
             None,
             body,
@@ -328,7 +327,12 @@ impl RepositoryPanel {
             .get_or_insert_with(|| cx.focus_handle())
             .clone();
         let id = storage.snapshot_id.clone();
-        let mut body=column().child(cs::setting_row(true,"Retained images","Storage uses your $35 cloud allowance. Additional usage has the existing 5% markup and overage cap.",Some(cs::badge("1",false,true).into_any_element())));
+        let mut body = column().child(cs::setting_row(
+            true,
+            "Retained images",
+            "Storage for saved images is included in your Cloud plan.",
+            Some(cs::badge("1", false, true).into_any_element()),
+        ));
         let mut action = row();
         {
             action = action.child(
@@ -350,7 +354,7 @@ impl RepositoryPanel {
                     })),
             );
         }
-        body=body.child(cs::setting_row(false,"boxd",if deleting{"Image deletion pending. Existing workspaces are preserved."}else if storage.billing_enabled{"Deleting this image requires a rebuild for future workspaces. Existing workspace disks and authentication are preserved."}else{"Storage billing has not started. Deleting this image requires a rebuild for future workspaces."},Some(action.into_any_element())));
+        body=body.child(cs::setting_row(false,"Cloud",if deleting{"Image deletion pending. Existing workspaces are preserved."}else if storage.billing_enabled{"Deleting this image requires a rebuild for future workspaces. Existing workspace disks and authentication are preserved."}else{"Storage billing has not started. Deleting this image requires a rebuild for future workspaces."},Some(action.into_any_element())));
         body = body.child(cs::setting_row(
             false,
             "Storage usage this period",
@@ -533,7 +537,7 @@ impl RepositoryPanel {
             .id("cloud-image-history-dialog")
             .relative()
             .role(Role::Dialog)
-            .aria_label(tr(cx, msg::native::view_boxd_build_logs))
+            .aria_label("View build logs")
             .w(px(
                 576_f32.min(f32::from(window.viewport_size().width) - 32.)
             ))
@@ -558,7 +562,7 @@ impl RepositoryPanel {
                             .text_size(px(15.))
                             .line_height(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(tr(cx, msg::native::view_boxd_build_logs)),
+                            .child("View build logs"),
                     ),
             )
             .child(body)

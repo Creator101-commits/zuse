@@ -8,6 +8,7 @@
     "build:link": "node scripts/build-link.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
+    "test": "bun test src",
     "gen:methods": "python3 scripts/gen-methods.py",
     "e2e": "node e2e/smoke.mjs",
     "e2e:analytics": "bun e2e/analytics.mjs"

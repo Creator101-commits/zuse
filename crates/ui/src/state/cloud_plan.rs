@@ -125,6 +125,15 @@ impl AppState {
         true
     }
 
+    /// Review fixtures settle the signed-in account's subscription without
+    /// an account feed.
+    #[cfg(feature = "cloud-computer-fixture")]
+    pub fn fixture_cloud_subscription(&mut self, subscribed: bool) {
+        if let Some(owner) = self.cloud_plan_owner() {
+            self.apply_cloud_subscription(&owner, Some(subscribed));
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn set_cloud_subscription_for_test(&mut self, subscribed: bool) {
         let owner = self.cloud_plan_owner().expect("a signed-in cloud account");

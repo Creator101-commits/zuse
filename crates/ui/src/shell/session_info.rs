@@ -770,11 +770,7 @@ impl Shell {
         if running {
             conversation.update(cx, |view, cx| view.want_resources(cx));
         }
-        let computer = summary
-            .provider
-            .clone()
-            .map(|provider| format!("{provider} computer"))
-            .unwrap_or_else(|| "Cloud computer".into());
+        let computer = "Cloud computer".to_owned();
         let computer_row = info_row(
             &theme,
             row_glyph(icons::DITHER_CLOUD, &theme),

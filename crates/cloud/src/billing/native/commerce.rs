@@ -146,7 +146,7 @@ impl BillingControl {
         let Some(native) = self.native_for(owner).await? else {
             return Ok(None);
         };
-        if offer != CLOUD_PLAN {
+        if !cloud_plan(&json!(offer)) {
             return Err(ApiError::bad_request("invalid_machine_offer"));
         }
         let plan = native
@@ -279,7 +279,7 @@ impl BillingControl {
             .await
             .ok()?;
         let paid = subscriptions.as_array()?.iter().any(|s| {
-            s["plan"]["id"] == CLOUD_PLAN
+            cloud_plan(&s["plan"]["id"])
                 && s["paidThrough"].as_i64().unwrap_or(0) > chrono::Utc::now().timestamp_millis()
                 && matches!(s["status"].as_str(), Some("active" | "trialing"))
         });

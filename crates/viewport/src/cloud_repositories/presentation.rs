@@ -1,5 +1,6 @@
 //! Cloud Setup catalog presentation. Mutations remain owned by RepositoryPanel.
 use super::*;
+use crate::cloud_settings::kit;
 use crate::localization::message as tr;
 use zuse_i18n::messages as msg;
 pub(super) fn avatar(name: &str, url: Option<&str>, size: f32) -> AnyElement {
@@ -539,34 +540,31 @@ impl RepositoryPanel {
         let empty = self.projects.is_empty();
         let mut body = column();
         if empty {
-            body = body
-                .child(
-                    div()
-                        .px(px(12.))
-                        .py(px(12.))
-                        .text_center()
-                        .text_size(px(11.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(palette::rgb(TEXT).opacity(0.85))
-                        .child(if busy {
-                            crate::localization::text(
-                                "projects-project_setup_dialog_loading_repositories",
-                                cx,
-                            )
-                        } else {
-                            crate::localization::text(
-                                "settings-cloud_workspace_repositories_no_repositories_included",
-                                cx,
-                            )
-                        }),
+            body = body.child(if busy {
+                kit::empty_state(
+                    "dither-branch",
+                    crate::localization::text(
+                        "projects-project_setup_dialog_loading_repositories",
+                        cx,
+                    ),
+                    "This takes a moment the first time.",
+                    None,
                 )
-                .child(
-                    div()
-                        .flex()
-                        .justify_center()
-                        .pb(px(12.))
-                        .child(self.add_action(window, cx)),
-                );
+            } else if !self.github_connected() {
+                kit::empty_state(
+                    "dither-branch",
+                    "Connect GitHub first",
+                    "Once the Zuse app is installed, pick the repositories agents can check out, commit to and open pull requests on.",
+                    None,
+                )
+            } else {
+                kit::empty_state(
+                    "dither-branch",
+                    "No repositories yet",
+                    "Add the repositories cloud chats can work on. You can change this any time.",
+                    Some(self.add_action(window, cx)),
+                )
+            });
         }
         for (i, project) in self.projects.iter().enumerate() {
             let id = project.project_id.clone();
@@ -676,22 +674,18 @@ impl RepositoryPanel {
         } else {
             Some(self.add_action(window, cx))
         };
-        cs::group(
+        kit::section(
             "Repositories",
-            Some(
-                "Choose the personal, organization, and collaborator repositories included in your private cloud image.",
-            ),
+            "Personal, organization and collaborator repositories cloud chats can check out.",
             header_action,
             body,
         )
     }
-    pub(super) fn github_group(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+    pub(super) fn github_group(&self, _window: &Window, cx: &mut Context<Self>) -> Div {
         if let Some(body) = self.github_operation_rows(cx) {
-            return cs::group(
+            return kit::section(
                 "GitHub",
-                Some(
-                    "Connect your own GitHub account, then choose the installation to use with this workspace.",
-                ),
+                "Connect your own GitHub account, then choose the installation to use.",
                 None,
                 body,
             );
@@ -716,9 +710,9 @@ impl RepositoryPanel {
             .as_ref()
             .is_none_or(|g| g.installations.is_empty() || g.user.is_none())
         {
-            body = body.child(cs::setting_row(
-                true,
-                "Connect repositories",
+            body = body.child(kit::empty_state(
+                "site-github",
+                "Connect GitHub",
                 "Install the Zuse app on GitHub, then choose which repositories cloud agents can work on.",
                 Some(
                     cs::icon_label_button(
@@ -745,11 +739,11 @@ impl RepositoryPanel {
         } else if let Some(github) = &self.github {
             for (i, install) in github.installations.iter().enumerate() {
                 let badge = if install.suspended {
-                    cs::badge("Suspended", true, false)
+                    kit::pill("Suspended", kit::Tone::Attention)
                 } else if github.user.is_none() {
-                    cs::badge("Install GitHub App", true, false)
+                    kit::pill("Install GitHub App", kit::Tone::Attention)
                 } else {
-                    cs::badge_with_icon("Connected", "check", window)
+                    kit::pill("Connected", kit::Tone::Ready)
                 };
                 body = body.child(cs::setting_row_content(
                     i == 0,
@@ -785,11 +779,9 @@ impl RepositoryPanel {
         if let Some(disconnect) = self.github_disconnect_row(cx) {
             body = body.child(disconnect);
         }
-        cs::group(
+        kit::section(
             "GitHub",
-            Some(
-                "Connect GitHub once to choose repositories and let cloud agents commit, push, and open pull requests as you.",
-            ),
+            "Connect once so cloud agents can commit, push and open pull requests as you.",
             None,
             body,
         )
@@ -809,18 +801,19 @@ impl Render for RepositoryPanel {
                 if self.agent_recovery_open() {
                     return column().gap(px(16.)).child(self.render_agents(window, cx));
                 }
-                if self.guide_visible() {
-                    return self.render_guide(window, cx);
+                if self.onboarding_visible() {
+                    return self.render_onboarding(window, cx);
                 }
                 return self.render_overview(window, cx);
             }
             CloudPage::Repositories => {
                 let github = self.github_group(window, cx);
-                let repos = self.repositories(window, cx);
+                // Until GitHub is connected there is nothing to choose from.
                 return if self.github_connected() {
+                    let repos = self.repositories(window, cx);
                     column().gap(px(16.)).child(repos).child(github)
                 } else {
-                    column().gap(px(16.)).child(github).child(repos)
+                    column().gap(px(16.)).child(github)
                 };
             }
             CloudPage::Environments => {
@@ -833,10 +826,10 @@ impl Render for RepositoryPanel {
                 return column().gap(px(16.)).child(self.render_agents(window, cx));
             }
         }
-        if self.guide_visible() && !self.agent_recovery_open() {
-            return self.render_guide(window, cx);
+        if self.onboarding_visible() && !self.agent_recovery_open() {
+            return self.render_onboarding(window, cx);
         }
-        let entry = self.guide_entry(cx);
+        let entry = self.setup_entry(cx);
         let repos = self.repositories(window, cx);
         let github = self.github_group(window, cx);
         let agents = self.render_agents(window, cx);

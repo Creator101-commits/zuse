@@ -19,6 +19,68 @@ export interface BillingSummary {
   markupBasisPoints: number;
   currentInvoiceEstimateMicros: number;
   usageProvisional: boolean;
+  /** Plan allowance and usage in machine minutes; absent for periods billed before machine-minute plans. */
+  plan?: PlanUsage | null;
+}
+export type HoldReason = "trial-allowance-used" | "trial-unavailable" | "cap-reached";
+export type PlanId = "cloud" | "cloud-trial" | "cloud-max" | "legacy";
+/** A machine minute is one minute of a 1 vCPU / 4 GB machine; the default 4 vCPU / 16 GB machine uses 4 per awake minute. */
+export interface PlanUsage {
+  planId: PlanId;
+  planName: string;
+  priceMicros: number;
+  trial: boolean;
+  trialEndsAt?: number | null;
+  /** The plan renews (or the trial converts) at the end of the period. */
+  renewsAt: number;
+  includedMachineMinutes: number;
+  usedMachineMinutes: number;
+  remainingMachineMinutes: number;
+  extraMachineMinutes: number;
+  extraChargeMicros: number;
+  overageCapMicros: number;
+  payAsYouGo: boolean;
+  usageHold: boolean;
+  holdReason?: HoldReason | null;
+  /** Machine minutes the default machine uses per awake minute (4). */
+  defaultMachineRate: number;
+  maxVcpus: number;
+  maxMemoryMib: number;
+}
+export interface PlanOffer {
+  offerId: string;
+  planId: PlanId;
+  name: string;
+  priceMicros: number;
+  includedMachineMinutes: number;
+  maxVcpus: number;
+  maxMemoryMib: number;
+  payAsYouGo: boolean;
+  available: boolean;
+}
+export interface PlanCatalog {
+  plans: PlanOffer[];
+  trialAvailable: boolean;
+  trialDays: number;
+  trialPriceMicros: number;
+  trialMachineMinutes: number;
+  enterpriseContactUrl: string;
+}
+export interface SizeOption {
+  id: string;
+  label: string;
+  vcpus: number;
+  memoryMib: number;
+  /** Machine minutes per awake minute. */
+  machineRate: number;
+  available: boolean;
+  requiresPlan?: PlanId | null;
+}
+/** Internal provider ids are sent back when creating and never shown. */
+export interface CloudCapabilities {
+  providers?: { id: string; configured?: boolean; managedBaseReady?: boolean; preservesDisk?: boolean; sizes?: unknown[] }[];
+  defaultProvider?: string | null;
+  computerSizes?: SizeOption[];
 }
 export interface BillingUsageItem {
   entryId: string;
@@ -32,6 +94,12 @@ export interface BillingUsageItem {
   memoryMib: number;
   providerCostMicros: number;
   status: string;
+  /** Time the computer was awake in this entry. */
+  awakeMs?: number | null;
+  /** Machine minutes the computer used per awake minute (4 for 4 vCPU / 16 GB). */
+  machineRate?: number | null;
+  /** Machine minutes this entry used from the allowance. */
+  machineMinutes?: number | null;
 }
 export interface PrepaidBalance {
   available: boolean;

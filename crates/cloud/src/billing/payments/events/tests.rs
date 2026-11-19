@@ -60,6 +60,26 @@ fn polar_headers(body: &str, now: i64) -> HeaderMap {
     h
 }
 #[test]
+fn trialing_cloud_subscriptions_carry_the_trial_and_card() {
+    let mut config = config("whsec_fixture", "price_cloud");
+    config
+        .offers
+        .insert("price_cloud_v1".into(), "cloud-starter-v1".into());
+    let value = json!({"id":"sub_trial","status":"trialing","customer":{"id":"cus_original","metadata":{"account_id":"user-alice"}},"metadata":{"account_id":"user-alice","offer_id":"cloud-starter-v1"},"default_payment_method":{"card":{"fingerprint":"fp_card"}},"items":{"data":[{"price":{"id":"price_cloud_v1"},"current_period_start":1_800_000_000,"current_period_end":1_800_604_800},{"price":{"id":"price_metered_overage"},"current_period_start":1_800_000_000,"current_period_end":1_800_604_800}]}});
+    let sub = config.stripe_subscription("sub_trial", &value).unwrap();
+    assert_eq!(sub.offer, "cloud-starter-v1");
+    assert_eq!(sub.status, "active");
+    assert!(sub.trialing);
+    assert_eq!(sub.card_fingerprint.as_deref(), Some("fp_card"));
+    assert_eq!(sub.paid_through - sub.period_start, 7 * 86_400_000);
+    let mut active = value.clone();
+    active["status"] = json!("active");
+    active["default_payment_method"] = json!("pm_unexpanded");
+    let sub = config.stripe_subscription("sub_trial", &active).unwrap();
+    assert!(!sub.trialing);
+    assert_eq!(sub.card_fingerprint, None);
+}
+#[test]
 fn signatures_bind_exact_bytes_timestamps_and_polar_delivery_id() {
     let now = 1_800_000_000_000;
     let body = r#"{"id":"evt_original","type":"customer.subscription.updated","data":{"object":{"id":"sub_original"}}}"#;

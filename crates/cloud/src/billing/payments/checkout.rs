@@ -4,6 +4,15 @@ use crate::tickets::TicketSigner;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 pub(super) const CLOUD_OFFER: &str = "cloud-workspace-standard-v1";
+use zuse_protocol::cloud_billing::plans;
+/// Result of a checkout request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckoutOutcome {
+    /// Open this URL: a checkout, or the billing portal to change plans.
+    Url(String),
+    /// The trial ended now and the plan started; nothing to open.
+    TrialConverted,
+}
 pub(super) struct CheckoutSettings {
     pub(super) signer: TicketSigner,
 }
@@ -11,6 +20,8 @@ pub(super) struct ProviderCheckout {
     pub offers: HashMap<String, String>,
     pub overage: Option<String>,
     pub automatic_tax: bool,
+    /// One-time $1 price charged when the Cloud trial starts.
+    pub trial_fee: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub struct CustomerPage {
@@ -39,6 +50,8 @@ impl ProviderCheckout {
         for (suffix, offer) in [
             ("CLOUD_WORKSPACE_STANDARD_V1", CLOUD_OFFER),
             ("PERSISTENT_STANDARD_V1", "persistent-standard-v1"),
+            ("CLOUD_STARTER_V1", plans::CLOUD_OFFER),
+            ("CLOUD_PRO_V1", plans::CLOUD_MAX_OFFER),
         ] {
             let value = std::env::var(format!("{prefix}_{kind}_{suffix}"))
                 .ok()
@@ -65,8 +78,10 @@ impl ProviderCheckout {
             prefix != "STRIPE" || matches!(mode.as_str(), "metered" | "subscription-only"),
             "Invalid Stripe cloud billing mode"
         );
-        let overage = if prefix == "STRIPE" && mode == "metered" && offers.contains_key(CLOUD_OFFER)
-        {
+        let cloud = plans::CLOUD_OFFERS
+            .iter()
+            .any(|offer| offers.contains_key(*offer));
+        let overage = if prefix == "STRIPE" && mode == "metered" && cloud {
             let price = std::env::var("STRIPE_CLOUD_OVERAGE_PRICE_ID")
                 .ok()
                 .filter(|v| !v.trim().is_empty());
@@ -75,7 +90,9 @@ impl ProviderCheckout {
                 .filter(|v| !v.trim().is_empty());
             // Incomplete metering configuration cannot sell a metered cloud subscription.
             if price.is_none() || meter.is_none() {
-                offers.remove(CLOUD_OFFER);
+                for offer in plans::CLOUD_OFFERS {
+                    offers.remove(offer);
+                }
                 None
             } else {
                 price
@@ -87,10 +104,19 @@ impl ProviderCheckout {
             overage.as_ref().is_none_or(|id| !ids.contains(id)),
             "Overage price cannot be a base price"
         );
+        let trial_fee = (prefix == "STRIPE" && offers.contains_key(plans::CLOUD_OFFER))
+            .then(|| std::env::var("STRIPE_PRICE_CLOUD_TRIAL_FEE_V1").ok())
+            .flatten()
+            .filter(|v| !v.trim().is_empty());
+        anyhow::ensure!(
+            trial_fee.as_ref().is_none_or(|id| !ids.contains(id)),
+            "Trial fee cannot be a base price"
+        );
         Ok(Some(Self {
             offers,
             overage,
             automatic_tax: std::env::var("STRIPE_AUTOMATIC_TAX_ENABLED").as_deref() != Ok("false"),
+            trial_fee,
         }))
     }
 }
@@ -236,22 +262,23 @@ impl BillingControl {
         offer: &str,
         now: i64,
         key: Option<&str>,
-    ) -> Result<String, ApiError> {
-        if !matches!(offer, CLOUD_OFFER | "persistent-standard-v1") {
+    ) -> Result<CheckoutOutcome, ApiError> {
+        let cloud = plans::CLOUD_OFFERS.contains(&offer) || offer == plans::CLOUD_TRIAL_OFFER;
+        if !cloud && offer != "persistent-standard-v1" {
             return Err(ApiError::bad_request("invalid_machine_offer"));
         }
-        if owner.starts_with("organization:") && offer != CLOUD_OFFER {
+        if owner.starts_with("organization:") && !cloud {
             return Err(ApiError::forbidden("workspace_scope_not_supported"));
         }
         if let Some(url) = self.native_checkout(owner, offer, now, key).await? {
-            return Ok(url);
+            return Ok(CheckoutOutcome::Url(url));
         }
         let providers = self.payments.as_ref().ok_or_else(unavailable)?;
         let settings = providers
             .checkout
             .as_ref()
             .ok_or_else(|| ApiError::unavailable("billing_approval_pending"))?;
-        if offer != CLOUD_OFFER {
+        if !cloud {
             return Err(ApiError::unavailable(
                 "billing_machine_processing_unavailable",
             ));
@@ -268,18 +295,26 @@ impl BillingControl {
             .bind(owner)
             .execute(&mut *tx)
             .await?;
-        let existing=sqlx::query("SELECT entitlement_id,provider,provider_subscription_id,status,paid_through FROM api_entitlements WHERE account_id=$1 AND offer_id=$2 AND status<>'ended' FOR UPDATE").bind(owner).bind(offer).fetch_all(&mut *tx).await?;
-        let mut subscribed = false;
+        if offer == plans::CLOUD_TRIAL_OFFER {
+            // One trial per account: never for an account that had a trial or a plan.
+            let used: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_cloud_trials WHERE account_id=$1) OR EXISTS(SELECT 1 FROM api_entitlements WHERE account_id=$1 AND kind='cloud-workspace')").bind(owner).fetch_one(&mut *tx).await?;
+            if used {
+                return Err(ApiError::conflict("cloud_trial_unavailable"));
+            }
+        }
+        let existing=sqlx::query("SELECT entitlement_id,provider,provider_subscription_id,status,paid_through,offer_id FROM api_entitlements WHERE account_id=$1 AND offer_id=ANY($2) AND status<>'ended' FOR UPDATE").bind(owner).bind(&plans::CLOUD_OFFERS[..]).fetch_all(&mut *tx).await?;
+        let mut subscribed = None;
         for row in existing {
             let id: Option<String> = row.try_get("provider_subscription_id")?;
-            let (status, through) = if let Some(id) = id {
+            let (status, through, current) = if let Some(id) = id {
                 let original_provider: String = row.try_get("provider")?;
                 let adapter = providers
                     .providers
                     .get(&original_provider)
                     .ok_or_else(unavailable)?;
                 let sub = adapter.subscription(&id).await?;
-                if sub.owner != owner || sub.id != id || sub.offer != offer {
+                let current: Option<String> = row.try_get("offer_id")?;
+                if sub.owner != owner || sub.id != id || Some(&sub.offer) != current.as_ref() {
                     return Err(ApiError::unavailable("billing_subscription_mismatch"));
                 }
                 if original_provider == "stripe" {
@@ -296,21 +331,51 @@ impl BillingControl {
                 }
                 let entitlement: String = row.try_get("entitlement_id")?;
                 sqlx::query("UPDATE api_entitlements SET status=$2,period_start=$3,paid_through=$4,ended_at=CASE WHEN $2='ended' AND $4<=$5 THEN COALESCE(ended_at,$5) ELSE NULL END,updated_at=$5 WHERE entitlement_id=$1").bind(entitlement).bind(&sub.status).bind(sub.period_start).bind(sub.paid_through).bind(now).execute(&mut *tx).await?;
-                (sub.status, Some(sub.paid_through))
+                let current = (
+                    sub.offer.clone(),
+                    sub.trialing,
+                    Some((original_provider, id)),
+                );
+                (sub.status, Some(sub.paid_through), current)
             } else {
                 (
                     row.try_get::<String, _>("status")?,
                     row.try_get::<Option<i64>, _>("paid_through")?,
+                    (
+                        row.try_get::<Option<String>, _>("offer_id")?
+                            .unwrap_or_default(),
+                        false,
+                        None,
+                    ),
                 )
             };
             if matches!(status.as_str(), "pending" | "active" | "grace")
                 && through.is_none_or(|end| end > now)
             {
-                subscribed = true;
+                subscribed = Some(current);
             }
         }
-        if subscribed {
+        if let Some((current, trialing, remote)) = subscribed {
             tx.commit().await?;
+            if offer == plans::CLOUD_TRIAL_OFFER {
+                return Err(ApiError::conflict("cloud_trial_unavailable"));
+            }
+            if trialing && offer == plans::CLOUD_OFFER && current == plans::CLOUD_OFFER {
+                // "Start Cloud now": end the trial; the plan starts and is charged now.
+                let (provider_id, id) =
+                    remote.ok_or_else(|| ApiError::conflict("machine_subscription_exists"))?;
+                providers
+                    .providers
+                    .get(&provider_id)
+                    .ok_or_else(unavailable)?
+                    .end_trial(&id)
+                    .await?;
+                return Ok(CheckoutOutcome::TrialConverted);
+            }
+            if current != offer {
+                // Changing plans happens in the billing portal.
+                return self.portal(owner).await.map(CheckoutOutcome::Url);
+            }
             return Err(ApiError::conflict("machine_subscription_exists"));
         }
         let customer = if provider.provider_id() == "stripe" {
@@ -334,7 +399,7 @@ impl BillingControl {
             .await?;
         secure_url(&url)?;
         tx.commit().await?;
-        Ok(url)
+        Ok(CheckoutOutcome::Url(url))
     }
 }
 impl Store {
@@ -354,11 +419,57 @@ impl Store {
         now: i64,
         key: Option<&str>,
     ) -> Result<String, ApiError> {
+        match self
+            .billing_checkout_outcome(owner, offer, now, key)
+            .await?
+        {
+            CheckoutOutcome::Url(url) => Ok(url),
+            CheckoutOutcome::TrialConverted => {
+                Err(ApiError::conflict("machine_subscription_exists"))
+            }
+        }
+    }
+    pub async fn billing_checkout_outcome(
+        &self,
+        owner: &str,
+        offer: &str,
+        now: i64,
+        key: Option<&str>,
+    ) -> Result<CheckoutOutcome, ApiError> {
         self.billing
             .as_ref()
             .ok_or_else(|| ApiError::unavailable("cloud_billing_writes_disabled"))?
             .checkout(owner, offer, now, key)
             .await
+    }
+    /// Plans for the account, with trial eligibility. Never fails on missing
+    /// billing configuration: offers are then shown as unavailable.
+    pub async fn plan_catalog(&self, owner: &str) -> Result<plans::PlanCatalog, ApiError> {
+        let trial_used: bool = match self.billing.as_ref() {
+            Some(billing) => sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_cloud_trials WHERE account_id=$1) OR EXISTS(SELECT 1 FROM api_entitlements WHERE account_id=$1 AND kind='cloud-workspace')").bind(owner).fetch_one(&billing.pool).await.or_else(|e| match &e {
+                // Schemas before migration 0054 have no trial table.
+                sqlx::Error::Database(d) if d.code().as_deref() == Some("42P01") => Ok(true),
+                _ => Err(e),
+            })?,
+            None => true,
+        };
+        let provider = self.billing.as_ref().and_then(|b| {
+            let providers = b.payments.as_ref()?;
+            providers.providers.get(&providers.default).cloned()
+        });
+        let contact = std::env::var("ZUSE_ENTERPRISE_CONTACT_URL")
+            .ok()
+            .filter(|v| secure_url(v).is_ok() || v.starts_with("mailto:"))
+            .unwrap_or_else(|| plans::ENTERPRISE_CONTACT_FALLBACK.into());
+        Ok(plans::catalog(
+            !trial_used,
+            &|offer| {
+                provider
+                    .as_ref()
+                    .is_some_and(|p| p.supports_checkout(offer))
+            },
+            &contact,
+        ))
     }
     pub async fn checkout_receipt(
         &self,

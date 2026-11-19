@@ -333,6 +333,7 @@ async fn checkout_reuses_identities_recovers_customers_and_activates_subscriptio
         configuration: None,
         events: Some(events::EventConfig::fixture("whsec_fixture", "price_cloud")),
         checkout: Some(ProviderCheckout {
+            trial_fee: None,
             offers: HashMap::from([(CLOUD_OFFER.into(), "price_cloud".into())]),
             overage: Some("price_meter".into()),
             automatic_tax: true,
@@ -625,6 +626,7 @@ async fn polar_checkout_and_stripe_subscription_only_preserve_provider_parameter
         http: http(),
         events: None,
         checkout: Some(ProviderCheckout {
+            trial_fee: None,
             offers: HashMap::from([(CLOUD_OFFER.into(), "product_cloud".into())]),
             overage: None,
             automatic_tax: true,
@@ -648,6 +650,7 @@ async fn polar_checkout_and_stripe_subscription_only_preserve_provider_parameter
         http: http(),
         events: None,
         checkout: Some(ProviderCheckout {
+            trial_fee: None,
             offers: HashMap::from([(CLOUD_OFFER.into(), "price_cloud".into())]),
             overage: None,
             automatic_tax: false,

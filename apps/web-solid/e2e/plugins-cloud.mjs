@@ -442,7 +442,7 @@ for (const theme of ["dark", "light"]) {
       await t.wait(`document.querySelectorAll(".pc-repo-row").length === 1`);
     });
     await t.step("build logs: latest build, previous builds, paging, settings", async () => {
-      await t.click("View boxd build logs");
+      await t.click("View build logs");
       await t.wait(`!!document.querySelector(".dialog .pc-builds")`);
       await t.waitText("snapshot saved");
       await t.click("Previous builds 8");
@@ -585,14 +585,17 @@ for (const theme of ["dark", "light"]) {
 
 await scenario("cloud-unsubscribed", { fake: { subscribed: false } }, async (t) => {
   await openCloud(t);
-  await t.step("unsubscribed accounts see Subscribe and no tabs", async () => {
-    await t.waitText("Subscribe · $40/month");
+  await t.step("unsubscribed accounts see plans and no tabs", async () => {
+    await t.waitText("33,600 machine minutes · about 140 h on 4 vCPU / 16 GB");
+    await t.waitText("84,000 machine minutes · about 350 h on 4 vCPU / 16 GB");
+    await t.waitText("Computers up to 8 vCPU / 32 GB");
+    await t.waitText("Contact us");
     if (await t.eval(`!!__t.find("Setup")`)) throw new Error("tabs shown before subscribing");
     await t.shot("hosting");
   });
-  await t.step("Subscribe opens checkout", async () => {
-    await t.click("Subscribe · $40/month");
-    await t.wait(`__fake.opened.some((u) => u.startsWith("https://checkout.example.test/cloud-workspace-standard-v1"))`);
+  await t.step("Choose Cloud opens checkout", async () => {
+    await t.click("Choose Cloud");
+    await t.wait(`__fake.opened.some((u) => u.startsWith("https://checkout.example.test/cloud-starter-v1"))`);
   });
 });
 

@@ -1,6 +1,7 @@
 //! Cloud settings navigation shared by desktop and browser.
 use crate::localization::message as tr;
 use zuse_i18n::messages as msg;
+pub mod kit;
 pub(crate) mod style;
 use crate::{palette, settings_style as s};
 use gpui::{prelude::*, *};
