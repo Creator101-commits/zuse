@@ -31,10 +31,14 @@ class NativeFlowTests {
     }
 
     @Test
-    fun backFromComputersReturnsToSettings() {
+    fun backFromSshReturnsToAddComputer() {
         compose.onNodeWithContentDescription("Settings").performClick()
-        compose.onNodeWithText("Computers").performClick()
-        compose.onNodeWithText("Add manually").assertExists()
+        val saved = compose.onAllNodesWithText("Manage computers").fetchSemanticsNodes().isNotEmpty()
+        // The sheet's row is the last match; the empty list behind it has its own button.
+        compose.onAllNodesWithText(if (saved) "Manage computers" else "Add computer").onLast().performClick()
+        compose.onNodeWithContentDescription("Add computer").performClick()
+        compose.onNodeWithText("Connect with SSH").performClick()
+        compose.onNodeWithContentDescription("SSH address").assertExists()
         check(
             androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
                 .uiAutomation
@@ -43,10 +47,9 @@ class NativeFlowTests {
                 )
         )
         compose.waitUntil(5000) {
-            compose.onAllNodesWithText("Zuse Cloud").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("Scan QR code").fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithText("Add manually").assertDoesNotExist()
-        compose.onNodeWithText("Zuse Cloud").assertExists()
+        compose.onNodeWithContentDescription("SSH address").assertDoesNotExist()
     }
 
     @Test
@@ -408,19 +411,18 @@ class NativeFlowTests {
             compose.onNodeWithText("Archive chat").performClick()
             compose.onNodeWithText("Archive").performClick()
             compose.waitUntil(5000) { currentChat.get().flag("archived") }
-            compose.onNodeWithContentDescription("Settings").performClick()
-            compose.onNodeWithText("Archived chats").performClick()
+            // Archiving leaves the chat for the list.
             compose.waitUntil(5000) {
-                compose.onAllNodesWithText("Restore").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithContentDescription("Showing active chats").fetchSemanticsNodes().isNotEmpty()
             }
+            compose.onNodeWithContentDescription("Showing active chats").performClick()
+            compose.onNodeWithText("Archived").performClick()
+            compose.waitUntil(5000) {
+                compose.onAllNodesWithText("Renamed remote chat").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Renamed remote chat").performClick()
             compose.onNodeWithText("Restore").performClick()
-            compose.waitUntil(5000) {
-                !currentChat.get().flag("archived") &&
-                    compose
-                        .onAllNodesWithText("No archived chats on this computer.")
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-            }
+            compose.waitUntil(5000) { !currentChat.get().flag("archived") }
         } finally {
             server.shutdown()
         }

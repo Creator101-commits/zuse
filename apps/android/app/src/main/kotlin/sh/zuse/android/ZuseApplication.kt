@@ -12,4 +12,6 @@ class ZuseApplication : Application() {
     val uiParser by lazy { NativeUiParser(this) }
     val vault by lazy { Vault(this) }
     val account by lazy { Account(vault) }
+    val tunnels by lazy { SshTunnels(vault) }
+    val network = PhoneNetwork()
 }

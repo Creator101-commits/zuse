@@ -8,6 +8,11 @@ plugins {
 }
 
 android {
+    // JSch and Bouncy Castle ship JVM-only metadata that Android never reads.
+    packaging {
+        resources.excludes +=
+            setOf("META-INF/versions/9/OSGI-INF/MANIFEST.MF", "META-INF/versions/*/OSGI-INF/**")
+    }
     namespace = "sh.zuse.android"
     compileSdk = 35
     defaultConfig {

@@ -15,6 +15,8 @@ pub(crate) enum Action {
     Pair {
         label: Option<String>,
         app: bool,
+        /// One JSON object on stdout, for the apps pairing over SSH.
+        json: bool,
     },
     /// Only `zuse-server login`; `zuse link` signs in as it links.
     SignIn,
@@ -35,7 +37,7 @@ pub(crate) async fn run(action: Action, port: u16, l10n: &Localizer) -> anyhow::
 
 async fn execute(client: &RpcClient, action: Action, l10n: &Localizer) -> anyhow::Result<()> {
     match action {
-        Action::Pair { label, app } => invite(client, label, app, l10n).await,
+        Action::Pair { label, app, json } => invite(client, label, app, json, l10n).await,
         Action::SignIn => sign_in(client, l10n).await,
         Action::SignOut => {
             client
@@ -83,6 +85,7 @@ pub(crate) async fn invite(
     client: &RpcClient,
     label: Option<String>,
     prefer_app: bool,
+    as_json: bool,
     l10n: &Localizer,
 ) -> anyhow::Result<()> {
     let label = label.unwrap_or_else(|| m::default_device(l10n));
@@ -90,6 +93,10 @@ pub(crate) async fn invite(
         .call(methods::CREATE_PAIRING, json!({"label":label}))
         .await?;
     let links = Links::from_reply(&reply).context(m::invitation_failed(l10n))?;
+    if as_json {
+        println!("{}", links.to_json());
+        return Ok(());
+    }
     if let Some(browser) = &links.browser {
         println!("{}", plain(m::browser_link(l10n, browser.as_str())));
     }
@@ -140,6 +147,15 @@ impl Links {
             app,
             self_signed: reply["browserSelfSigned"] == true,
             local_only,
+        })
+    }
+    /// Apps take `app`, falling back to `browser` when one origin serves both.
+    fn to_json(&self) -> Value {
+        json!({
+            "app": self.app.as_ref().or(self.browser.as_ref()),
+            "browser": self.browser,
+            "selfSigned": self.self_signed,
+            "localOnly": self.local_only,
         })
     }
     fn qr_target(&self, prefer_app: bool) -> Option<&str> {
@@ -311,6 +327,27 @@ mod tests {
         );
         assert_eq!(links.app, None);
         assert_eq!(links.qr_target(true), links.browser.as_deref());
+    }
+
+    #[test]
+    fn json_gives_apps_a_link_even_when_only_loopback_answers() {
+        let lan = links(json!({
+            "fragment":"#pair=abc",
+            "origin":"http://192.168.1.20:27657",
+            "browserOrigin":"https://192.168.1.20:27659",
+            "browserSelfSigned":true,
+        }))
+        .to_json();
+        assert_eq!(lan["app"], "http://192.168.1.20:27657/#pair=abc");
+        assert_eq!(lan["localOnly"], false);
+        let loopback = links(json!({
+            "fragment":"#pair=abc",
+            "origin":"http://127.0.0.1:27656",
+            "browserOrigin":null,
+        }))
+        .to_json();
+        assert_eq!(loopback["app"], "http://127.0.0.1:27656/#pair=abc");
+        assert_eq!(loopback["localOnly"], true);
     }
 
     #[test]

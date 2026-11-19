@@ -326,37 +326,39 @@ struct NewChatSetupView: View {
         Button("Cloud", systemImage: "cloud") { cloud = true }
       }
       if !workspace.savedConnections.isEmpty {
-        Section("Saved computers") {
+        Section("Computers") {
           ForEach(workspace.savedConnections) { connection in
-            Button(connection.displayName) {
+            Button {
               cloud = false
               workspace.openRemote(connection)
+            } label: {
+              Label(
+                connection.displayName,
+                systemImage: workspace.activeConnectionID == connection.id
+                  ? "checkmark" : "laptopcomputer")
             }
           }
         }
       }
       if !workspace.environments.isEmpty {
-        Section("Remote computers") {
+        Section("Zuse account") {
           ForEach(workspace.environments) { environment in
-            Button(environment.label ?? "Computer") {
+            Button {
               cloud = false
               workspace.openEnvironment(environment)
+            } label: {
+              Label(
+                environment.label ?? "Computer",
+                systemImage: workspace.activeEnvironmentID == environment.id
+                  ? "checkmark" : "desktopcomputer")
             }
           }
         }
       }
       Section {
-        Button("Find a nearby computer", systemImage: "wifi") {
+        Button("Add computer", systemImage: "plus") {
           cloud = false
-          method = .nearby
-        }
-        Button("Scan a pairing code", systemImage: "qrcode.viewfinder") {
-          cloud = false
-          method = .pairing
-        }
-        Button("Add manually", systemImage: "plus") {
-          cloud = false
-          method = .manual
+          method = .add
         }
       }
     } label: {
@@ -428,7 +430,7 @@ struct NewChatSetupView: View {
             .buttonStyle(.plain).accessibilityLabel("Sign in to Zuse")
           } else {
             Button {
-              method = .nearby
+              method = .add
             } label: {
               SetupSelectorLabel(icon: "folder", title: "Connect to choose a project")
             }.buttonStyle(.plain)
@@ -444,8 +446,7 @@ struct NewChatSetupView: View {
             text: $draft, enabled: false, busy: false,
             options: AnyView(
               Menu {
-                Button("Find a nearby computer", systemImage: "wifi") { method = .nearby }
-                Button("Add manually", systemImage: "plus") { method = .manual }
+                Button("Add computer", systemImage: "desktopcomputer") { method = .add }
               } label: {
                 Image(systemName: "plus").frame(width: 36, height: 40)
               }),

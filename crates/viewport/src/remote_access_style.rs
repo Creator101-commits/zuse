@@ -20,7 +20,6 @@ pub fn frame(
     action: Option<AnyElement>,
 ) -> Div {
     let title = title.into();
-    let access_header = title.as_ref() == "Remote access to this computer";
     let help = help.into();
     s::frame().child(
         div()
@@ -28,9 +27,10 @@ pub fn frame(
             .items_center()
             .justify_between()
             .gap(px(12.))
-            .px(px(12.))
-            .pt(px(if access_header { 6. } else { 10. }))
-            .pb(px(if access_header { 8. } else { 10. }))
+            // Padding, not a fixed height, so a header with a subheading still fits.
+            .pl(px(12.))
+            .pr(px(4.))
+            .py(px(4.))
             .child(
                 div()
                     .flex()
@@ -52,7 +52,7 @@ pub fn frame(
                             .role(Role::Button)
                             .aria_label(format!("About {title}"))
                             .tab_index(0)
-                            .size(px(28.))
+                            .size(px(22.))
                             .flex_none()
                             .flex()
                             .items_center()

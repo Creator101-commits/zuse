@@ -60,7 +60,7 @@ private func exec(_ command: String = "cargo test") -> [String: JSONValue] {
   ])
   #expect(
     ToolPresentation.summary(rows)
-      == "Ran 2 commands · edited 1 file · read 1 file · 1 failed")
+      == "Ran 2 commands, edited 1 file, read 1 file, 1 failed")
 }
 
 @Test func runningGroupsDescribeTheirCurrentTool() {

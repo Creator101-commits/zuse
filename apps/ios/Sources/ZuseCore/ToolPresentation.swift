@@ -85,7 +85,7 @@ public enum ToolPresentation {
     "\(count) \(count == 1 ? one : many)"
   }
 
-  /// "Ran 3 commands · edited 2 files · 1 failed", the line settled work folds behind.
+  /// "Ran 3 commands, edited 2 files, 1 failed", the line settled work folds behind.
   public static func summary(_ rows: [TranscriptRow]) -> String {
     let tools = rows.filter { $0.message.kind == "tool_use" }
     if tools.isEmpty { return rows.contains { $0.isThinking } ? "Thought" : "Activity" }
@@ -118,7 +118,7 @@ public enum ToolPresentation {
     if other > 0 { segments.append("called \(plural(other, "tool", "tools"))") }
     let failed = tools.filter(\.failed).count
     if failed > 0 { segments.append("\(failed) failed") }
-    let line = segments.joined(separator: " · ")
+    let line = segments.joined(separator: ", ")
     return line.prefix(1).uppercased() + line.dropFirst()
   }
 

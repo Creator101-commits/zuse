@@ -28,6 +28,7 @@ import kotlinx.serialization.json.*
 import sh.zuse.core.*
 
 private const val VISIBLE_STEPS = 12
+private const val PREVIEW_ICONS = 5
 
 private fun ToolIcon.vector(): ImageVector =
     when (this) {
@@ -44,22 +45,35 @@ private fun ToolIcon.vector(): ImageVector =
     }
 
 /**
- * Work in progress stays open so it can be followed. Once settled it folds behind one line, so the
- * answer is what a reader sees. An explicit tap wins over either default.
+ * Activity folds behind one line: while it runs that line names the step in progress, and once it
+ * settles it summarizes the run, so the answer is what a reader sees. Tapping opens every step.
  */
 @Composable
 fun ToolActivityGroup(group: TranscriptGroup, live: Boolean) {
     var choice by rememberSaveable(group.id) { mutableStateOf<Boolean?>(null) }
-    val expanded = choice ?: live
+    val expanded = choice ?: false
     var showAll by rememberSaveable(group.id) { mutableStateOf(false) }
     val title =
         if (live) ToolPresentation.liveTitle(group.rows) else ToolPresentation.summary(group.rows)
-    val failed = group.rows.any { it.failed }
+    // Like desktop: a few distinct tool icons follow the summary, in order of first use.
+    val icons = remember(group.rows) {
+        group.rows.map { if (it.isThinking) ToolIcon.Thinking else ToolPresentation.step(it.message).icon }
+            .distinct()
+            .take(PREVIEW_ICONS)
+    }
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
     Column(Modifier.fillMaxWidth().animateContentSize(tween(160))) {
+        // No disclosure arrow, matching desktop: the whole line is the toggle. It stays quiet even
+        // when a step failed; failures show on the step itself and in the summary's count.
         Row(
             Modifier.fillMaxWidth()
                 .heightIn(min = 36.dp)
-                .clickable { choice = !expanded }
+                .clickable(
+                    interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() },
+                    indication = null,
+                ) {
+                    choice = !expanded
+                }
                 .semantics {
                     role = Role.Button
                     stateDescription = if (expanded) "Expanded" else "Collapsed"
@@ -67,20 +81,24 @@ fun ToolActivityGroup(group: TranscriptGroup, live: Boolean) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Icon(
-                Icons.Outlined.ChevronRight,
-                null,
-                Modifier.size(16.dp).rotate(if (expanded) 90f else 0f),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            ActivityTitle(title, live, Modifier.weight(1f))
-            if (failed)
-                Icon(
-                    Icons.Outlined.ErrorOutline,
-                    "Includes a failed step",
-                    Modifier.size(15.dp),
-                    tint = MaterialTheme.colorScheme.error,
-                )
+            Row(
+                Modifier.weight(1f, fill = false),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                ActivityTitle(title, live, Modifier.weight(1f, fill = false))
+                if (live && group.rows.size > 1)
+                    Text(
+                        "· ${group.rows.size} steps",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .7f),
+                        maxLines = 1,
+                    )
+            }
+            if (!live)
+                icons.forEach { icon ->
+                    Icon(icon.vector(), null, Modifier.size(13.dp), tint = muted.copy(alpha = .7f))
+                }
         }
         if (expanded) {
             val hidden = if (showAll) 0 else (group.rows.size - VISIBLE_STEPS).coerceAtLeast(0)
@@ -162,20 +180,20 @@ private fun ToolStepRow(row: TranscriptRow) {
         ) {
             if (row.running) CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 1.5.dp)
             else
-                Icon(
-                    if (row.failed) Icons.Outlined.ErrorOutline else step.icon.vector(),
-                    null,
-                    Modifier.size(15.dp),
-                    tint = if (row.failed) MaterialTheme.colorScheme.error else muted,
-                )
-            Text(step.label, style = MaterialTheme.typography.labelMedium, color = muted)
+                Icon(step.icon.vector(), null, Modifier.size(15.dp), tint = muted)
+            Text(
+                step.label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
             if (step.detail.isNotEmpty())
                 Text(
                     step.detail,
                     Modifier.weight(1f),
                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp),
                     fontFamily = FontFamily.Monospace,
-                    color = muted,
+                    color = if (row.failed) MaterialTheme.colorScheme.error else muted,
                     maxLines = 1,
                     overflow = TextOverflow.MiddleEllipsis,
                 )

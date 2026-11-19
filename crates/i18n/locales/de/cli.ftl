@@ -65,6 +65,7 @@ cli-pair = Privaten Link für ein anderes Gerät erstellen
 cli-pair_label = Name unter „Verbundene Geräte“
 
 cli-pair_app = QR-Code für die Zuse-App statt für einen Browser anzeigen
+cli-pair_json = Links als JSON ausgeben, für Skripte und die Zuse-Apps
 
 cli-login = Bei deinem Zuse-Konto anmelden
 

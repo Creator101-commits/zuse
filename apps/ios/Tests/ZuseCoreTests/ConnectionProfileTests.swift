@@ -64,3 +64,23 @@ import Testing
     #expect(try connection.validated().pairingLink == invitation)
   }
 }
+
+@Test func sshComputersReplaceTheirOlderInvitationAndDescribeTheirRoute() throws {
+  let target = SSHTarget(user: "me", host: "studio.local")
+  let first = RemoteConnection(
+    address: "ws://127.0.0.1:27656/api/paired-rpc/a", token: "", pairingLink: "link-a",
+    ssh: SSHAccess(target: target, hostKey: "SHA256:x", tunnel: true))
+  let other = RemoteConnection(address: "ws://192.168.1.9:27657/api/paired-rpc/c", token: "")
+  let second = RemoteConnection(
+    address: "ws://127.0.0.1:27656/api/paired-rpc/b", token: "", pairingLink: "link-b",
+    ssh: SSHAccess(target: target, hostKey: "SHA256:x", tunnel: true))
+  let profiles = ConnectionProfiles.saving(second, in: [first, other])
+  #expect(profiles.map(\.address) == [second.address, other.address])
+  #expect(second.transportName == "SSH tunnel")
+  #expect(second.connectedThrough == "SSH me@studio.local")
+  #expect(other.expectedRoute == .lan)
+  // Entries saved before SSH support decode unchanged.
+  let legacy = try JSONDecoder().decode(
+    RemoteConnection.self, from: Data(#"{"address":"wss://mac.example/rpc","token":"t"}"#.utf8))
+  #expect(legacy.ssh == nil && legacy.lastRoute == nil)
+}

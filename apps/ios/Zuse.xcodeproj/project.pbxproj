@@ -7,8 +7,17 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		831909310849605FF64A5B8D /* AddComputerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AE7C0F33292D5327D1479D7 /* AddComputerView.swift */; };
+		74EA052DAE6531D04EA0A9E8 /* AddComputerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AE7C0F33292D5327D1479D7 /* AddComputerView.swift */; };
+		20766FFB22CC4B06DD17EBCF /* ComputersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED4FE13338C9CD8625D74955 /* ComputersView.swift */; };
+		6A900C12E5471EDD5A1D093A /* ComputersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED4FE13338C9CD8625D74955 /* ComputersView.swift */; };
+		A7D3C870755031B2BFE9ACA9 /* SSHConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 471E066F1419134643DD22E1 /* SSHConnectView.swift */; };
+		688B1C64C4FF5FB636080E2F /* SSHConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 471E066F1419134643DD22E1 /* SSHConnectView.swift */; };
+		0A17BA092A387332329B85C0 /* SSHSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = F34459DEED260D3E79623BEC /* SSHSession.swift */; };
+		E52E7DA77EF39F59945D6E1D /* SSHSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = F34459DEED260D3E79623BEC /* SSHSession.swift */; };
+		462629935489DB867831A3B1 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 86E839D5E65849256962F86C /* Citadel */; };
+		5F9E3AFD7F54556D9EFA63A8 /* Citadel in Frameworks */ = {isa = PBXBuildFile; productRef = 43BC19182A294A3130E18580 /* Citadel */; };
 		0858644327948396587C4D1A /* AttachmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7217AC99454A994E8318927D /* AttachmentView.swift */; };
-		091B8952E5972BCDC282327E /* NearbyBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3878C69AE2F87271BF478449 /* NearbyBrowser.swift */; };
 		1801A546197909EBFF8A4DC7 /* CloudInfrastructureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 068107E8114614B815890947 /* CloudInfrastructureView.swift */; };
 		18BC33DB8FD05C69AFD9CA60 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CE741A9B131DFFEAFA3154CD /* Assets.xcassets */; };
 		1ABB6E95D793074F4FC62ADC /* PreviewData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A929586919FB530061F41D6 /* PreviewData.swift */; };
@@ -16,6 +25,7 @@
 		21FBEBBCDED22B50DEA8D055 /* RuntimeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C565500557EAA2B15445D249 /* RuntimeSettingsView.swift */; };
 		237AAEE4E761DFA8A7A71799 /* InteractionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB383162406E497000EE1AB8 /* InteractionView.swift */; };
 		23B5520F859B16DB6E80B303 /* ServeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2AFFEE7BAB24693F3D69BC6 /* ServeSettingsView.swift */; };
+		7A951D29992FD1A6CA99F76A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41A3451AD50A31F7C359B2F3 /* SettingsView.swift */; };
 		275AB9B7A7A1334B2E35A0CB /* UISpecView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D66357E7254C67C64AE3811 /* UISpecView.swift */; };
 		27B52FE6C432AF3E58C529B1 /* UISpecView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D66357E7254C67C64AE3811 /* UISpecView.swift */; };
 		27FEE3977204B7ED4AEA7225 /* NewChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A0C17265E9F0320C36EE078 /* NewChatView.swift */; };
@@ -34,6 +44,7 @@
 		54848106F0A926C61EA8F149 /* RegisteredDevicesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A26C4383CC9940B8C9234EF /* RegisteredDevicesView.swift */; };
 		5949162A8C6878AB8A64F7F0 /* WorkspaceModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79D31982FFE1BD8EB7D55532 /* WorkspaceModel.swift */; };
 		5A849218196A09A1FB22CD5B /* ServeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2AFFEE7BAB24693F3D69BC6 /* ServeSettingsView.swift */; };
+		24A3054F0C3C5230A7C38AC6 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41A3451AD50A31F7C359B2F3 /* SettingsView.swift */; };
 		5B37AF591909D4FC7579C75A /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C5A44ADF00F4D99F7C2C4C /* HomeView.swift */; };
 		5B89493F7F7A496D4F4ACE68 /* AttachmentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7217AC99454A994E8318927D /* AttachmentView.swift */; };
 		5C257516821A3C2E06563856 /* NativeChatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A846520562087CAC257BDACB /* NativeChatTests.swift */; };
@@ -58,7 +69,6 @@
 		B175D768481FA2F0AF0FD7B2 /* Textual in Frameworks */ = {isa = PBXBuildFile; productRef = AD054EC2B414C7EE659951E4 /* Textual */; };
 		B23674C954F4A68BD5EBE5DC /* UIParser.js in Resources */ = {isa = PBXBuildFile; fileRef = A4B72E1E21D77D0F4D66B7E2 /* UIParser.js */; };
 		B2831517D917A3F880CEA1AB /* Mermaid-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 618163A1C24645C679EC1D21 /* Mermaid-LICENSE.txt */; };
-		B8D6D98A8D2D71FBEAB74937 /* NearbyBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3878C69AE2F87271BF478449 /* NearbyBrowser.swift */; };
 		BC1B3D73F9439A25514519C0 /* WorkspaceModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79D31982FFE1BD8EB7D55532 /* WorkspaceModel.swift */; };
 		C119260BFDD69F890BFB1EB9 /* CloudSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27A5AE5995DD6581CBB6A523 /* CloudSettingsView.swift */; };
 		C32C439B0609035A6D912A83 /* MessageDetails.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E48A444141F677012936E0E /* MessageDetails.swift */; };
@@ -105,6 +115,10 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		6AE7C0F33292D5327D1479D7 /* AddComputerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AddComputerView.swift; sourceTree = "<group>"; };
+		ED4FE13338C9CD8625D74955 /* ComputersView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ComputersView.swift; sourceTree = "<group>"; };
+		471E066F1419134643DD22E1 /* SSHConnectView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SSHConnectView.swift; sourceTree = "<group>"; };
+		F34459DEED260D3E79623BEC /* SSHSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SSHSession.swift; sourceTree = "<group>"; };
 		068107E8114614B815890947 /* CloudInfrastructureView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CloudInfrastructureView.swift; sourceTree = "<group>"; };
 		09C5A44ADF00F4D99F7C2C4C /* HomeView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		0A26C4383CC9940B8C9234EF /* RegisteredDevicesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RegisteredDevicesView.swift; sourceTree = "<group>"; };
@@ -113,7 +127,6 @@
 		284C66862992341F24C9D602 /* CloudIntent.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CloudIntent.swift; sourceTree = "<group>"; };
 		2B1BCCFE2442FC8055FC249F /* ComputerAccessView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ComputerAccessView.swift; sourceTree = "<group>"; };
 		33B93EF57C9556B0A89B511D /* FileContentsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileContentsView.swift; sourceTree = "<group>"; };
-		3878C69AE2F87271BF478449 /* NearbyBrowser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NearbyBrowser.swift; sourceTree = "<group>"; };
 		3A0C17265E9F0320C36EE078 /* NewChatView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NewChatView.swift; sourceTree = "<group>"; };
 		3D66357E7254C67C64AE3811 /* UISpecView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = UISpecView.swift; sourceTree = "<group>"; };
 		41C8FE748BE9FCB39489A247 /* AddProjectView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AddProjectView.swift; sourceTree = "<group>"; };
@@ -144,6 +157,7 @@
 		CD74D514FFFF2C0566AD5F19 /* Diagram.html */ = {isa = PBXFileReference; includeInIndex = 1; path = Diagram.html; sourceTree = "<group>"; };
 		CE741A9B131DFFEAFA3154CD /* Assets.xcassets */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		D2AFFEE7BAB24693F3D69BC6 /* ServeSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ServeSettingsView.swift; sourceTree = "<group>"; };
+		41A3451AD50A31F7C359B2F3 /* SettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		D6CF9EFE66F4C697B3351EF2 /* QRScanner.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = QRScanner.swift; sourceTree = "<group>"; };
 		E5A7175AF77F1B7DA4792383 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		EF10973A86F8E4E217DC6ED3 /* NativePlatform.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = NativePlatform.swift; sourceTree = "<group>"; };
@@ -165,6 +179,7 @@
 				E0134CD12B577CDB4324E9C5 /* Cocoa.framework in Frameworks */,
 				F6A570C04D5484B85261DB62 /* ZuseCore in Frameworks */,
 				D844FAEA00EC01BC3627772F /* Textual in Frameworks */,
+				5F9E3AFD7F54556D9EFA63A8 /* Citadel in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -175,6 +190,7 @@
 				4F5620F2B4F753C71F5E90F7 /* Foundation.framework in Frameworks */,
 				D74DBC337C07BA0BA186966D /* ZuseCore in Frameworks */,
 				B175D768481FA2F0AF0FD7B2 /* Textual in Frameworks */,
+				462629935489DB867831A3B1 /* Citadel in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -272,17 +288,21 @@
 				AB383162406E497000EE1AB8 /* InteractionView.swift */,
 				5E48A444141F677012936E0E /* MessageDetails.swift */,
 				EF10973A86F8E4E217DC6ED3 /* NativePlatform.swift */,
-				3878C69AE2F87271BF478449 /* NearbyBrowser.swift */,
 				3A0C17265E9F0320C36EE078 /* NewChatView.swift */,
 				8A929586919FB530061F41D6 /* PreviewData.swift */,
 				D6CF9EFE66F4C697B3351EF2 /* QRScanner.swift */,
 				0A26C4383CC9940B8C9234EF /* RegisteredDevicesView.swift */,
 				C565500557EAA2B15445D249 /* RuntimeSettingsView.swift */,
 				D2AFFEE7BAB24693F3D69BC6 /* ServeSettingsView.swift */,
+				41A3451AD50A31F7C359B2F3 /* SettingsView.swift */,
 				4B3710D736455937160AB4BD /* TranscriptView.swift */,
 				3D66357E7254C67C64AE3811 /* UISpecView.swift */,
 				79D31982FFE1BD8EB7D55532 /* WorkspaceModel.swift */,
 				7989531468DAFAB0DEF5A822 /* ZuseApp.swift */,
+				6AE7C0F33292D5327D1479D7 /* AddComputerView.swift */,
+				ED4FE13338C9CD8625D74955 /* ComputersView.swift */,
+				471E066F1419134643DD22E1 /* SSHConnectView.swift */,
+				F34459DEED260D3E79623BEC /* SSHSession.swift */,
 				A5B5AD6D410D81432C2BE664 /* ModelCatalog.json */,
 				44223CEF596EF52E186162E9 /* SettingsSchema.json */,
 				A4B72E1E21D77D0F4D66B7E2 /* UIParser.js */,
@@ -315,6 +335,7 @@
 			packageProductDependencies = (
 				6C4B7833C9262A4B6D8C0028 /* ZuseCore */,
 				AD054EC2B414C7EE659951E4 /* Textual */,
+				86E839D5E65849256962F86C /* Citadel */,
 			);
 			productName = "Zuse Native";
 			productReference = 4A3C64A8F0E29E511808A79F /* Zuse Native.app */;
@@ -372,6 +393,7 @@
 			packageProductDependencies = (
 				CD5EB6F0D0EE09241CB98476 /* ZuseCore */,
 				01B39DBAAE1C7E72926F582E /* Textual */,
+				43BC19182A294A3130E18580 /* Citadel */,
 			);
 			productName = "Zuse Native";
 			productReference = 6A6E93AA7C8A417AEA566C8D /* Zuse Native.app */;
@@ -399,6 +421,7 @@
 			packageReferences = (
 				B0AD84367CFDF1C5D5C77BC9 /* XCLocalSwiftPackageReference "." */,
 				F4F48B1EC7DD125B44DCBE18 /* XCRemoteSwiftPackageReference "textual" */,
+				F4C754AD0EC867B70C1C06DA /* XCRemoteSwiftPackageReference "Citadel" */,
 			);
 			preferredProjectObjectVersion = 100;
 			productRefGroup = 943377CCCEA0422277E3EAC6 /* Products */;
@@ -481,6 +504,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				831909310849605FF64A5B8D /* AddComputerView.swift in Sources */,
+				20766FFB22CC4B06DD17EBCF /* ComputersView.swift in Sources */,
+				A7D3C870755031B2BFE9ACA9 /* SSHConnectView.swift in Sources */,
+				0A17BA092A387332329B85C0 /* SSHSession.swift in Sources */,
 				7F6DEE2E200FA49418628075 /* Account.swift in Sources */,
 				1CB58C880D8134CA585A7ACB /* AddProjectView.swift in Sources */,
 				0858644327948396587C4D1A /* AttachmentView.swift in Sources */,
@@ -496,13 +523,13 @@
 				237AAEE4E761DFA8A7A71799 /* InteractionView.swift in Sources */,
 				C32C439B0609035A6D912A83 /* MessageDetails.swift in Sources */,
 				5FAFE63A190A49B030893807 /* NativePlatform.swift in Sources */,
-				B8D6D98A8D2D71FBEAB74937 /* NearbyBrowser.swift in Sources */,
 				27FEE3977204B7ED4AEA7225 /* NewChatView.swift in Sources */,
 				1ABB6E95D793074F4FC62ADC /* PreviewData.swift in Sources */,
 				EDE37FC0B15B69011E315099 /* QRScanner.swift in Sources */,
 				54848106F0A926C61EA8F149 /* RegisteredDevicesView.swift in Sources */,
 				21FBEBBCDED22B50DEA8D055 /* RuntimeSettingsView.swift in Sources */,
 				23B5520F859B16DB6E80B303 /* ServeSettingsView.swift in Sources */,
+				7A951D29992FD1A6CA99F76A /* SettingsView.swift in Sources */,
 				D1DEBAF39C9A77012F82EF8B /* TranscriptView.swift in Sources */,
 				27B52FE6C432AF3E58C529B1 /* UISpecView.swift in Sources */,
 				BC1B3D73F9439A25514519C0 /* WorkspaceModel.swift in Sources */,
@@ -514,6 +541,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				74EA052DAE6531D04EA0A9E8 /* AddComputerView.swift in Sources */,
+				6A900C12E5471EDD5A1D093A /* ComputersView.swift in Sources */,
+				688B1C64C4FF5FB636080E2F /* SSHConnectView.swift in Sources */,
+				E52E7DA77EF39F59945D6E1D /* SSHSession.swift in Sources */,
 				AAADE082E51C0074E12235A5 /* Account.swift in Sources */,
 				DB8067FC4A287B8534992131 /* AddProjectView.swift in Sources */,
 				5B89493F7F7A496D4F4ACE68 /* AttachmentView.swift in Sources */,
@@ -529,13 +560,13 @@
 				5D29E27E6183706728D89FD4 /* InteractionView.swift in Sources */,
 				691AB2CD163DE0A10CC99CF7 /* MessageDetails.swift in Sources */,
 				C62A83988288AAE4C5FA49BE /* NativePlatform.swift in Sources */,
-				091B8952E5972BCDC282327E /* NearbyBrowser.swift in Sources */,
 				E5DC6D065ED2985DAE79B3FD /* NewChatView.swift in Sources */,
 				40229378CE55192A02287CE6 /* PreviewData.swift in Sources */,
 				5FC08F5094EE6E85F786413F /* QRScanner.swift in Sources */,
 				F5A83BF48D659A510F3EAFA7 /* RegisteredDevicesView.swift in Sources */,
 				CF9C8E60E12F51DAB539EF97 /* RuntimeSettingsView.swift in Sources */,
 				5A849218196A09A1FB22CD5B /* ServeSettingsView.swift in Sources */,
+				24A3054F0C3C5230A7C38AC6 /* SettingsView.swift in Sources */,
 				EE335EDBA79BB531220DFD7C /* TranscriptView.swift in Sources */,
 				275AB9B7A7A1334B2E35A0CB /* UISpecView.swift in Sources */,
 				5949162A8C6878AB8A64F7F0 /* WorkspaceModel.swift in Sources */,
@@ -876,6 +907,14 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		F4C754AD0EC867B70C1C06DA /* XCRemoteSwiftPackageReference "Citadel" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/orlandos-nl/Citadel.git";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.12.1;
+			};
+		};
 		F4F48B1EC7DD125B44DCBE18 /* XCRemoteSwiftPackageReference "textual" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/gonzalezreal/textual.git";
@@ -887,6 +926,16 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		86E839D5E65849256962F86C /* Citadel */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F4C754AD0EC867B70C1C06DA /* XCRemoteSwiftPackageReference "Citadel" */;
+			productName = Citadel;
+		};
+		43BC19182A294A3130E18580 /* Citadel */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F4C754AD0EC867B70C1C06DA /* XCRemoteSwiftPackageReference "Citadel" */;
+			productName = Citadel;
+		};
 		01B39DBAAE1C7E72926F582E /* Textual */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = F4F48B1EC7DD125B44DCBE18 /* XCRemoteSwiftPackageReference "textual" */;

@@ -128,6 +128,7 @@ icon_assets![
     (DITHER_ARCHIVE, "dither-archive"),
     (DITHER_PEN, "dither-pen"),
     (DITHER_DOCUMENT, "dither-doc"),
+    (DITHER_QR, "dither-qr"),
     (TAG, "tag"),
     (KEY_MINIMALISTIC, "key-minimalistic"),
     (KEYBOARD, "keyboard"),

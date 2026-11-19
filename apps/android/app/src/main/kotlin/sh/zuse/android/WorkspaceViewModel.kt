@@ -102,8 +102,10 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
     val reconnecting: Boolean
         get() =
             source != null &&
-                !connected &&
-                (status.startsWith("Reconnecting") || status.startsWith("Offline"))
+                ((!connected &&
+                    (status.startsWith("Reconnecting") || status.startsWith("Offline"))) ||
+                    // The link is resuming its session over a new socket.
+                    (connected && linkRoute?.state == "reattaching"))
 
     /** A failed new-chat request, shown on the new chat sheet only. */
     var createError by mutableStateOf<String?>(null)
@@ -183,6 +185,7 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
             vault.read("devices")?.let {
                 devices.addAll(WireJson.decodeFromString<List<SavedDevice>>(it))
             }
+            loadLastSeen()
             vault.read("new-chat-modes")?.let {
                 checkoutModes.putAll(WireJson.decodeFromString<Map<String, String>>(it))
             }
@@ -249,6 +252,33 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
         sessions.add(session)
         selectedSession = session
         status = "Preview · sample data"
+        // A cloud chat sits in the list like any other, marked only by its icon.
+        cloudChats.clear()
+        cloudChats.add(
+            CloudChat(
+                "preview-workspace",
+                project.id,
+                "preview-cloud-chat",
+                "preview-cloud-session",
+                title = "Run the nightly benchmarks",
+                repositoryDisplayName = "zuse",
+                state = "ready",
+                runtimeState = "idle",
+            )
+        )
+        // Archived samples so the list's archive filter has something to show.
+        computerInboxes["device:preview"] =
+            ComputerInbox(
+                Source.Device(SavedDevice("preview", "Demo computer", "", "")),
+                "Demo computer",
+                listOf(project),
+                archived =
+                    listOf(
+                        Session("preview-archived-1", project.id, "Migrate the settings store", "claude", "Sonnet 5.5"),
+                        Session("preview-archived-2", project.id, "Try a denser chat list", "claude", "Sonnet 5.5"),
+                    ),
+                reachable = true,
+            )
         inputsReady = true
         val samples =
             listOf(
@@ -354,6 +384,7 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
         val label: String,
         val projects: List<Project> = emptyList(),
         val chats: List<Session> = emptyList(),
+        val archived: List<Session> = emptyList(),
         /** Null while the first load is in flight. */
         val reachable: Boolean? = null,
     )
@@ -413,9 +444,21 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
         get() = placeFilter?.takeIf { key -> places.any { it.first == key } }
 
     /** Every chat the home list can show, from all computers and Zuse Cloud. */
+    private var archiveFilterState by mutableStateOf(ArchiveFilter.Active)
+
+    /** Active, archived or every chat on the home list. */
+    var archiveFilter: ArchiveFilter
+        get() = archiveFilterState
+        set(value) {
+            archiveFilterState = value
+            // The open computer may not be saved; its archive loads over the open connection.
+            if (value != ArchiveFilter.Active && computerInboxes.values.none { it.target == source })
+                loadArchivedChats()
+        }
+
     fun chatRows(): List<ChatRow> {
         val rows = mutableListOf<ChatRow>()
-        fun add(target: Source, projects: List<Project>, chats: List<Session>) {
+        fun add(target: Source, projects: List<Project>, chats: List<Session>, archived: Boolean = false) {
             val key = placeKey(target)
             val label = placeLabel(target)
             chats.forEach { chat ->
@@ -436,13 +479,19 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                         ChatStatus.from(chat.status),
                         chat.branch,
                         ChatList.parseTime(chat.activityAt),
+                        archived,
                     )
             }
         }
-        computerInboxes.values.forEach { add(it.target, it.projects, it.chats) }
+        computerInboxes.values.forEach {
+            add(it.target, it.projects, it.chats)
+            add(it.target, it.projects, it.archived, archived = true)
+        }
         val current = source
-        if (current != null && current !is Source.Cloud && computerInboxes.values.none { it.target == current })
+        if (current != null && current !is Source.Cloud && computerInboxes.values.none { it.target == current }) {
             add(current, projects, sessions)
+            add(current, projects, archivedSessions, archived = true)
+        }
         if (current == null && BuildConfig.DEBUG && status.startsWith("Preview"))
             add(Source.Device(SavedDevice("preview", "Demo computer", "", "")), projects, sessions)
         cloudChats.forEach { chat ->
@@ -470,6 +519,59 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                 selectedSession?.id == row.chatId &&
                     (row.placeKey == placeKey(current) ||
                         computerInboxes.values.none { it.target == current })
+        }
+    }
+
+    /**
+     * Restores an archived chat on its computer over a short-lived connection, then opens it when
+     * [open] is set. Works for any computer, not only the one that's open.
+     */
+    fun restoreChat(row: ChatRow, open: Boolean) {
+        val inbox = computerInboxes[row.placeKey]
+        if (inbox == null) {
+            // A chat on the open computer, which isn't in the saved list.
+            val session = archivedSessions.firstOrNull { it.id == row.chatId } ?: return
+            setChatArchived(session, false) {
+                if (open) {
+                    archiveFilter = ArchiveFilter.Active
+                    selectedProject = projects.firstOrNull { it.id == session.projectId }
+                    selectSession(session)
+                }
+            }
+            return
+        }
+        restoreSavedChat(row, inbox, open)
+    }
+
+    private fun restoreSavedChat(row: ChatRow, inbox: ComputerInbox, open: Boolean) = chatAction {
+        val session = inbox.archived.firstOrNull { it.id == row.chatId } ?: return@chatAction
+        val client =
+            if (source == inbox.target && connected && rpc?.canonical == true) null
+            else
+                when (val target = inbox.target) {
+                    is Source.Device -> deviceClient(target.device)
+                    is Source.Computer ->
+                        cloud.connectEnvironment(
+                            target.device.environmentId,
+                            withContext(Dispatchers.IO) { DeviceProof() }::sign,
+                            target.device.canonicalAccount,
+                        )
+                    else -> throw ClientException("This chat can’t be restored here.")
+                }
+        try {
+            CanonicalWorkspace(client ?: requireNotNull(rpc)).setArchived(session.id, false)
+        } finally {
+            client?.close()
+        }
+        computerInboxes[row.placeKey]?.let {
+            computerInboxes[row.placeKey] =
+                it.copy(chats = it.chats + session, archived = it.archived.filterNot { a -> a.id == session.id })
+        }
+        archivedSessions.removeAll { it.id == session.id }
+        if (source == inbox.target && connected) loadSessions()
+        if (open) {
+            archiveFilter = ArchiveFilter.Active
+            openInboxChat(inbox.target, session)
         }
     }
 
@@ -569,7 +671,10 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                     "computer:${it.environmentId}" to
                         ComputerInbox(Source.Computer(it), it.label ?: "Computer")
                 }
-        computerInboxes.keys.retainAll(targets.map { it.first }.toSet())
+        val preview = BuildConfig.DEBUG && status.startsWith("Preview")
+        computerInboxes.keys.retainAll(
+            targets.map { it.first }.toSet() + if (preview) setOf("device:preview") else emptySet()
+        )
         targets.forEach { (key, value) ->
             if (key !in computerInboxes) computerInboxes[key] = value
         }
@@ -587,39 +692,16 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                             limit.acquire()
                             var client: RpcClient? = null
                             try {
+                                // SSH computers may try direct routes before their tunnel.
+                                val budget =
+                                    if ((row.target as? Source.Device)?.device?.ssh != null) 30_000L
+                                    else 12_000L
+                                var archived = emptyList<Session>()
                                 val (projects, chats) =
-                                    withTimeout(12_000) {
+                                    withTimeout(budget) {
                                         client =
                                             when (val target = row.target) {
-                                                is Source.Device ->
-                                                    RpcClient(
-                                                            target.device.address,
-                                                            token = target.device.token,
-                                                            http =
-                                                                pinnedHttp(
-                                                                    target.device.certificatePin
-                                                                ),
-                                                            pairingLink = target.device.pairingLink,
-                                                        )
-                                                        .also {
-                                                            client = it
-                                                            it.connect()
-                                                            target.device.environmentId?.let {
-                                                                expected ->
-                                                                check(
-                                                                    it.call(
-                                                                            if (it.canonical)
-                                                                                "EngineInfo"
-                                                                            else "connect.describe"
-                                                                        )
-                                                                        .text(
-                                                                            if (it.canonical)
-                                                                                "deviceId"
-                                                                            else "environmentId"
-                                                                        ) == expected
-                                                                )
-                                                            }
-                                                        }
+                                                is Source.Device -> deviceClient(target.device)
                                                 is Source.Computer ->
                                                     cloud.connectEnvironment(
                                                         target.device.environmentId,
@@ -633,10 +715,9 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                                             val workspace = CanonicalWorkspace(active)
                                             val projects = workspace.projects()
                                             val live = workspace.runtimeStatuses()
-                                            projects to
-                                                workspace.allSessions().map {
-                                                    it.copy(status = live[it.id])
-                                                }
+                                            val (active, stored) = workspace.sessionsWithArchived()
+                                            archived = stored
+                                            projects to active.map { it.copy(status = live[it.id]) }
                                         } else {
                                             val projects =
                                                 active.call("workspace.list").decode<List<Project>>()
@@ -652,7 +733,13 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                                         }
                                     }
                                 computerInboxes[key] =
-                                    row.copy(projects = projects, chats = chats, reachable = true)
+                                    row.copy(
+                                        projects = projects,
+                                        chats = chats,
+                                        archived = archived,
+                                        reachable = true,
+                                    )
+                                markSeen(key)
                                 // Titles are named by the host after the first reply.
                                 val open = selectedSession
                                 if (row.target == source && open != null)
@@ -664,7 +751,8 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                                     computerInboxes[key] =
                                         (computerInboxes[key] ?: row).copy(reachable = false)
                                 else throw cancelled
-                            } catch (_: Throwable) {
+                            } catch (failure: Throwable) {
+                                failure.message?.let { failures[key] = it }
                                 computerInboxes[key] =
                                     (computerInboxes[key] ?: row).copy(reachable = false)
                             } finally {
@@ -759,37 +847,9 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                         client =
                             when (val target = source) {
                                 is Source.Device ->
-                                    RpcClient(
-                                            target.device.address,
-                                            token = target.device.token,
-                                            http = pinnedHttp(target.device.certificatePin),
-                                            pairingLink = target.device.pairingLink,
-                                            onRoute = { route ->
-                                                viewModelScope.launch { linkRoute = route }
-                                            },
-                                        )
-                                        .also {
-                                            it.connect()
-                                            try {
-                                                target.device.environmentId?.let { expected ->
-                                                    require(
-                                                        it.call(
-                                                                if (it.canonical) "EngineInfo"
-                                                                else "connect.describe"
-                                                            )
-                                                            .text(
-                                                                if (it.canonical) "deviceId"
-                                                                else "environmentId"
-                                                            ) == expected
-                                                    ) {
-                                                        "The computer identity changed. Pair again."
-                                                    }
-                                                }
-                                            } catch (failure: Throwable) {
-                                                it.close()
-                                                throw failure
-                                            }
-                                        }
+                                    deviceClient(target.device) { route ->
+                                        viewModelScope.launch { linkRoute = route }
+                                    }
                                 is Source.Cloud -> cloud.connect(target.chat.workspaceId)
                                 is Source.Computer ->
                                     cloud.connectEnvironment(
@@ -812,6 +872,7 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                         error = null
                         connectionIssue = null
                         status = "Connected"
+                        source?.let { markSeen(placeKey(it)) }
                         val selected = selectedSession
                         if (selected != null) {
                             selectedProject = projects.find { it.id == selected.projectId }
@@ -867,6 +928,7 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                         synced = false
                         // The banner shows reconnection; a snackbar per retry is only noise.
                         connectionIssue = failure.message
+                        source?.let { place -> failure.message?.let { failures[placeKey(place)] = it } }
                         timelineJob?.cancel()
                         client?.close()
                         rpc = null
@@ -946,7 +1008,9 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun networkRecovered() {
+        tunnels.networkChanged()
         if (foreground && source != null && !connected) reconnect()
+        if (foreground) refreshComputerInboxes(quiet = true)
     }
 
     fun disconnect() {
@@ -2092,21 +2156,33 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    fun saveDevice(label: String, address: String, token: String, pin: String? = null) = action {
-        Endpoint.validate(address)
-        require(label.isNotBlank()) { "Give this device a name." }
-        val next =
-            SavedDevice(uuid(), label.trim(), address.trim(), token.trim(), certificatePin = pin)
-        vault.write("devices", WireJson.encodeToString(devices.toList() + next))
-        devices.add(next)
-        connect(Source.Device(next))
-    }
-
     fun forgetDevice(device: SavedDevice) = action {
         if ((source as? Source.Device)?.device?.id == device.id) disconnect()
+        tunnels.drop(device.id)
         val remaining = devices.filterNot { it.id == device.id }
         vault.write("devices", WireJson.encodeToString(remaining))
         devices.remove(device)
+        lastSeen.remove("device:${device.id}")
+    }
+
+    fun renameDevice(device: SavedDevice, label: String) = action {
+        val name = label.trim()
+        require(name.isNotEmpty() && name.length <= 80) { "Enter a name up to 80 characters." }
+        val renamed = device.copy(label = name)
+        val updated = devices.map { if (it.id == device.id) renamed else it }
+        vault.write("devices", WireJson.encodeToString(updated))
+        devices.clear()
+        devices.addAll(updated)
+        val current = source
+        if (current is Source.Device && current.device.id == device.id) source = Source.Device(renamed)
+    }
+
+    /** Saves [device], replacing any entry for the same computer. */
+    private suspend fun remember(device: SavedDevice, replacing: List<SavedDevice> = emptyList()) {
+        val updated = devices.filterNot { saved -> saved.id == device.id || saved in replacing } + device
+        vault.write("devices", WireJson.encodeToString(updated))
+        devices.clear()
+        devices.addAll(updated)
     }
 
     fun pair(link: String, label: String, pin: String? = null, done: () -> Unit) = action {
@@ -2117,6 +2193,7 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                 require(pin == null) {
                     "Native invitations use the server's trusted TLS certificate."
                 }
+                if (Invitation.parse(link)?.loopbackOnly == true) throw ClientException(LOOPBACK_LINK)
                 val started =
                     withContext(Dispatchers.IO) {
                         NativePairing.request(
@@ -2130,6 +2207,10 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                 val identity = try {
                     verifier.connect()
                     requireNotNull(verifier.call("EngineInfo").text("deviceId"))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    throw ClientException(unreachableHint(Invitation.parse(link)))
                 } finally { verifier.close() }
                 val origin = java.net.URI(address)
                 val replaced = devices.filter { saved ->
@@ -2145,11 +2226,10 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
                         environmentId = identity,
                         pairingLink = link.trim(),
                     )
-                val updated = devices.filterNot { it in replaced } + device
-                vault.write("devices", WireJson.encodeToString(updated))
-                devices.clear()
-                devices.addAll(updated)
+                remember(device, replaced)
+                markSeen("device:${device.id}")
                 connect(Source.Device(device))
+                pairingLink = null
                 done()
                 return@action
             }
@@ -2208,8 +2288,510 @@ class WorkspaceViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+
+    // ---- Computers: connection status, SSH and pairing ----
+
+    private val tunnels
+        get() = app.tunnels
+
+    /** This phone's connectivity, for explaining why a computer can't be reached. */
+    val network: PhoneNetwork
+        get() = app.network
+
+    /** When each place last answered (epoch ms), keyed like [places]. */
+    val lastSeen = mutableStateMapOf<String, Long>()
+
+    /** The last reason each place couldn't be reached, cleared once it answers. */
+    val failures = mutableStateMapOf<String, String>()
+
+    private fun markSeen(key: String) {
+        failures.remove(key)
+        lastSeen[key] = System.currentTimeMillis()
+        val snapshot = lastSeen.toMap()
+        viewModelScope.launch {
+            runCatching { vault.write("last-seen", WireJson.encodeToString(snapshot)) }
+        }
+    }
+
+    private suspend fun loadLastSeen() {
+        vault.read("last-seen")?.let {
+            runCatching { WireJson.decodeFromString<Map<String, Long>>(it) }.getOrNull()?.let(lastSeen::putAll)
+        }
+    }
+
+    /**
+     * Opens a verified connection to a saved computer. SSH computers go through their tunnel
+     * when they need one, and fall back to it when their direct routes don't answer.
+     */
+    private suspend fun deviceClient(
+        device: SavedDevice,
+        onRoute: ((PairedRouteStatus) -> Unit)? = null,
+    ): RpcClient {
+        suspend fun open(tunnelled: Boolean): RpcClient {
+            val lease = if (tunnelled) tunnels.lease(device) else null
+            val routed: ((PairedRouteStatus) -> Unit)? =
+                onRoute?.let { report ->
+                    { status ->
+                        report(
+                            if (lease != null && status.kind?.lowercase() == "loopback")
+                                status.copy(kind = "ssh", label = RouteClass.Ssh.label)
+                            else status
+                        )
+                    }
+                }
+            val client =
+                try {
+                    RpcClient(
+                        device.address,
+                        token = device.token,
+                        http = pinnedHttp(device.certificatePin),
+                        pairingLink = lease?.link ?: device.pairingLink,
+                        onRoute = routed,
+                        onClosed = { lease?.close() },
+                    )
+                } catch (failure: Throwable) {
+                    lease?.close()
+                    throw failure
+                }
+            try {
+                try {
+                    client.connect()
+                } catch (failure: Throwable) {
+                    if (lease == null || failure is CancellationException) throw failure
+                    throw SshException(
+                        "Signed in to ${device.ssh?.display}, but Zuse isn’t answering there.",
+                        SshException.Kind.NotRunning,
+                    )
+                }
+                device.environmentId?.let { expected ->
+                    val reported =
+                        client
+                            .call(if (client.canonical) "EngineInfo" else "connect.describe")
+                            .text(if (client.canonical) "deviceId" else "environmentId")
+                    require(reported == expected) { "The computer identity changed. Pair again." }
+                }
+            } catch (failure: Throwable) {
+                client.close()
+                throw failure
+            }
+            return client
+        }
+        val ssh = device.ssh
+        if (ssh == null || device.tunnel) return open(ssh != null)
+        return try {
+            withTimeout(DIRECT_BEFORE_SSH_MS) { open(false) }
+        } catch (cancelled: CancellationException) {
+            if (cancelled !is TimeoutCancellationException) throw cancelled
+            open(true)
+        } catch (_: Throwable) {
+            open(true)
+        }
+    }
+
+    /** One plain sentence for a computer that didn't answer, based on this phone's network. */
+    fun unreachableHint(invitation: Invitation?, name: String = "the computer"): String {
+        val net = network
+        return when {
+            !net.online -> "This phone is offline. Connect to Wi-Fi or mobile data and try again."
+            invitation?.routeClass == RouteClass.Tailnet && !net.vpn ->
+                "Turn on Tailscale on this phone (Headscale works too), then try again."
+            invitation?.routeClass == RouteClass.Lan && !net.wifi ->
+                "$name is on your local network. Join the same Wi-Fi, or use Tailscale or SSH to reach it from anywhere."
+            invitation?.routeClass == RouteClass.Lan ->
+                "Can’t reach $name. Check that Zuse is open there and that both devices are on the same Wi-Fi."
+            else -> "Can’t reach $name. Check that it’s awake and Zuse is running."
+        }
+    }
+
+    enum class ComputerState { Connected, Connecting, Reachable, Unreachable, Checking }
+
+    data class ComputerStatus(
+        val state: ComputerState,
+        /** Route in use, such as "Local network", with its round trip when known. */
+        val route: String? = null,
+        val rttMs: Long? = null,
+        val lastSeen: Long? = null,
+        val hint: String? = null,
+    )
+
+    /** Status of one place for the Computers screen, combining the open link and the inbox. */
+    fun computerStatus(key: String): ComputerStatus {
+        val seen = lastSeen[key]
+        if (currentPlace == key) {
+            if (connected && linkRoute?.state == "reattaching")
+                return ComputerStatus(ComputerState.Connecting, route = "Reconnecting…", lastSeen = seen)
+            if (connected)
+                return ComputerStatus(
+                    ComputerState.Connected,
+                    linkRoute?.label ?: (source as? Source.Computer)?.let { "Zuse account" },
+                    linkRoute?.rttMs,
+                    seen,
+                )
+            if (reconnecting || status.startsWith("Connecting"))
+                return ComputerStatus(
+                    if (connectionIssue != null) ComputerState.Unreachable else ComputerState.Connecting,
+                    route = if (status.startsWith("Reconnecting")) "Reconnecting…" else null,
+                    lastSeen = seen,
+                    hint = connectionIssue?.let { hintFor(key) },
+                )
+        }
+        return when (computerInboxes[key]?.reachable) {
+            true -> ComputerStatus(ComputerState.Reachable, lastSeen = seen)
+            false -> ComputerStatus(ComputerState.Unreachable, lastSeen = seen, hint = hintFor(key))
+            null -> ComputerStatus(ComputerState.Checking, lastSeen = seen)
+        }
+    }
+
+    private fun hintFor(key: String): String? {
+        val device = devices.firstOrNull { "device:${it.id}" == key } ?: return null
+        val ssh = device.ssh
+        if (ssh != null)
+            return if (!network.online) unreachableHint(null)
+            else failures[key] ?: "Can’t reach ${ssh.display}. Check connection to find out why."
+        return unreachableHint(device.pairingLink?.let(Invitation::parse), device.label)
+    }
+
+    /** Overall dot for the home header: worst state across saved computers. */
+    val overallState: ComputerState?
+        get() {
+            val keys = devices.map { "device:${it.id}" } + linkedComputerKeys
+            if (keys.isEmpty()) return null
+            val states = keys.map { computerStatus(it).state }
+            return when {
+                ComputerState.Connected in states && ComputerState.Unreachable !in states -> ComputerState.Connected
+                ComputerState.Unreachable in states && states.none {
+                    it == ComputerState.Connected || it == ComputerState.Reachable
+                } -> ComputerState.Unreachable
+                ComputerState.Unreachable in states -> ComputerState.Connecting
+                ComputerState.Connecting in states || ComputerState.Checking in states -> ComputerState.Connecting
+                else -> ComputerState.Reachable
+            }
+        }
+
+    private val linkedComputerKeys: List<String>
+        get() = linkedComputers.map { "computer:${it.environmentId}" }
+
+    fun deviceFor(key: String): SavedDevice? = devices.firstOrNull { "device:${it.id}" == key }
+
+    /** Opens chats from one place on the home list, or switches the open computer. */
+    fun showPlace(key: String) {
+        placeFilter = key
+    }
+
+    // ---- Pairing over SSH ----
+
+    enum class SshStep(val title: String) {
+        SignIn("Sign in"),
+        FindZuse("Find Zuse"),
+        StartZuse("Zuse running"),
+        Pair("Create pairing"),
+        Connect("Connect"),
+    }
+
+    data class SshProgress(
+        val target: SshTarget,
+        val running: SshStep? = null,
+        val done: Set<SshStep> = emptySet(),
+        val failed: SshStep? = null,
+        val message: String? = null,
+        val hostKey: String? = null,
+        val version: String? = null,
+        /** Zuse is installed but not running; the screen offers to start it. */
+        val needsStart: Boolean = false,
+        /** The computer refused this phone's key; offer to copy it or use a password once. */
+        val needsKey: Boolean = false,
+        val finished: Boolean = false,
+    )
+
+    var sshProgress by mutableStateOf<SshProgress?>(null)
+        private set
+
+    var sshPublicKey by mutableStateOf<String?>(null)
+        private set
+
+    fun loadSshKey() = action { sshPublicKey = tunnels.identity().publicKey }
+
+    fun resetSsh() {
+        if (sshProgress?.running == null) sshProgress = null
+    }
+
+    private var sshJob: Job? = null
+
+    /**
+     * Signs in to [target], finds or starts Zuse, creates an invitation for this phone and connects,
+     * tunnelling through SSH when the computer only listens on loopback.
+     */
+    fun pairOverSsh(
+        target: SshTarget,
+        label: String,
+        password: String? = null,
+        start: Boolean = false,
+        keepRunning: Boolean = false,
+        alwaysTunnel: Boolean = false,
+        done: () -> Unit = {},
+    ) {
+        if (sshJob?.isActive == true) return
+        var progress = SshProgress(target.copy(password = false))
+        fun update(next: SshProgress) {
+            progress = next
+            sshProgress = next
+        }
+        fun begin(step: SshStep) = update(progress.copy(running = step, failed = null, message = null))
+        fun finish(step: SshStep) = update(progress.copy(running = null, done = progress.done + step))
+        update(progress)
+        sshJob =
+            viewModelScope.launch {
+                var session: SshSession? = null
+                try {
+                    begin(SshStep.SignIn)
+                    session =
+                        try {
+                            tunnels.signIn(target, password)
+                        } catch (failure: SshException) {
+                            if (failure.kind == SshException.Kind.Auth && password == null) {
+                                sshPublicKey = tunnels.identity().publicKey
+                                update(
+                                    progress.copy(
+                                        running = null,
+                                        failed = SshStep.SignIn,
+                                        needsKey = true,
+                                        message = failure.message,
+                                    )
+                                )
+                                return@launch
+                            }
+                            throw failure
+                        }
+                    val signedIn = session
+                    if (password != null) ZuseOverSsh.authorize(signedIn, tunnels.identity().publicKey)
+                    update(progress.copy(hostKey = signedIn.hostKey, needsKey = false))
+                    finish(SshStep.SignIn)
+
+                    begin(SshStep.FindZuse)
+                    val version =
+                        ZuseOverSsh.version(signedIn)
+                            ?: throw SshException(
+                                "Zuse isn’t installed on ${target.host}. Install the Zuse command there, then try again.",
+                                SshException.Kind.NoZuse,
+                            )
+                    update(progress.copy(version = version))
+                    val computerName = if (label.isBlank()) ZuseOverSsh.computerName(signedIn) else null
+                    finish(SshStep.FindZuse)
+
+                    begin(SshStep.StartZuse)
+                    val name = "Zuse on ${android.os.Build.MODEL}"
+                    val invitation =
+                        try {
+                            ZuseOverSsh.pair(signedIn, name)
+                        } catch (failure: SshException) {
+                            if (failure.kind != SshException.Kind.NotRunning) throw failure
+                            if (!start) {
+                                update(
+                                    progress.copy(
+                                        running = null,
+                                        failed = SshStep.StartZuse,
+                                        needsStart = true,
+                                        message = "Zuse is installed but not running on ${target.host}.",
+                                    )
+                                )
+                                return@launch
+                            }
+                            ZuseOverSsh.start(signedIn, keepRunning)
+                            var created: Invitation? = null
+                            val deadline = System.currentTimeMillis() + 20_000
+                            while (created == null) {
+                                delay(1_000)
+                                created =
+                                    try {
+                                        ZuseOverSsh.pair(signedIn, name)
+                                    } catch (retry: SshException) {
+                                        if (
+                                            retry.kind != SshException.Kind.NotRunning ||
+                                                System.currentTimeMillis() > deadline
+                                        )
+                                            throw retry
+                                        null
+                                    }
+                            }
+                            created
+                        }
+                    update(progress.copy(needsStart = false))
+                    finish(SshStep.StartZuse)
+                    finish(SshStep.Pair)
+                    signedIn.close()
+                    session = null
+
+                    begin(SshStep.Connect)
+                    val existing =
+                        devices.firstOrNull {
+                            it.ssh?.host.equals(target.host, true) &&
+                                it.ssh?.user == target.user &&
+                                it.ssh?.port == target.port
+                        }
+                    var device =
+                        SavedDevice(
+                            existing?.id ?: uuid(),
+                            label.trim().ifEmpty {
+                                computerName
+                                    ?: if (target.host.any { it.isLetter() } && ':' !in target.host)
+                                        target.host.substringBefore('.')
+                                    else target.host
+                            },
+                            invitation.origin,
+                            "",
+                            pairingLink = invitation.link,
+                            ssh = target.copy(hostKey = signedIn.hostKey, password = false),
+                            tunnel = alwaysTunnel || invitation.loopbackOnly,
+                        )
+                    val client = deviceClient(device)
+                    val identity =
+                        try {
+                            requireNotNull(client.call("EngineInfo").text("deviceId"))
+                        } finally {
+                            client.close()
+                        }
+                    device = device.copy(environmentId = identity)
+                    remember(device, devices.filter { it.environmentId == identity || it.id == existing?.id })
+                    markSeen("device:${device.id}")
+                    finish(SshStep.Connect)
+                    update(progress.copy(finished = true))
+                    connect(Source.Device(device))
+                    done()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Throwable) {
+                    update(
+                        progress.copy(
+                            failed = progress.running ?: SshStep.Connect,
+                            running = null,
+                            message = failure.message ?: "Something went wrong over SSH.",
+                        )
+                    )
+                } finally {
+                    session?.close()
+                }
+            }
+    }
+
+    fun cancelSsh() {
+        sshJob?.cancel()
+        sshProgress = null
+    }
+
+    /** Checks one computer now, step by step, for the Check connection screen. */
+    data class CheckStep(val title: String, val ok: Boolean?, val detail: String? = null)
+
+    val checkSteps = mutableStateListOf<CheckStep>()
+    var checking by mutableStateOf(false)
+        private set
+
+    /** Check connection found Zuse stopped on an SSH computer, which this phone can start. */
+    var checkCanStart by mutableStateOf(false)
+        private set
+
+    /** Starts Zuse on an SSH computer and checks the connection again. */
+    fun startZuse(device: SavedDevice, keepRunning: Boolean) {
+        val ssh = device.ssh ?: return
+        if (checking) return
+        checking = true
+        checkCanStart = false
+        viewModelScope.launch {
+            val started =
+                runCatching {
+                    tunnels.signIn(ssh, null).use { ZuseOverSsh.start(it, keepRunning) }
+                }
+            checking = false
+            started
+                .onSuccess {
+                    delay(2_000)
+                    if (currentPlace == "device:${device.id}") reconnect()
+                    checkConnection(device)
+                }
+                .onFailure { checkSteps.add(CheckStep("Start Zuse", false, it.message)) }
+        }
+    }
+
+    fun checkConnection(device: SavedDevice) {
+        if (checking) return
+        checking = true
+        checkCanStart = false
+        checkSteps.clear()
+        viewModelScope.launch {
+            fun add(step: CheckStep) = checkSteps.add(step)
+            try {
+                val net = network
+                add(
+                    CheckStep(
+                        "Phone network",
+                        net.online,
+                        listOfNotNull(
+                                if (net.wifi) "Wi-Fi" else if (net.online) "Mobile data" else "Offline",
+                                if (net.vpn) "VPN on (Tailscale or Headscale)" else null,
+                            )
+                            .joinToString(" · "),
+                    )
+                )
+                if (!net.online) return@launch
+                device.ssh?.let { ssh ->
+                    val started = System.nanoTime()
+                    val ok =
+                        runCatching { tunnels.signIn(ssh, null).close() }
+                            .fold({ null }, { it.message ?: "SSH sign-in failed." })
+                    add(
+                        CheckStep(
+                            "SSH to ${ssh.display}",
+                            ok == null,
+                            ok ?: "Signed in in ${(System.nanoTime() - started) / 1_000_000} ms",
+                        )
+                    )
+                }
+                val started = System.nanoTime()
+                var route: PairedRouteStatus? = null
+                val client =
+                    runCatching {
+                            withTimeout(30_000) { deviceClient(device) { route = it } }
+                        }
+                        .getOrElse {
+                            val stopped = it is SshException && it.kind == SshException.Kind.NotRunning
+                            checkCanStart = stopped
+                            add(
+                                CheckStep(
+                                    "Reach Zuse",
+                                    false,
+                                    if (stopped) "${it.message} Start it from here." else if (device.ssh != null) it.message
+                                    else hintFor("device:${device.id}") ?: it.message,
+                                )
+                            )
+                            return@launch
+                        }
+                try {
+                    val connectMs = (System.nanoTime() - started) / 1_000_000
+                    add(CheckStep("Reach Zuse", true, "Verified this computer in $connectMs ms"))
+                    val pingStarted = System.nanoTime()
+                    client.call("EngineInfo")
+                    val rtt = (System.nanoTime() - pingStarted) / 1_000_000
+                    add(
+                        CheckStep(
+                            "Round trip",
+                            true,
+                            listOfNotNull(route?.label, "$rtt ms").joinToString(" · "),
+                        )
+                    )
+                    markSeen("device:${device.id}")
+                } finally {
+                    client.close()
+                }
+            } finally {
+                checking = false
+            }
+        }
+    }
+
     companion object {
-        const val CLOUD_PLACE = "cloud"
+        const val CLOUD_PLACE = ChatList.CLOUD_PLACE
+        private const val DIRECT_BEFORE_SSH_MS = 8_000L
+        const val LOOPBACK_LINK =
+            "This link only works on that computer. On it, turn on Settings → Devices → Direct connections, or run zuse serve --lan, then create a new link. You can also connect with SSH."
     }
 
     override fun onCleared() {

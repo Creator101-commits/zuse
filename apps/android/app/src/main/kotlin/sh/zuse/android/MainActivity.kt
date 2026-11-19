@@ -16,13 +16,27 @@ class MainActivity : ComponentActivity() {
         object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 sh.zuse.core.PairedNetwork.changed()
-                runOnUiThread { workspace.networkRecovered() }
+                runOnUiThread {
+                    refreshNetwork()
+                    workspace.networkRecovered()
+                }
+            }
+
+            override fun onCapabilitiesChanged(
+                network: Network,
+                capabilities: android.net.NetworkCapabilities,
+            ) {
+                runOnUiThread(::refreshNetwork)
             }
 
             override fun onLost(network: Network) {
                 sh.zuse.core.PairedNetwork.changed()
+                runOnUiThread(::refreshNetwork)
             }
         }
+
+    private fun refreshNetwork() =
+        (application as ZuseApplication).network.refresh(connectivity)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +57,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        refreshNetwork()
         workspace.setForeground(true)
     }
 

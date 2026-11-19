@@ -187,11 +187,10 @@ struct TranscriptDisclosureStyle: DisclosureGroupStyle {
       Button {
         configuration.isExpanded.toggle()
       } label: {
+        // No disclosure arrow, matching desktop: the whole row is the toggle.
         HStack(spacing: 8) {
           configuration.label
           Spacer(minLength: 4)
-          Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
-            .font(.system(size: 11, weight: .semibold)).foregroundStyle(.tertiary)
         }
         .frame(minHeight: 32).contentShape(Rectangle())
       }
@@ -224,21 +223,18 @@ struct ToolTreeRow: View {
             if row.running {
               ProgressView().controlSize(.mini).frame(width: 18)
             } else {
-              Image(systemName: row.failed ? "exclamationmark.circle" : step.symbol)
+              Image(systemName: step.symbol)
                 .font(.system(size: 14)).frame(width: 18)
-                .foregroundStyle(row.failed ? Color.red : Color.secondary)
+                .foregroundStyle(.secondary)
             }
-            Text(step.label).font(.system(size: 14, weight: .medium)).foregroundStyle(.secondary)
+            Text(step.label).font(.system(size: 14, weight: .medium)).foregroundStyle(.primary)
             if !step.detail.isEmpty {
               Text(step.detail).font(.system(size: 13, design: .monospaced))
-                .lineLimit(1).truncationMode(.middle).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+                .foregroundStyle(row.failed ? Color.red : Color.secondary)
                 .padding(.horizontal, 6).padding(.vertical, 3)
                 .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 5))
             }
-            Image(systemName: "chevron.right")
-              .font(.system(size: 10, weight: .medium)).foregroundStyle(.tertiary)
-              .rotationEffect(.degrees(expanded ? 90 : 0))
-              .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: expanded)
           }.frame(minHeight: 30, alignment: .leading).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -321,6 +317,15 @@ struct ToolActivityGroup: View {
     _page = State(initialValue: max(0, (group.rows.count - 1) / 12))
   }
   private var heading: String { group.title }
+  /// Up to five distinct tool symbols in order of first use.
+  private var previewSymbols: [String] {
+    var seen: [String] = []
+    for row in group.rows where !seen.contains(row.step.symbol) {
+      seen.append(row.step.symbol)
+      if seen.count == 5 { break }
+    }
+    return seen
+  }
   private func toggle() { choice = !expanded }
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -331,16 +336,13 @@ struct ToolActivityGroup: View {
           toggle()
         }
       } label: {
-        HStack(spacing: 7) {
-          Image(systemName: "chevron.right")
-            .font(.system(size: 11, weight: .medium))
-            .rotationEffect(.degrees(expanded ? 90 : 0))
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: expanded)
+        // Desktop's header: a quiet summary and a few tool icons, no arrow and no red. Failures
+        // show on the steps and in the summary's count.
+        HStack(spacing: 6) {
           Text(heading).font(.system(size: 14)).monospacedDigit().lineLimit(1)
             .truncationMode(.middle)
-          if group.failed {
-            Image(systemName: "exclamationmark.circle").font(.system(size: 13)).foregroundStyle(
-              .red)
+          ForEach(previewSymbols, id: \.self) { symbol in
+            Image(systemName: symbol).font(.system(size: 11)).opacity(0.7)
           }
         }.foregroundStyle(.secondary).frame(minHeight: 34).contentShape(Rectangle())
       }.buttonStyle(.plain).padding(.horizontal, 20)

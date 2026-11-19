@@ -43,9 +43,11 @@ pub fn run(global: Global, command: Command, l10n: &Localizer) -> anyhow::Result
                 .run()
                 .await
         }),
-        Command::Pair { label, app } => {
-            block_on(remote::run(remote::Action::Pair { label, app }, port, l10n))
-        }
+        Command::Pair { label, app, json } => block_on(remote::run(
+            remote::Action::Pair { label, app, json },
+            port,
+            l10n,
+        )),
         Command::Link { name } => block_on(remote::run(remote::Action::Link { name }, port, l10n)),
         Command::Unlink => block_on(remote::run(remote::Action::Unlink, port, l10n)),
         Command::Status => {

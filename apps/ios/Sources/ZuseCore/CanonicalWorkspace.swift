@@ -30,6 +30,34 @@ public struct CanonicalWorkspace: Sendable {
         worktreeId: nil)
     }
   }
+  /// Every top-level chat from one snapshot, split into active and archived chats.
+  public func chatsWithArchived() async throws -> (active: [SessionRow], archived: [SessionRow]) {
+    Self.partition(try await rpc.snapshot("WatchChats").array)
+  }
+  /// Splits a WatchChats snapshot into active and archived top-level chats, keeping their order.
+  public static func partition(_ chats: [JSONValue]) -> (
+    active: [SessionRow], archived: [SessionRow]
+  ) {
+    var active: [SessionRow] = []
+    var archived: [SessionRow] = []
+    for chat in chats {
+      guard chat["parentChatId"].string == nil, let id = chat["id"].string else { continue }
+      let config = chat["config"]
+      let row = SessionRow(
+        id: id, projectId: chat["spaceId"].string ?? projectless,
+        title: chat["title"].string ?? "New chat", providerId: config["harness"].string ?? "",
+        model: config["model"].string ?? "", worktreeId: nil)
+      if chat["archived"].bool { archived.append(row) } else { active.append(row) }
+    }
+    return (active, archived)
+  }
+  public func setArchived(chatID: String, archived: Bool) async throws {
+    _ = try await rpc.call(
+      "Mutate",
+      [
+        "op": .string("setChatArchived"), "chatId": .string(chatID), "archived": .bool(archived),
+      ])
+  }
   public func session(id: String) async throws -> SessionRow {
     let chats = try await rpc.snapshot("WatchChats").array
     guard let chat = chats.first(where: { $0["id"].string == id }) else {

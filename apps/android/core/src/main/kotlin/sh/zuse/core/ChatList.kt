@@ -44,7 +44,22 @@ data class ChatRow(
     val status: ChatStatus = ChatStatus.Idle,
     val branch: String? = null,
     val activityAt: Long? = null,
+    val archived: Boolean = false,
 )
+
+/** Which chats the home list shows. */
+enum class ArchiveFilter(val label: String) {
+    Active("Active"),
+    Archived("Archived"),
+    All("All chats");
+
+    fun shows(row: ChatRow) =
+        when (this) {
+            Active -> !row.archived
+            Archived -> row.archived
+            All -> true
+        }
+}
 
 data class ChatGroup(
     val key: String,
@@ -58,11 +73,20 @@ object ChatList {
     const val NO_PROJECT = "No project"
 
     /** Groups chats by project, newest activity first, filtered by place and a search query. */
-    fun groups(rows: List<ChatRow>, query: String = "", place: String? = null): List<ChatGroup> {
+    /** Must match the view model's place key for Zuse Cloud. */
+    const val CLOUD_PLACE = "cloud"
+
+    fun groups(
+        rows: List<ChatRow>,
+        query: String = "",
+        place: String? = null,
+        archive: ArchiveFilter = ArchiveFilter.Active,
+    ): List<ChatGroup> {
         val needle = query.trim()
         val visible =
             rows
                 .filter { place == null || it.placeKey == place }
+                .filter(archive::shows)
                 .filter {
                     needle.isEmpty() ||
                         it.title.contains(needle, true) ||
@@ -71,18 +95,29 @@ object ChatList {
                         (it.projectName ?: NO_PROJECT).contains(needle, true)
                 }
                 .distinctBy { it.key }
-        val severalPlaces = visible.map { it.placeKey }.distinct().size > 1
+        // Cloud chats are ordinary chats: they join their repository's group (marked by an icon on
+        // the row) and never make the list look like it spans several computers.
+        val computers = visible.filter { it.placeKey != CLOUD_PLACE }
+        val severalPlaces = computers.map { it.placeKey }.distinct().size > 1
+        val groupOf = HashMap<String, String>()
+        computers.forEach { row ->
+            val name = (row.projectName ?: NO_PROJECT).lowercase()
+            groupOf.putIfAbsent(name, "${row.placeKey}|${row.projectKey}")
+        }
+        fun key(row: ChatRow) =
+            if (row.placeKey != CLOUD_PLACE) "${row.placeKey}|${row.projectKey}"
+            else groupOf[(row.projectName ?: NO_PROJECT).lowercase()] ?: "$CLOUD_PLACE|${(row.projectName ?: NO_PROJECT).lowercase()}"
         val newestFirst =
             compareByDescending<ChatRow> { it.activityAt ?: Long.MIN_VALUE }
                 .thenBy { it.title.lowercase() }
         return visible
-            .groupBy { "${it.placeKey}|${it.projectKey}" }
+            .groupBy(::key)
             .map { (key, chats) ->
-                val first = chats.first()
+                val first = chats.firstOrNull { it.placeKey != CLOUD_PLACE } ?: chats.first()
                 ChatGroup(
                     key,
                     first.projectName?.takeIf { it.isNotBlank() } ?: NO_PROJECT,
-                    if (severalPlaces) first.placeLabel else null,
+                    if (severalPlaces && first.placeKey != CLOUD_PLACE) first.placeLabel else null,
                     chats.sortedWith(newestFirst),
                 )
             }

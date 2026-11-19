@@ -15,6 +15,8 @@ data class PairedRouteStatus(
     val label: String?,
     val rttMs: Long?,
     val resumable: Boolean,
+    /** `RouteKind` in camelCase, such as `lan` or `tailnet`. */
+    val kind: String? = null,
 )
 
 /** Lets the app tell live paired connections that the network may have changed. */
@@ -75,6 +77,7 @@ class PairedSocket(
                         status.text("label"),
                         status.long("rttMs"),
                         status.flag("resumable"),
+                        status.text("kind"),
                     )
                 )
             }

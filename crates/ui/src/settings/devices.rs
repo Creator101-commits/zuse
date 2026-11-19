@@ -314,12 +314,13 @@ impl Render for DevicesPage {
                 state.workspace_scope,
             )
         };
-        let pairing = self.pairing.update(cx, |card, cx| card.parts(cx));
-        let account_method = self.managed.update(cx, |card, cx| card.method(cx));
-        let computers = self
+        // Reaching this computer through the account is the relay under another name; the relay
+        // row ("Coming soon") stands for both until it ships.
+        let pairing = self.pairing.update(cx, |card, cx| card.parts(None, cx));
+        let paired = pairing.device_rows.len();
+        let computer_rows = self
             .managed
-            .update(cx, |card, cx| card.computers(pairing.add_computer, cx));
-        let account_devices = self.managed.update(cx, |card, cx| card.account_devices(cx));
+            .update(cx, |card, cx| card.computer_rows(paired, cx));
         let account_dialog = self.managed.update(cx, |card, cx| card.dialog(cx));
         let copied = self.copied.clone();
         let dialog = self.render_rename_dialog(window.viewport_size(), cx);
@@ -428,6 +429,7 @@ impl Render for DevicesPage {
             }
             block
         });
+        let has_others = !others.is_empty();
         let others_block = if others.is_empty() {
             widgets::section_card(&theme).mt_0().child(
                 widgets::card_row(&theme, true).child(
@@ -461,12 +463,16 @@ impl Render for DevicesPage {
                 )
             })
             // A local-only workspace never has other devices to list.
-            .when(workspace_scope != Some(WorkspaceScope::Local), |el| {
-                el.child(
-                    widgets::group(&theme, tr(cx, msg::native::other_devices), "")
-                        .child(others_block),
-                )
-            });
+            // Account devices appear once there are some; an empty card only adds noise.
+            .when(
+                workspace_scope != Some(WorkspaceScope::Local) && has_others,
+                |el| {
+                    el.child(
+                        widgets::group(&theme, tr(cx, msg::native::other_devices), "")
+                            .child(others_block),
+                    )
+                },
+            );
 
         let scrollbar = popover::rail(self, "devices-page-scrollbar", &theme, cx);
         div()
@@ -491,18 +497,28 @@ impl Render for DevicesPage {
                                     &tr(cx, msg::settings::settings_page_remote_access),
                                     &tr(cx, msg::native::use_this_computer_from_your_phone_a_browser_or_another_computer),
                                 ))
-                                .child(
-                                    div().mt(px(20.)).flex().flex_col().gap(px(10.)).p(px(12.))
-                                        .child(zuse_viewport::remote_access_style::frame("Remote access to this computer", "Choose how other Zuse apps and browsers can reach this computer.", None)
-                                            .child(zuse_viewport::settings_style::card().children(account_method).child(pairing.method)))
-                                        .child(pairing.connect)
-                                        .child(computers)
-                                        .child(pairing.devices)
-                                        .children(account_devices)
-                                        .children(pairing.advanced)
-                                        .child(card)
-                                        .children(self.render_workspace_storage(cx)),
-                                ),
+                                .child({
+                                    use zuse_viewport::{remote_access_style as r, settings_style as st};
+                                    let empty = pairing.device_rows.is_empty() && computer_rows.is_empty();
+                                    let advanced_open = pairing.advanced.is_some();
+                                    div().mt(px(20.)).flex().flex_col().gap(px(20.))
+                                        .child(super::pairing::section(&theme, "This computer", None, pairing.hero))
+                                        .child(super::pairing::section(
+                                            &theme,
+                                            "Devices",
+                                            Some(pairing.add_computer),
+                                            st::card()
+                                                .when(empty, |v| v.child(r::empty("No devices yet. Use Connect device to pair your phone.")))
+                                                .children(pairing.device_rows)
+                                                .children(computer_rows),
+                                        ))
+                                        .child(div().flex().flex_col().gap(px(12.))
+                                            .child(pairing.advanced_toggle)
+                                            .when(advanced_open, |v| v
+                                                .children(pairing.advanced)
+                                                .child(card)
+                                                .children(self.render_workspace_storage(cx))))
+                                }),
                         ),
                 )
                 .fade_overflow_y(&self.scroll.scroll),

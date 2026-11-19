@@ -8,6 +8,12 @@ public struct RemoteConnection: Codable, Identifiable, Equatable, Sendable {
   public var certificatePin: String?
   public var environmentID: String?
   public var label: String?
+  /// Set when the computer was added over SSH. Older saved entries decode without it.
+  public var ssh: SSHAccess?
+  /// When this device last had a working connection, for "last connected 5 min ago".
+  public var lastConnectedAt: Date?
+  /// The route the last connection used, for status and reachability tips.
+  public var lastRoute: RouteKind?
   public var id: String {
     // The endpoint distinguishes separate transports to the same environment.
     // Tokens never participate in display names, identities, or archive paths.
@@ -23,15 +29,31 @@ public struct RemoteConnection: Codable, Identifiable, Equatable, Sendable {
     return URLComponents(string: address)?.host ?? "Computer"
   }
   public var transportName: String {
+    if ssh?.tunnel == true { return "SSH tunnel" }
+    if let lastRoute { return lastRoute.label }
     let host = URLComponents(string: address)?.host?.lowercased() ?? ""
-    if host.hasSuffix(".ts.net") { return "Tailscale" }
+    if RouteKind.isTailnet(host) { return "Tailscale" }
     if PairingLink.isPrivateHost(host) { return "Local network" }
     return "Remote"
   }
+  /// The route a connection most likely uses, from what it used last or its address.
+  public var expectedRoute: RouteKind? {
+    if let lastRoute { return lastRoute }
+    guard let host = URLComponents(string: address)?.host else { return nil }
+    return RouteKind.classify(host: host)
+  }
+  /// How this device was introduced to the computer.
+  public var connectedThrough: String {
+    if let ssh { return "SSH " + ssh.target.display }
+    if pairingLink != nil { return "Pairing link" }
+    return token.isEmpty ? "Local connection" : "Connection token"
+  }
   public init(
     address: String, token: String, certificatePin: String? = nil,
-    environmentID: String? = nil, label: String? = nil, pairingLink: String? = nil
+    environmentID: String? = nil, label: String? = nil, pairingLink: String? = nil,
+    ssh: SSHAccess? = nil
   ) {
+    self.ssh = ssh
     self.address = address
     self.token = token
     self.pairingLink = pairingLink
@@ -57,7 +79,11 @@ public enum ConnectionProfiles {
   public static func saving(_ connection: RemoteConnection, in profiles: [RemoteConnection])
     -> [RemoteConnection]
   {
-    var result = profiles.filter { $0.id != connection.id }
+    // Pairing the same SSH computer again replaces its older invitation.
+    var result = profiles.filter {
+      $0.id != connection.id
+        && (connection.ssh == nil || $0.ssh?.target != connection.ssh?.target)
+    }
     result.insert(connection, at: 0)
     return result
   }

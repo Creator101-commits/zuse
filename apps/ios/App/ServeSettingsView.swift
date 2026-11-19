@@ -1,148 +1,160 @@
 import SwiftUI
 import ZuseCore
 
+/// macOS: share this Mac with `zuse serve` and pair it directly.
+/// iOS: the commands to run on a desktop or server.
 struct ServeSettingsView: View {
   let workspace: WorkspaceModel
-  @State private var tailscale = false
-  @State private var lan = false
+  @State private var lan = true
+  @State private var tailscaleServe = false
   @State private var busy = false
-  @State private var status: JSONValue = .null
+  @State private var status: String?
+  @State private var notice: String?
   @State private var failure: String?
-  @State private var output = ""
-  @State private var configuration: ServeConfiguration?
   @AppStorage("native.serveExecutable") private var executable = "zuse"
+
   var body: some View {
     Form {
-      Section("Zuse Serve") {
-        Text("Keep agents running on your computer and connect from any of your devices.")
+      #if os(macOS)
+        Section {
+          Text(
+            "Keep Zuse running on this Mac so your phone and other devices can connect to it."
+          )
           .font(.callout).foregroundStyle(.secondary)
-        #if os(macOS)
-          TextField("Executable", text: $executable).verbatimInput().frame(height: 28)
-          if status != .null {
-            LabeledContent("Computer", value: status["computer"].string ?? "Mac")
-            LabeledContent("Service", value: status["service"].string ?? "Unknown")
-            LabeledContent("Runtime", value: status["runtimeVersion"].string ?? "Unknown")
-            LabeledContent("Reachable", value: status["reachable"].bool ? "Yes" : "No")
-            LabeledContent("Account tunnel", value: status["tunnel"].string ?? "Unknown")
+          Toggle("Allow devices on this network", isOn: $lan)
+          Toggle("Also share over Tailscale HTTPS", isOn: $tailscaleServe).disabled(!lan)
+          LabeledContent("Command") {
+            Text(ShareComputer.serveCommand(lan: lan, tailscaleServe: tailscaleServe))
+              .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
           }
-          Toggle("Share over Tailscale", isOn: $tailscale)
-          Toggle("Allow local network connections", isOn: $lan)
           HStack {
-            Button("Refresh") {
-              Task { await run(["serve", "status", "--json"], readsStatus: true) }
+            Button("Stop sharing", role: .destructive) {
+              Task { await run(ShareComputer.removeServiceArguments, done: "Sharing stopped.") }
             }
             Spacer()
-            Button("Stop") { Task { await run(["serve", "stop"]) } }
-            Button("Start") {
+            Button("Keep running") {
               Task {
                 await run(
-                  configuration?.startArguments(tailscale: tailscale, lan: lan) ?? [
-                    "serve", "start",
-                  ])
+                  ShareComputer.serviceArguments(lan: lan, tailscaleServe: tailscaleServe),
+                  done: "Zuse will keep running, including after a restart.")
               }
-            }.buttonStyle(.borderedProminent).disabled(configuration == nil)
-          }.controlSize(.small).frame(height: 28)
-          if status["service"].string == "running" {
-            Button("Connect this Mac", systemImage: "laptopcomputer") {
-              Task { await connectLocal() }
-            }.frame(height: 28)
+            }.buttonStyle(.borderedProminent)
           }
-          if busy { ProgressView("Working…") }
-          if !output.isEmpty { Text(output).font(.caption).textSelection(.enabled) }
-        #else
-          Text("Run this on the computer you want to connect:").font(.callout)
-          Text("zuse serve start").font(.system(.callout, design: .monospaced)).textSelection(
-            .enabled)
-          Button("Copy command", systemImage: "doc.on.doc") {
-            NativePlatform.copy("zuse serve start")
+          Button("Pair this Mac", systemImage: "laptopcomputer") {
+            Task { await pairThisMac() }
           }
+        } header: {
+          Text("Share this Mac")
+        } footer: {
+          Text("Runs `zuse daemon install --serve` with the options above.")
+        }
+        Section("Status") {
+          if let status {
+            Text(status).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+          } else {
+            Text("No status yet.").font(.caption).foregroundStyle(.secondary)
+          }
+          Button("Refresh", systemImage: "arrow.clockwise") { Task { await refresh() } }
+        }
+        Section("Zuse command line") {
+          TextField("Executable", text: $executable).verbatimInput()
+        }
+      #else
+        Section {
+          Text("On a desktop, open Zuse and choose Settings → Devices → Connect a device.")
+            .font(.callout).foregroundStyle(.secondary)
+        } header: {
+          Text("Desktop")
+        }
+        Section {
+          Text("Run this on the computer to accept connections from your network:")
+            .font(.callout).foregroundStyle(.secondary)
+          CopyableCommand(command: ShareComputer.serveCommand(lan: true))
+          Text("Then print a link to scan or paste here:").font(.callout)
+            .foregroundStyle(.secondary)
+          CopyableCommand(command: ShareComputer.pairCommand)
+          Text("To keep it running after a restart:").font(.callout).foregroundStyle(.secondary)
+          CopyableCommand(
+            command: "zuse " + ShareComputer.serviceArguments(lan: true).joined(separator: " "))
+        } header: {
+          Text("Headless or server")
+        } footer: {
+          Text("Or skip the commands: Add computer → Connect with SSH sets it up for you.")
+        }
+        Section {
           Text(
-            "Sign in to the same Zuse account, then choose the computer in Settings. You can also pair with its local or Tailscale link."
+            "Use Tailscale (or your own Headscale server) on both devices, or link the computer to your Zuse account:"
           )
-          .font(.caption).foregroundStyle(.secondary)
-        #endif
-        if let failure { Text(failure).foregroundStyle(.red) }
-      }
-      Section("Tailscale & local connections") {
-        Text(
-          "For Tailscale, start Serve with --tailscale and pair using its HTTPS link. Both devices must be signed in to your tailnet. For local networking, use --lan and pair on the same network."
-        )
-        .font(.callout).foregroundStyle(.secondary)
-        Button("Copy Tailscale command", systemImage: "doc.on.doc") {
-          NativePlatform.copy("zuse serve start --tailscale")
+          .font(.callout).foregroundStyle(.secondary)
+          CopyableCommand(command: ShareComputer.linkCommand)
+        } header: {
+          Text("Reach it from anywhere")
         }
-        Button("Copy local network command", systemImage: "doc.on.doc") {
-          NativePlatform.copy("zuse serve start --lan")
-        }
-        Link("Connection setup", destination: URL(string: "https://zuse.sh/docs/remote/tailscale")!)
-      }
+      #endif
+      if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
+      if let failure { Text(failure).font(.footnote).foregroundStyle(.red) }
     }
-    .settingsList().navigationTitle("Zuse Serve").compactNavigationTitle()
-    .disabled(busy)
+    .settingsList()
     #if os(macOS)
-      .task { await run(["serve", "status", "--json"], readsStatus: true) }
+      .navigationTitle("Share this Mac")
+      .disabled(busy)
+      .overlay { if busy { ProgressView() } }
+      .task { await refresh() }
+    #else
+      .navigationTitle("Set up a computer").compactNavigationTitle()
     #endif
   }
+
   #if os(macOS)
-    private func run(_ args: [String], readsStatus: Bool = false) async {
-      guard !busy else { return }
-      busy = true
-      failure = nil
-      defer { busy = false }
+    private func refresh() async {
       do {
-        let directory = status["dataDir"].string
-        status = .null
-        configuration = nil
-        output = ""
-        let scoped = args + (directory.map { ["--data-dir", $0] } ?? [])
-        let text = try await ServeCommand.run(executable: executable, arguments: scoped)
-        if readsStatus {
-          status = try JSONDecoder().decode(JSONValue.self, from: Data(text.utf8))
-        } else {
-          // Lifecycle output can contain one-time pairing codes. Do not retain it in UI or logs.
-          output = args.contains("stop") ? "Service stopped." : "Service started."
-          let current = try await ServeCommand.run(
-            executable: executable,
-            arguments: ["serve", "status", "--json"] + (directory.map { ["--data-dir", $0] } ?? []))
-          status = try JSONDecoder().decode(JSONValue.self, from: Data(current.utf8))
-        }
-        guard status["schemaVersion"].int == 1, let directory = status["dataDir"].string,
-          !directory.isEmpty
-        else {
-          throw ClientError("Refresh service status before starting Serve.")
-        }
-        let saved = try await Task.detached {
-          try ServeRuntimeFile.configuration.read(directory: directory)
-        }.value
-        let configuration = ServeConfiguration(saved ?? .object([:]))
-        self.configuration = configuration
-        tailscale = configuration.tailscale
-        lan = configuration.lan
-      } catch { failure = error.localizedDescription }
+        status = try await ServeCommand.run(
+          executable: executable, arguments: ShareComputer.statusArguments, timeout: .seconds(20)
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+      } catch {
+        status = nil
+        failure = error.localizedDescription
+      }
     }
-    private func connectLocal() async {
+
+    private func run(_ arguments: [String], done: String) async {
       guard !busy else { return }
       busy = true
       failure = nil
+      notice = nil
       defer { busy = false }
       do {
-        // Read the directory reported by the running service, never initialize a competing store.
-        guard let directory = status["dataDir"].string, status["reachable"].bool else {
-          throw ClientError("Refresh the service status and start Serve before connecting.")
+        // Output can include invitations; show only a fixed confirmation.
+        _ = try await ServeCommand.run(executable: executable, arguments: arguments)
+        notice = done
+      } catch {
+        failure = error.localizedDescription
+      }
+      await refresh()
+    }
+
+    private func pairThisMac() async {
+      guard !busy else { return }
+      busy = true
+      failure = nil
+      notice = nil
+      defer { busy = false }
+      do {
+        let output = try await ServeCommand.run(
+          executable: executable,
+          arguments: ShareComputer.pairArguments(label: NativePlatform.deviceName),
+          timeout: .seconds(30))
+        guard let link = try PairJSON(output: output).invitation else {
+          throw ClientError("Zuse did not return a link. Start sharing first, then try again.")
         }
-        guard
-          let value = try await Task.detached(operation: {
-            try ServeRuntimeFile.pairing.read(directory: directory)
-          }).value
-        else { throw ClientError("Open Serve's pairing link and paste it in Connect a computer.") }
-        guard let expiration = value["expiresAt"].string,
-          let expiresAt = ServerTimestamp.parse(expiration),
-          expiresAt > Date(), let link = value["browserUrl"].string
-        else {
-          throw ClientError("Open Serve's pairing link and paste it in Connect a computer.")
-        }
-        try await workspace.pair(link)
-      } catch { failure = error.localizedDescription }
+        // A loopback link is fine here: it points at this Mac.
+        try await workspace.pair(link, allowLoopback: true)
+        notice = "This Mac is connected."
+      } catch {
+        failure =
+          (error as? ClientError)?.message
+          ?? "Couldn’t pair this Mac. Start sharing first, then try again."
+      }
     }
   #endif
 }

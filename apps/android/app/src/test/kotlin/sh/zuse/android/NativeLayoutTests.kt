@@ -140,10 +140,10 @@ class NativeLayoutTests {
     }
 
     @Test
-    fun nativeBackNavigatesSettingsBeforeDismissing() {
-        compose.onNodeWithContentDescription("Settings").performClick()
-        compose.onNodeWithText("Computers").performClick()
-        compose.onNodeWithText("Add manually").assertExists()
+    fun nativeBackNavigatesComputersBeforeDismissing() {
+        compose.onNodeWithText("Add computer").performClick()
+        compose.onNodeWithText("Connect with SSH").performClick()
+        compose.onNodeWithContentDescription("SSH address").assertExists()
         compose.runOnUiThread {
             val window =
                 android.view.inspector.WindowInspector.getGlobalWindowViews().last { it.isShown }
@@ -151,8 +151,8 @@ class NativeLayoutTests {
                 .onBackPressedDispatcher
                 .onBackPressed()
         }
-        compose.onNodeWithText("Add manually").assertDoesNotExist()
-        compose.onNodeWithText("Zuse Cloud").assertExists()
+        compose.onNodeWithContentDescription("SSH address").assertDoesNotExist()
+        compose.onNodeWithText("Scan QR code").assertExists()
     }
 
     @Test
@@ -318,7 +318,7 @@ class NativeLayoutTests {
     }
 
     @Test
-    fun settingsExposeCloudPairingAndTailscale() {
+    fun computersShowStatusAndEveryWayToConnect() {
         compose.runOnUiThread {
             ViewModelProvider(compose.activity)[WorkspaceViewModel::class.java]
                 .devices
@@ -340,22 +340,62 @@ class NativeLayoutTests {
                 )
         }
         compose.onNodeWithContentDescription("Settings").performClick()
-        compose.onNodeWithText("Zuse Cloud").assertExists()
+        compose.onNodeWithText("Manage computers").assertExists()
+        compose.onNodeWithText("Archived chats").assertDoesNotExist()
         screenshot("phone-settings")
-        compose.onNodeWithText("Computers").performClick()
-        compose.onNodeWithText("Pair a computer").assertExists()
-        screenshot("phone-computers")
-        compose.onNodeWithText("Pair a computer").performClick()
-        compose.onNodeWithText("Pairing link").assertExists()
-        screenshot("phone-pairing")
-        compose.onNodeWithContentDescription("Back to settings").performClick()
-        compose.onNodeWithText("Add manually").performClick()
-        compose.onNodeWithText("WebSocket address").assertExists()
-        screenshot("phone-connections")
-        compose.onNodeWithContentDescription("Back to settings").performClick()
-        compose.onNodeWithContentDescription("Back to settings").performClick()
-        compose.onNodeWithText("Sign in").performClick()
+        compose.onNodeWithText("Not signed in").performClick()
         screenshot("phone-account")
+        compose.onNodeWithContentDescription("Back to settings").performClick()
+        compose.onNodeWithText("Manage computers").performClick()
+        compose.onNodeWithText("MacBook Pro · demo").assertExists()
+        compose.onNodeWithText("Home server · demo").assertExists()
+        screenshot("phone-computers")
+        compose.onNodeWithText("MacBook Pro · demo").performClick()
+        compose.onNodeWithText("Check connection").assertExists()
+        compose.onNodeWithText("Forget this computer").assertExists()
+        screenshot("phone-computer-detail")
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.onNodeWithContentDescription("Add computer").performClick()
+        compose.onNodeWithContentDescription("Pairing link").assertExists()
+        compose.onNodeWithText("Reach it from anywhere").performClick()
+        compose.onNodeWithText("zuse link").assertExists()
+        screenshot("phone-pairing")
+        compose.onNodeWithText("Connect with SSH").performClick()
+        compose.onNodeWithContentDescription("SSH address").performTextInput("ana@devbox")
+        compose.onNodeWithText("This phone’s SSH key").assertExists()
+        screenshot("phone-ssh")
+    }
+
+    @Test
+    fun archivedChatsLiveInTheListBehindAFilter() {
+        val workspace = ViewModelProvider(compose.activity)[WorkspaceViewModel::class.java]
+        compose.runOnUiThread {
+            val device = SavedDevice("mac", "MacBook Pro", "ws://192.168.1.4:27660/rpc", "")
+            workspace.devices.add(device)
+            val project = Project("p", "zuse")
+            workspace.computerInboxes["device:mac"] =
+                WorkspaceViewModel.ComputerInbox(
+                    Source.Device(device),
+                    device.label,
+                    listOf(project),
+                    listOf(Session("live", "p", "Tighten the composer", "claude", "sonnet")),
+                    listOf(Session("old", "p", "Migrate the settings store", "claude", "sonnet")),
+                    reachable = true,
+                )
+        }
+        compose.onNodeWithText("Tighten the composer").assertIsDisplayed()
+        compose.onNodeWithText("Migrate the settings store").assertDoesNotExist()
+        screenshot("phone-filter-active")
+        compose.onNodeWithContentDescription("Showing active chats").performClick()
+        compose.onNodeWithText("All chats").assertIsDisplayed()
+        screenshot("phone-filter-menu")
+        compose.onNodeWithText("Archived").performClick()
+        compose.onNodeWithText("Migrate the settings store").assertIsDisplayed()
+        compose.onNodeWithText("Tighten the composer").assertDoesNotExist()
+        screenshot("phone-filter-archived")
+        compose.onNodeWithText("Migrate the settings store").performClick()
+        compose.onNodeWithText("Restore and open").assertIsDisplayed()
+        screenshot("phone-archived-restore")
     }
 
     @Test
@@ -446,9 +486,9 @@ class NativeLayoutTests {
         compose.onNodeWithText("Connect your computer").assertIsDisplayed()
         compose.onNodeWithText("Sign in to Zuse Cloud").assertIsDisplayed()
         compose.onNodeWithContentDescription("Search chats").assertDoesNotExist()
-        compose.onNodeWithText("Pair a computer").performClick()
-        compose.onNodeWithText("Pairing link").assertExists()
         screenshot("phone-empty")
+        compose.onNodeWithText("Add computer").performClick()
+        compose.onNodeWithContentDescription("Pairing link").assertExists()
     }
 
     @Test
@@ -493,6 +533,8 @@ class NativeLayoutTests {
             workspace.projects.add(Project(CanonicalWorkspace.PROJECTLESS, ChatList.NO_PROJECT))
         }
         compose.onNodeWithContentDescription("Chat actions").performClick()
+        compose.onNodeWithText("Review changes").assertIsDisplayed()
+        screenshot("phone-chat-menu")
         compose.onNodeWithText("New chat").performClick()
         // The chat screen itself, not a sheet: same header and composer, focused for writing.
         compose.onNodeWithContentDescription("New chat message").assertIsFocused()

@@ -53,7 +53,9 @@ struct CloudSettingsView: View {
               }
               if let provider = row["providerId"].string, row["state"].string != "disconnected" {
                 Menu {
-                  Button("Disconnect agent", role: .destructive) { disconnectProvider = provider }
+                  Button("Disconnect agent", systemImage: "xmark.circle", role: .destructive) {
+                    disconnectProvider = provider
+                  }
                 } label: {
                   Image(systemName: "ellipsis")
                 }

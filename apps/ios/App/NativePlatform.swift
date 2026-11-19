@@ -140,13 +140,16 @@ struct SettingsRow: View {
   var value: String? = nil
   var brand = false
   var destructive = false
+  /// Nil lets explanatory subtitles wrap fully.
+  var subtitleLines: Int? = 2
   var body: some View {
     HStack(spacing: 12) {
       SettingsIcon(symbol: icon, brand: brand)
       VStack(alignment: .leading, spacing: 1) {
         Text(title).foregroundStyle(destructive ? Color.red : Color.primary)
         if let subtitle {
-          Text(subtitle).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+          Text(subtitle).font(.footnote).foregroundStyle(.secondary).lineLimit(subtitleLines)
+            .fixedSize(horizontal: false, vertical: subtitleLines == nil)
         }
       }
       Spacer(minLength: 8)
