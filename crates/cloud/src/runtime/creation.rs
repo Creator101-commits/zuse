@@ -883,6 +883,10 @@ impl RuntimeControl {
         if managed && brokered && self.fast_start_accounts.contains(owner) {
             config["rustFastStartVersion"] = json!(1);
         }
+        if managed && body.provider_id == "boat" {
+            // The first start waits inside the computer (allocation::guest_start).
+            config[crate::runtime::allocation::guest_start::VERSION_KEY] = json!(1);
+        }
         if let Some(authority) = &cache_pilot {
             if authority.pilot.project_id == body.project_id && body.provider_id == "boxd" {
                 config["stagingProjectCachePilotSha256"] = json!(authority.pilot.fingerprint()?);
