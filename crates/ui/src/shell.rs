@@ -11212,13 +11212,26 @@ impl Shell {
             return Some(
                 div()
                     .id("control-update-retry")
-                    .mx(px(8.0))
-                    .p(px(8.0))
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(theme.danger)
+                    .debug_selector(|| "control-update-retry".into())
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from("Control tools update failed · Retry"))
+                    .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(8.0))
+                    .bg(theme.danger.opacity(0.14))
+                    .hover({
+                        let hover = theme.danger.opacity(0.22);
+                        move |el| el.bg(hover)
+                    })
                     .cursor_pointer()
-                    .tip(problem)
-                    .child("Control tools update failed · Retry")
+                    .tab_index(0)
+                    .tip_above(SharedString::from(format!(
+                        "Control tools update failed · Retry. {problem}"
+                    )))
+                    .child(icon(icons::RESTART).size(px(14.0)).text_color(theme.danger))
                     .on_click(cx.listener(|_, _, _, cx| {
                         if let Some(update) = crate::app_update::AppUpdate::global(cx) {
                             update.update(cx, |update, cx| update.retry_control(cx));
