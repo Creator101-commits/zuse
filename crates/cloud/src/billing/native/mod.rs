@@ -29,6 +29,31 @@ pub const MIGRATION: &str = concat!(
 );
 pub const CREDIT_WALLET: &str = "zuse-usd";
 const CLOUD_PLAN: &str = "cloud-workspace-standard-v1";
+/// Catalog plans that grant cloud computers from the shared wallet.
+pub(super) fn cloud_plan(id: &Value) -> bool {
+    id.as_str()
+        .is_some_and(|id| zuse_protocol::cloud_billing::plans::CLOUD_OFFERS.contains(&id))
+}
+/// Price and monthly wallet grant, in whole dollars, each cloud plan must have.
+/// The original plan keeps its $40 grant on the embedded engine.
+fn compute_terms(id: &str) -> Option<(&'static str, &'static str)> {
+    use zuse_protocol::cloud_billing::plans;
+    match id {
+        CLOUD_PLAN => Some(("40", "40")),
+        plans::CLOUD_OFFER => Some(("20", "20")),
+        plans::CLOUD_MAX_OFFER => Some(("50", "50")),
+        _ => None,
+    }
+}
+/// The monthly wallet grant of a validated cloud plan, in micros.
+pub(super) fn plan_credit_micros(plan: &Value) -> i64 {
+    plan["items"]
+        .as_array()
+        .and_then(|items| items.iter().find(|i| i["feature"] == CREDIT_WALLET))
+        .and_then(|i| i["included"].as_str())
+        .and_then(|v| v.parse::<i64>().ok())
+        .map_or(0, |dollars| dollars * 1_000_000)
+}
 
 pub struct NativeBilling {
     engine: Billing,
@@ -201,9 +226,11 @@ impl NativeBilling {
         catalog: Value,
         expected_revision: i64,
     ) -> Result<Value, ApiError> {
-        if let Some(plan) = catalog["plans"]
+        for plan in catalog["plans"]
             .as_array()
-            .and_then(|plans| plans.iter().find(|p| p["id"] == CLOUD_PLAN))
+            .into_iter()
+            .flatten()
+            .filter(|p| cloud_plan(&p["id"]))
         {
             self.validate_compute_plan(plan)?;
         }
@@ -218,14 +245,21 @@ impl NativeBilling {
     pub(super) fn validate_compute_plan(&self, plan: &Value) -> Result<(), ApiError> {
         // Host resource accounting still owns these terms. Do not sell a catalog
         // variant that the existing compute settlement policy cannot represent.
-        if plan["amount"] != "40"
+        let Some((amount, included)) = plan["id"].as_str().and_then(compute_terms) else {
+            return Err(ApiError::conflict("billing_compute_catalog_mismatch"));
+        };
+        if plan["amount"] != amount
             || plan["currency"] != "usd"
             || plan["interval"] != "month"
             || plan["kind"] != "subscription"
         {
             return Err(ApiError::conflict("billing_compute_catalog_mismatch"));
         }
-        if let Some(price) = &self.stripe_cloud_price {
+        if let Some(price) = self
+            .stripe_cloud_price
+            .as_ref()
+            .filter(|_| plan["id"] == CLOUD_PLAN)
+        {
             if plan["stripePriceId"] != *price {
                 return Err(ApiError::conflict("billing_compute_catalog_mismatch"));
             }
@@ -243,9 +277,9 @@ impl NativeBilling {
         let wallet = plan["items"]
             .as_array()
             .and_then(|items| items.iter().find(|i| i["feature"] == CREDIT_WALLET));
-        if !wallet
-            .is_some_and(|i| i["included"] == "40" && i["reset"] == "month" && i["pool"].is_null())
-        {
+        if !wallet.is_some_and(|i| {
+            i["included"] == included && i["reset"] == "month" && i["pool"].is_null()
+        }) {
             return Err(ApiError::conflict("billing_shared_allowance_required"));
         }
         Ok(())

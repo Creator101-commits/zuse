@@ -191,6 +191,7 @@ impl BillingControl {
                             event: &event,
                             execution: &event,
                             machine: None,
+                            awake_ms: None,
                         },
                         &period,
                         start,

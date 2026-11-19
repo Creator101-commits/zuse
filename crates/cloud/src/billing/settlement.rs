@@ -245,6 +245,9 @@ impl BillingControl {
                     event: &segment_event,
                     execution: event,
                     machine: Some(machine),
+                    awake_ms: Some(
+                        i64::try_from(cost.running_seconds).unwrap_or(i64::MAX / 1000) * 1000,
+                    ),
                 },
                 period,
                 a,
@@ -394,6 +397,10 @@ pub(super) struct UsageIdentity<'a> {
     pub event: &'a str,
     pub execution: &'a str,
     pub machine: Option<&'a str>,
+    /// Time the machine was running in this segment. Machine-minute periods
+    /// count it times the machine rate; storage and other usage pass `None`
+    /// and use no allowance there.
+    pub awake_ms: Option<i64>,
 }
 pub(super) async fn settle_segment(
     tx: &mut Transaction<'_, Postgres>,
@@ -416,8 +423,24 @@ pub(super) async fn settle_segment(
         return Err(invalid());
     }
     let entry = identity.entry;
-    let (before,charged):(i64,i64)=sqlx::query_as("SELECT COALESCE(SUM(amount_micros) FILTER(WHERE kind='provider-cost'),0)::bigint,COALESCE(SUM(amount_micros) FILTER(WHERE kind='overage-charge'),0)::bigint FROM api_cloud_billing_ledger WHERE period_id=$1").bind(period).fetch_one(&mut **tx).await?;
-    let deltas = deltas(p, before, charged, cost)?;
+    // Machine-minute periods count the allowance, pay as you go and the cap
+    // in credit at the list rate (awake time × machine rate). Periods on
+    // original terms count provider cost with markup.
+    let plan = super::plans::period_plan(p);
+    let rate = zuse_protocol::cloud_billing::plans::machine_rate(
+        u32::try_from(memory / 1_048_576).unwrap_or(u32::MAX),
+    );
+    let (before, charged, metered) = if plan.is_some() {
+        let (used, charged) = super::plans::usage_totals(&mut **tx, period).await?;
+        let metered = identity.awake_ms.map_or(0, |ms| {
+            zuse_protocol::cloud_billing::plans::machine_time_micros(ms, rate)
+        });
+        (used, charged, metered)
+    } else {
+        let (before,charged):(i64,i64)=sqlx::query_as("SELECT COALESCE(SUM(amount_micros) FILTER(WHERE kind='provider-cost'),0)::bigint,COALESCE(SUM(amount_micros) FILTER(WHERE kind='overage-charge'),0)::bigint FROM api_cloud_billing_ledger WHERE period_id=$1").bind(period).fetch_one(&mut **tx).await?;
+        (before, charged, cost)
+    };
+    let deltas = deltas(p, before, charged, metered)?;
     let inserted=sqlx::query("INSERT INTO api_cloud_billing_usage(entry_id,period_id,account_id,resource_kind,resource_id,provider,provider_event_id,provider_execution_id,started_at,ended_at,vcpu_count,memory_mib,provider_cost_micros,status,created_at) VALUES($1,$2,$3,$4,$5,$14,$6,$7,$8,$9,$10,$11,$12,'confirmed',$13) ON CONFLICT DO NOTHING")
         .bind(&entry).bind(period).bind(owner).bind(kind).bind(id).bind(identity.event).bind(identity.execution).bind(start).bind(end).bind(i64::from(vcpu)).bind(i64::try_from(memory/1_048_576).map_err(|_|invalid())?).bind(cost).bind(now).bind(identity.provider).execute(&mut **tx).await?.rows_affected();
     if inserted == 0 {
@@ -429,8 +452,13 @@ pub(super) async fn settle_segment(
             .bind(receipt).bind(machine).bind(json!({"machineId":machine,"startedAtMs":start,"endedAtMs":end,"costMicro":cost,"currency":"usd","complete":true})).bind(now).bind(now+90*DAY).execute(&mut **tx).await?;
     }
     sqlx::query("DELETE FROM api_cloud_billing_reservations WHERE period_id=$1 AND resource_kind=$2 AND resource_id=$3").bind(period).bind(kind).bind(id).execute(&mut **tx).await?;
-    for (k, amount) in std::iter::once(("provider-cost", cost)).chain(deltas) {
-        if amount == 0 && k != "provider-cost" {
+    // Provider cost is always recorded, for margin reporting.
+    let machine_time = plan.map(|_| (super::plans::MACHINE_TIME, metered));
+    for (k, amount) in std::iter::once(("provider-cost", cost))
+        .chain(machine_time)
+        .chain(deltas)
+    {
+        if amount == 0 && k != "provider-cost" && k != super::plans::MACHINE_TIME {
             continue;
         }
         let ledger = if k == "provider-cost" {
@@ -440,6 +468,8 @@ pub(super) async fn settle_segment(
         };
         let metadata = if k == "provider-cost" {
             json!({"provider":identity.provider,"resourceKind":kind,"resourceId":id})
+        } else if k == super::plans::MACHINE_TIME {
+            json!({"resourceKind":kind,"resourceId":id,"awakeMs":identity.awake_ms.unwrap_or(0),"machineRate":if identity.awake_ms.is_some() {rate} else {0}})
         } else {
             json!({})
         };
@@ -452,12 +482,17 @@ pub(super) async fn settle_segment(
     if p["shared_credit_account"] == true {
         // Charge every confirmed retail-cost delta to the shared wallet, including
         // costs inside the monthly allowance. The subscription funds that allowance.
+        // Machine-minute periods charge machine time at the list rate.
         let markup = number(p, "markup_basis_points")?;
         let retail = |n: i128| n * (10000 + i128::from(markup)) / 10000;
-        let amount = i64::try_from(
-            retail(i128::from(before) + i128::from(cost)) - retail(i128::from(before)),
-        )
-        .map_err(|_| invalid())?;
+        let amount = if plan.is_some() {
+            metered
+        } else {
+            i64::try_from(
+                retail(i128::from(before) + i128::from(cost)) - retail(i128::from(before)),
+            )
+            .map_err(|_| invalid())?
+        };
         sqlx::query("INSERT INTO zuse_brokeboy_compute_charges(account_id,entry_id,period_id,amount_micros,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING").bind(owner).bind(entry).bind(period).bind(amount).bind(now).execute(&mut **tx).await?;
     }
     if delta != 0 && p["shared_credit_account"] != true {
@@ -489,6 +524,9 @@ pub(super) async fn settle_segment(
     }
     let payload = json!({"eventId":telemetry_id,"accountId":owner,"eventName":"zuse_cloud_provider_cost_micros","units":cost,"occurredAtMs":end,"billingProvider":provider,"metadata":metadata});
     sqlx::query("INSERT INTO api_cloud_usage_outbox(event_id,payload,created_at,next_attempt_at) VALUES($1,$2,$3,$3) ON CONFLICT DO NOTHING").bind(telemetry_id).bind(payload).bind(now).execute(&mut **tx).await?;
+    if plan.is_some() {
+        super::plans::refresh_hold(tx, period).await?;
+    }
     Ok(())
 }
 #[cfg(test)]

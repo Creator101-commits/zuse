@@ -372,6 +372,19 @@ impl RuntimeControl {
             } else {
                 crate::billing::require_capacity(&mut tx, owner, now).await?;
             }
+            // Only Cloud Max sells machines larger than the default.
+            let plan = if let Some(facts) = &facts {
+                facts
+                    .optional("billingPeriod")
+                    .as_ref()
+                    .and_then(crate::billing::plans::period_plan)
+            } else {
+                crate::billing::plans::current_plan(&mut *tx, owner, now).await?
+            };
+            crate::billing::plans::size_allowed(
+                plan,
+                body.size_id.as_deref().unwrap_or("default"),
+            )?;
         }
         let project = if let Some(facts) = &facts {
             facts.optional("project")

@@ -494,6 +494,7 @@ async fn native_commerce_webhooks_wallet_concurrency_and_recovery() {
                 event: "shared-event",
                 execution: "shared-execution",
                 machine: None,
+                awake_ms: None,
             },
             &period,
             now - 1000,

@@ -1,6 +1,7 @@
 -- Earliest shared-credit sleep deadline among computers of held accounts:
 -- the same eligibility as credit_candidates.sql without `next_action_at<=now`.
--- A hold turning on sends NOTIFY idle_sleep (optional migration 0047).
+-- A hold turning on sends NOTIFY idle_sleep (migrations 0047 and 0054).
+-- `/*HOLD*/` is replaced with the hold columns this schema has (see idle.rs).
 SELECT min(w.next_action_at)::bigint
 FROM api_cloud_workspaces w
 JOIN zuse_rust_control_owners o
@@ -28,4 +29,4 @@ WHERE ($1::text[] IS NULL OR w.account_id=ANY($1))
   AND COALESCE(w.request_config#>>'{runtimeActivation,phase}','') NOT IN ('preparing','launching','confirming','rolling-back')
   AND (w.request_config#>>'{rustRecreation,operationId}' IS NULL OR w.request_config#>>'{rustRecreation,phase}' IN ('ready','cancelled'))
   AND COALESCE(w.request_config#>>'{rustLifecycleOperation,phase}','ready')='ready'
-  AND EXISTS(SELECT 1 FROM api_cloud_billing_periods p WHERE p.account_id=w.account_id AND p.shared_credit_account AND p.shared_credit_hold AND p.period_start<=$2 AND p.period_end>$2)
+  AND EXISTS(SELECT 1 FROM api_cloud_billing_periods p WHERE p.account_id=w.account_id AND /*HOLD*/ AND p.period_start<=$2 AND p.period_end>$2)

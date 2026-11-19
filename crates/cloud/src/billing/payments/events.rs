@@ -5,6 +5,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use zuse_protocol::cloud_billing::plans::{self, PlanId};
 
 #[derive(Clone, Debug)]
 pub enum PaymentEvent {
@@ -39,6 +40,10 @@ pub struct Subscription {
     pub period_start: i64,
     pub paid_through: i64,
     pub customer: Option<String>,
+    /// The subscription is in its first-week trial.
+    pub trialing: bool,
+    /// Fingerprint of the card paying the subscription, when known.
+    pub card_fingerprint: Option<String>,
 }
 pub(super) struct EventConfig {
     secret: Zeroizing<String>,
@@ -97,7 +102,11 @@ impl EventConfig {
     pub(super) fn fixture(secret: &str, price: &str) -> Self {
         Self {
             secret: Zeroizing::new(secret.into()),
-            offers: HashMap::from([(price.into(), "cloud-workspace-standard-v1".into())]),
+            offers: HashMap::from([
+                (price.into(), "cloud-workspace-standard-v1".into()),
+                (format!("{price}_cloud"), plans::CLOUD_OFFER.into()),
+                (format!("{price}_max"), plans::CLOUD_MAX_OFFER.into()),
+            ]),
         }
     }
 
@@ -110,6 +119,8 @@ impl EventConfig {
         for (suffix, offer) in [
             ("CLOUD_WORKSPACE_STANDARD_V1", "cloud-workspace-standard-v1"),
             ("PERSISTENT_STANDARD_V1", "persistent-standard-v1"),
+            ("CLOUD_STARTER_V1", plans::CLOUD_OFFER),
+            ("CLOUD_PRO_V1", plans::CLOUD_MAX_OFFER),
         ] {
             let configured = std::env::var(format!("{prefix}_{kind}_{suffix}"))
                 .ok()
@@ -304,6 +315,11 @@ impl EventConfig {
             period_start: start,
             paid_through: end,
             customer: Some(text(customer, "id")?.into()),
+            trialing: v["status"] == "trialing",
+            card_fingerprint: v["default_payment_method"]["card"]["fingerprint"]
+                .as_str()
+                .filter(|f| !f.is_empty() && f.len() <= 256)
+                .map(str::to_owned),
         };
         sub.validate()?;
         Ok(sub)
@@ -340,6 +356,8 @@ impl EventConfig {
             period_start: date("current_period_start")?,
             paid_through: date("current_period_end")?,
             customer: None,
+            trialing: v["status"] == "trialing",
+            card_fingerprint: None,
         };
         sub.validate()?;
         Ok(sub)
@@ -452,7 +470,7 @@ impl BillingControl {
             }
         }
         // Persistent subscription processing also needs the machine lifecycle writer (separate milestone).
-        if sub.offer != "cloud-workspace-standard-v1" {
+        if !plans::CLOUD_OFFERS.contains(&sub.offer.as_str()) {
             return Err(ApiError::unavailable(
                 "billing_machine_processing_unavailable",
             ));
@@ -508,12 +526,90 @@ impl BillingControl {
             _ => "active",
         };
         let period = format!("cloud:{}:{}", sub.owner, sub.period_start);
-        let written:Option<String>=sqlx::query_scalar("INSERT INTO api_cloud_billing_periods(period_id,account_id,provider_subscription_id,billing_provider,status,currency,period_start,period_end,base_price_micros,included_provider_cost_micros,markup_basis_points,price_catalog_version,overage_cap_micros,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'USD',$6,$7,40000000,35000000,500,'provider-compute-v1',COALESCE((SELECT overage_cap_micros FROM api_cloud_billing_periods WHERE account_id=$2 AND period_start<$6 ORDER BY period_start DESC LIMIT 1),25000000),$8,$8) ON CONFLICT(account_id,period_start) DO UPDATE SET status=EXCLUDED.status,period_end=EXCLUDED.period_end,provider_subscription_id=EXCLUDED.provider_subscription_id,updated_at=EXCLUDED.updated_at WHERE api_cloud_billing_periods.billing_provider=EXCLUDED.billing_provider AND (api_cloud_billing_periods.provider_subscription_id IS NULL OR api_cloud_billing_periods.provider_subscription_id=EXCLUDED.provider_subscription_id) RETURNING period_id").bind(period).bind(&sub.owner).bind(&sub.id).bind(id).bind(period_status).bind(sub.period_start).bind(sub.paid_through).bind(now).fetch_optional(&mut **tx).await?;
-        if written.is_none() {
-            return Err(ApiError::conflict("billing_period_owner_conflict"));
+        let mut plan = PlanId::for_offer(&sub.offer, sub.trialing)
+            .ok_or_else(|| ApiError::unavailable("billing_machine_processing_unavailable"))?;
+        if plan == PlanId::Cloud && sub.status == "ended" {
+            // Cancelled during the trial: no paid period, the trial just ends.
+            let trialing: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_cloud_trials WHERE subscription_id=$1 AND state IN ('active','rejected'))").bind(&sub.id).fetch_one(&mut **tx).await?;
+            if trialing {
+                plan = PlanId::CloudTrial;
+                sqlx::query("UPDATE api_cloud_trials SET state='ended',updated_at=$2 WHERE subscription_id=$1 AND state='active'").bind(&sub.id).bind(now).execute(&mut **tx).await?;
+            }
         }
+        if plan == PlanId::CloudTrial && sub.trialing {
+            record_trial(tx, sub, now).await?;
+        } else if let Some(ended) = trial_outcome(sub) {
+            sqlx::query("UPDATE api_cloud_trials SET state=$2,updated_at=$3 WHERE subscription_id=$1 AND state='active'").bind(&sub.id).bind(ended).bind(now).execute(&mut **tx).await?;
+        }
+        // A trial ended early starts the paid period now: the earlier period
+        // of the same subscription ends where the new one starts, so periods
+        // never overlap.
+        sqlx::query("UPDATE api_cloud_billing_periods SET period_end=$3,updated_at=$4 WHERE account_id=$1 AND provider_subscription_id=$2 AND period_start<$3 AND period_end>$3").bind(&sub.owner).bind(&sub.id).bind(sub.period_start).bind(now).execute(&mut **tx).await?;
+        let (base, included, markup) = crate::billing::plans::terms(plan);
+        // New periods get machine-minute terms. A plan change within a period
+        // (Cloud to Cloud Max) updates machine-minute terms in place; periods
+        // on original terms keep them until they renew.
+        let written:Option<String>=sqlx::query_scalar("INSERT INTO api_cloud_billing_periods(period_id,account_id,provider_subscription_id,billing_provider,status,currency,period_start,period_end,base_price_micros,included_provider_cost_micros,markup_basis_points,price_catalog_version,overage_cap_micros,created_at,updated_at,plan_id) VALUES($1,$2,$3,$4,$5,'USD',$6,$7,$9,$10,$11,$12,CASE WHEN $14=0 THEN 0 ELSE COALESCE((SELECT overage_cap_micros FROM api_cloud_billing_periods WHERE account_id=$2 AND period_start<$6 AND plan_id IS DISTINCT FROM 'cloud-trial' ORDER BY period_start DESC LIMIT 1),$14) END,$8,$8,$13) ON CONFLICT(account_id,period_start) DO UPDATE SET status=EXCLUDED.status,period_end=EXCLUDED.period_end,provider_subscription_id=EXCLUDED.provider_subscription_id,updated_at=EXCLUDED.updated_at,plan_id=CASE WHEN api_cloud_billing_periods.price_catalog_version=EXCLUDED.price_catalog_version THEN EXCLUDED.plan_id ELSE api_cloud_billing_periods.plan_id END,base_price_micros=CASE WHEN api_cloud_billing_periods.price_catalog_version=EXCLUDED.price_catalog_version THEN EXCLUDED.base_price_micros ELSE api_cloud_billing_periods.base_price_micros END,included_provider_cost_micros=CASE WHEN api_cloud_billing_periods.price_catalog_version=EXCLUDED.price_catalog_version THEN EXCLUDED.included_provider_cost_micros ELSE api_cloud_billing_periods.included_provider_cost_micros END WHERE api_cloud_billing_periods.billing_provider=EXCLUDED.billing_provider AND (api_cloud_billing_periods.provider_subscription_id IS NULL OR api_cloud_billing_periods.provider_subscription_id=EXCLUDED.provider_subscription_id) RETURNING period_id")
+            .bind(period).bind(&sub.owner).bind(&sub.id).bind(id).bind(period_status).bind(sub.period_start).bind(sub.paid_through).bind(now)
+            .bind(base).bind(included).bind(markup).bind(crate::billing::plans::CATALOG_VERSION).bind(plan.as_str())
+            .bind(if plan.plan().pay_as_you_go { crate::billing::plans::DEFAULT_CAP_MICROS } else { 0 })
+            .fetch_optional(&mut **tx).await?;
+        let Some(period) = written else {
+            return Err(ApiError::conflict("billing_period_owner_conflict"));
+        };
+        crate::billing::plans::refresh_hold(tx, &period).await?;
         Ok(json!({"ok":true,"duplicate":false,"provisioningQueued":false}))
     }
+}
+/// Record a trialing subscription once. It is rejected (no allowance) when
+/// its account or card already had a trial, or the account already paid for
+/// cloud computers. A fingerprint learned later is checked the same way.
+async fn record_trial(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sub: &Subscription,
+    now: i64,
+) -> Result<(), ApiError> {
+    let existing: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT state,card_fingerprint FROM api_cloud_trials WHERE subscription_id=$1 FOR UPDATE",
+    )
+    .bind(&sub.id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match existing {
+        Some((state, known)) => {
+            if state == "active" && known.is_none() && sub.card_fingerprint.is_some() {
+                let rejected = card_used(tx, sub).await?;
+                sqlx::query("UPDATE api_cloud_trials SET card_fingerprint=CASE WHEN $2 THEN card_fingerprint ELSE $3 END,state=CASE WHEN $2 THEN 'rejected' ELSE state END,updated_at=$4 WHERE subscription_id=$1").bind(&sub.id).bind(rejected).bind(&sub.card_fingerprint).bind(now).execute(&mut **tx).await?;
+            }
+        }
+        None => {
+            let account_used: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_cloud_trials WHERE account_id=$1 AND state<>'rejected') OR EXISTS(SELECT 1 FROM api_entitlements WHERE account_id=$1 AND kind='cloud-workspace' AND provider_subscription_id IS DISTINCT FROM $2)").bind(&sub.owner).bind(&sub.id).fetch_one(&mut **tx).await?;
+            let rejected = account_used || card_used(tx, sub).await?;
+            sqlx::query("INSERT INTO api_cloud_trials(subscription_id,account_id,card_fingerprint,state,started_at,updated_at) VALUES($1,$2,$3,$4,$5,$5)").bind(&sub.id).bind(&sub.owner).bind(if rejected { None } else { sub.card_fingerprint.clone() }).bind(if rejected { "rejected" } else { "active" }).bind(now).execute(&mut **tx).await?;
+        }
+    }
+    Ok(())
+}
+/// The subscription's card already started another trial.
+async fn card_used(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    sub: &Subscription,
+) -> Result<bool, ApiError> {
+    Ok(match &sub.card_fingerprint {
+        Some(f) => sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_cloud_trials WHERE card_fingerprint=$1 AND subscription_id<>$2 AND state<>'rejected')").bind(f).bind(&sub.id).fetch_one(&mut **tx).await?,
+        None => false,
+    })
+}
+/// What a non-trialing state means for a trial of the same subscription.
+fn trial_outcome(sub: &Subscription) -> Option<&'static str> {
+    if sub.offer != plans::CLOUD_OFFER {
+        return None;
+    }
+    Some(if sub.status == "ended" {
+        "ended"
+    } else {
+        "converted"
+    })
 }
 impl Store {
     pub async fn billing_webhook(

@@ -105,6 +105,16 @@ pub struct ResumeResult {
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
+pub struct Resize {
+    #[prost(string, tag = "1")]
+    pub vm_id: String,
+    #[prost(uint32, tag = "2")]
+    pub vcpu: u32,
+    #[prost(uint64, tag = "3")]
+    pub memory_bytes: u64,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
 pub struct HibernateTimeout {
     #[prost(string, tag = "1")]
     pub vm_id: String,

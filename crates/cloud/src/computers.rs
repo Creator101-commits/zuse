@@ -9,6 +9,122 @@ pub(crate) mod machine;
 #[cfg(test)]
 mod tests;
 
+/// The provider new cloud computers run on: `ZUSE_CLOUD_DEFAULT_PROVIDER`
+/// (default Boxd) when it can create computers, else the first that can.
+/// People only ever see "Cloud"; the id is for clients to send back.
+pub(crate) fn default_provider(providers: &[ProviderCapabilities]) -> Option<ProviderId> {
+    let configured = std::env::var("ZUSE_CLOUD_DEFAULT_PROVIDER")
+        .ok()
+        .and_then(|id| serde_json::from_value::<ProviderId>(serde_json::json!(id.trim())).ok())
+        .unwrap_or(ProviderId::Boxd);
+    providers
+        .iter()
+        .find(|p| p.id == configured && p.can_create())
+        .or_else(|| providers.iter().find(|p| p.can_create()))
+        .map(|p| p.id)
+}
+/// Sizes of the default provider that the plans sell, with the plan's limit.
+pub(crate) fn computer_sizes(
+    providers: &[ProviderCapabilities],
+    plan: Option<zuse_protocol::cloud_billing::plans::PlanId>,
+) -> Vec<zuse_protocol::cloud_billing::plans::SizeOption> {
+    use zuse_protocol::cloud_billing::plans::{self, PlanId};
+    let Some(provider) =
+        default_provider(providers).and_then(|id| providers.iter().find(|p| p.id == id))
+    else {
+        return vec![];
+    };
+    let limit = plan.unwrap_or(PlanId::Cloud).plan();
+    [plans::DEFAULT_SIZE, plans::LARGE_SIZE]
+        .into_iter()
+        .filter(|id| provider.sizes.iter().any(|s| s.id == *id))
+        .filter_map(|id| {
+            let (vcpus, memory) = plans::size_resources(id)?;
+            let available = limit.allows(vcpus, memory);
+            Some(plans::SizeOption {
+                id: id.into(),
+                label: plans::size_label(id)?.into(),
+                vcpus,
+                memory_mib: memory,
+                machine_rate: plans::machine_rate(memory),
+                available,
+                requires_plan: (!available).then_some(PlanId::CloudMax),
+            })
+        })
+        .collect()
+}
+/// Capability text shown to people never names the provider.
+fn neutral(mut provider: ProviderCapabilities) -> ProviderCapabilities {
+    use zuse_protocol::cloud_billing::plans;
+    if provider
+        .unavailable_reason
+        .as_deref()
+        .is_some_and(plans::names_infrastructure)
+    {
+        provider.unavailable_reason =
+            Some("Cloud computers are not available for this account yet.".into());
+    }
+    for size in &mut provider.sizes {
+        if let Some(label) = plans::size_label(&size.id) {
+            size.label = label.into();
+        } else if plans::names_infrastructure(&size.label) {
+            size.label = "Cloud computer".into();
+        }
+    }
+    provider
+}
+#[cfg(test)]
+mod plan_size_tests {
+    use super::*;
+    use zuse_protocol::cloud_billing::plans::{PlanId, names_infrastructure};
+    fn provider(id: ProviderId, sizes: &[&str], reason: Option<&str>) -> ProviderCapabilities {
+        ProviderCapabilities {
+            id,
+            configured: true,
+            managed_base_ready: reason.is_none(),
+            command_admission_version: Some(2),
+            preserves_disk: true,
+            preserves_memory: true,
+            supports_snapshots: true,
+            supports_docker: false,
+            sizes: sizes
+                .iter()
+                .map(|id| ComputerSize {
+                    id: (*id).into(),
+                    label: "Boxd standard".into(),
+                    vcpus: 1,
+                    memory_mib: 4096,
+                    disk_gib: 20,
+                })
+                .collect(),
+            unavailable_reason: reason.map(str::to_owned),
+        }
+    }
+    #[test]
+    fn one_cloud_option_with_plan_sizes_and_no_provider_names() {
+        let providers = vec![
+            provider(ProviderId::Boat, &["small", "default", "large"], None),
+            provider(ProviderId::Boxd, &["default", "large"], None),
+            provider(ProviderId::E2b, &[], Some("E2B is not enabled for this account.")),
+        ];
+        assert_eq!(default_provider(&providers), Some(ProviderId::Boxd));
+        let sizes = computer_sizes(&providers, Some(PlanId::Cloud));
+        assert_eq!(sizes.len(), 2);
+        assert_eq!(sizes[0].label, "Standard · 4 vCPU · 16 GB");
+        assert_eq!((sizes[0].machine_rate, sizes[0].available), (4, true));
+        assert_eq!((sizes[1].machine_rate, sizes[1].available), (8, false));
+        assert_eq!(sizes[1].requires_plan, Some(PlanId::CloudMax));
+        assert!(computer_sizes(&providers, Some(PlanId::CloudMax))[1].available);
+        // Without the default provider, the server picks another that can create.
+        assert_eq!(default_provider(&providers[..1]), Some(ProviderId::Boat));
+        for p in providers.into_iter().map(neutral) {
+            let text = serde_json::to_string(&p).unwrap();
+            let shown = text.replace(&format!("\"id\":\"{}\"", p.id.as_str()), "");
+            assert!(!names_infrastructure(&shown), "{shown}");
+        }
+    }
+}
+
 pub struct ComputerControl {
     pub(crate) pool: PgPool,
     pub(crate) cache_schema_ready: std::sync::OnceLock<bool>,
@@ -259,7 +375,12 @@ impl Store {
                 .is_some_and(|c| c.accounts.contains(owner)),
             can_allocate: blockers.is_empty(),
             allocation_blockers: blockers,
-            providers,
+            default_provider: default_provider(&providers),
+            computer_sizes: computer_sizes(
+                &providers,
+                crate::billing::plans::current_plan(&self.pool, owner, now).await?,
+            ),
+            providers: providers.into_iter().map(neutral).collect(),
         })
     }
     pub async fn project_environment(

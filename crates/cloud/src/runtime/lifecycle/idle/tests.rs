@@ -293,7 +293,7 @@ async fn idle_deadline_respects_recent_work_busy_states_scope_and_durable_pause(
         2
     );
     // Credit exhaustion must pause active work, regardless of recent activity.
-    sqlx::raw_sql("CREATE TABLE zuse_brokeboy_compute_charges(probe text); CREATE TABLE api_cloud_billing_periods(account_id text,period_start bigint,period_end bigint,shared_credit_account boolean,shared_credit_hold boolean); INSERT INTO api_cloud_billing_periods VALUES('user-bob',0,999999999,true,false);").execute(&pool).await.unwrap();
+    sqlx::raw_sql("CREATE TABLE zuse_brokeboy_compute_charges(probe text); CREATE TABLE api_cloud_billing_periods(account_id text,period_start bigint,period_end bigint,shared_credit_account boolean,shared_credit_hold boolean,usage_hold boolean NOT NULL DEFAULT false); INSERT INTO api_cloud_billing_periods VALUES('user-bob',0,999999999,true,false);").execute(&pool).await.unwrap();
     sqlx::query("UPDATE api_cloud_workspaces SET state='ready',desired_state='ready',request_config=$1,last_activity_at=$2,next_action_at=$2 WHERE workspace_id='ws-bob'").bind(config()).bind(resumed+grace).execute(&pool).await.unwrap();
     sqlx::query("UPDATE zuse_rust_task_command_execution SET state='running'")
         .execute(&pool)

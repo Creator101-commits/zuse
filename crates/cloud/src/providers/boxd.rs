@@ -698,6 +698,29 @@ impl Boxd {
             _ => Err(ProviderError::Conflict),
         }
     }
+    /// Change a machine's vCPU and memory. A running machine reboots.
+    pub async fn resize(
+        &self,
+        id: &str,
+        vcpu: u32,
+        memory_bytes: u64,
+    ) -> Result<(), ProviderError> {
+        if !(1..=64).contains(&vcpu) || !(1 << 30..=256 << 30).contains(&memory_bytes) {
+            return Err(ProviderError::Rejected);
+        }
+        self.unary_on::<wire::Empty>(
+            id,
+            "ResizeVm",
+            wire::Resize {
+                vm_id: machine_id(id)?.vm_id,
+                vcpu,
+                memory_bytes,
+            },
+            true,
+        )
+        .await
+        .map(|_| ())
+    }
     pub async fn set_auto_hibernate(&self, id: &str, seconds: u32) -> Result<(), ProviderError> {
         if seconds > 2592000 {
             return Err(ProviderError::Rejected);

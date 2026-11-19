@@ -98,6 +98,8 @@ impl BillingControl {
             sqlx::query("INSERT INTO api_cloud_billing_cap_commands(period_id,idempotency_key,overage_cap_micros,created_at) VALUES($1,$2,$3,$4)").bind(id).bind(&request.idempotency_key).bind(request.overage_cap_micros).bind(now).execute(&mut *tx).await?;
             sqlx::query("UPDATE api_cloud_billing_periods SET overage_cap_micros=$2,updated_at=$3 WHERE period_id=$1").bind(id).bind(request.overage_cap_micros).bind(now).execute(&mut *tx).await?;
         }
+        // Raising the cap clears a cap hold; lowering it below usage sets one.
+        super::plans::refresh_hold(&mut tx, id).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -163,6 +165,10 @@ impl Store {
         );
         let mut result = summary(&p, totals)?;
         result.storage_cost_micros = safe(i128::from(row.try_get::<i64, _>("storage")?))?;
+        if super::plans::period_plan(&p).is_some() && p["shared_credit_account"] != true {
+            let (used, charged) = super::plans::usage_totals(&mut *tx, id).await?;
+            plan_summary(&mut result, &p, used, charged)?;
+        }
         result.usage_provisional = row.try_get("provisional")?;
         result.last_provider_reconciled_at = row.try_get("provider_at")?;
         result.last_billing_reconciled_at = row.try_get("billing_at")?;
@@ -174,9 +180,11 @@ impl Store {
             let control = self.billing.as_ref().ok_or_else(invalid)?;
             let available = control.shared_available_micros(owner).await?;
             result.shared_credits = true;
-            result.included_provider_cost_micros = 40_000_000;
+            let included = number(&p, "included_provider_cost_micros")?;
+            result.included_provider_cost_micros = included;
             result.included_remaining_micros = available;
-            result.included_used_micros = (40_000_000 - available).max(0);
+            result.included_used_micros = (included - available).max(0);
+            result.plan = super::plans::plan_usage(&p, result.included_used_micros, 0);
             result.overage_charge_micros = 0;
             result.current_invoice_estimate_micros = result.base_price_micros;
             result.status = match p["status"].as_str() {
@@ -206,7 +214,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         let p = period(&mut tx, owner, now, false).await?;
-        let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(items) FROM (SELECT entry_id,resource_kind,resource_id,provider,provider_execution_id,started_at,ended_at,vcpu_count,memory_mib,provider_cost_micros,status FROM api_cloud_billing_usage WHERE period_id=$1 UNION ALL SELECT 'reservation:'||resource_kind||':'||resource_id,resource_kind,resource_id,provider,NULL,started_at,updated_at,vcpu_count,memory_mib,provider_cost_micros,'provisional' FROM api_cloud_billing_reservations WHERE period_id=$1 AND expires_at>$3) items WHERE ($2::text IS NULL OR entry_id<$2) ORDER BY entry_id DESC LIMIT $4").bind(&p["period_id"].as_str().ok_or_else(invalid)?).bind(cursor).bind(now).bind((limit+1) as i64).fetch_all(&mut *tx).await?;
+        let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(items) FROM (SELECT u.entry_id,u.resource_kind,u.resource_id,u.provider,u.provider_execution_id,u.started_at,u.ended_at,u.vcpu_count,u.memory_mib,u.provider_cost_micros,u.status,(SELECT to_jsonb(l) FROM api_cloud_billing_ledger l WHERE l.entry_id='ledger:machine-time:'||u.entry_id) AS machine_time FROM api_cloud_billing_usage u WHERE u.period_id=$1 UNION ALL SELECT 'reservation:'||resource_kind||':'||resource_id,resource_kind,resource_id,provider,NULL,started_at,updated_at,vcpu_count,memory_mib,provider_cost_micros,'provisional',NULL FROM api_cloud_billing_reservations WHERE period_id=$1 AND expires_at>$3) items WHERE ($2::text IS NULL OR entry_id<$2) ORDER BY entry_id DESC LIMIT $4").bind(&p["period_id"].as_str().ok_or_else(invalid)?).bind(cursor).bind(now).bind((limit+1) as i64).fetch_all(&mut *tx).await?;
         let has_next = rows.len() > limit;
         let mut items = Vec::new();
         for row in rows.into_iter().take(limit) {
@@ -228,7 +236,11 @@ impl Store {
                 },
                 usage_kind: (kind == "snapshot").then(|| "snapshot-storage".into()),
                 resource_id: text("resource_id")?,
-                provider: text("provider")?,
+                // Where a computer runs is not shown to people.
+                provider: {
+                    text("provider")?;
+                    "cloud".into()
+                },
                 provider_execution_id: row["provider_execution_id"].as_str().map(str::to_owned),
                 started_at: number(&row, "started_at")?,
                 ended_at: number(&row, "ended_at")?,
@@ -238,12 +250,51 @@ impl Store {
                     row["provider_cost_micros"].as_i64().ok_or_else(invalid)?,
                 ))?,
                 status,
+                awake_ms: row["machine_time"]["metadata"]["awakeMs"].as_i64(),
+                machine_rate: row["machine_time"]["metadata"]["machineRate"]
+                    .as_u64()
+                    .and_then(|r| u32::try_from(r).ok())
+                    .filter(|r| *r > 0),
+                machine_minutes: row["machine_time"]["amount_micros"]
+                    .as_i64()
+                    .map(zuse_protocol::cloud_billing::plans::credit_machine_minutes),
             });
         }
         let next_cursor = has_next.then(|| items.last().unwrap().entry_id.clone());
         tx.commit().await?;
         Ok(BillingUsagePage { items, next_cursor })
     }
+}
+/// Machine-minute periods report credit at the list rate in the dollar
+/// fields too, so older clients stay consistent, and never provider cost.
+fn plan_summary(
+    result: &mut BillingSummary,
+    p: &Value,
+    used: i64,
+    charged: i64,
+) -> Result<(), ApiError> {
+    let included = number(p, "included_provider_cost_micros")?;
+    let used = used.max(0);
+    result.provider_cost_micros = used;
+    result.included_provider_cost_micros = included;
+    result.included_used_micros = used.min(included);
+    result.included_remaining_micros = (included - used).max(0);
+    result.overage_provider_cost_micros = (used - included).max(0);
+    result.overage_charge_micros = charged.max(0);
+    result.markup_basis_points = 0;
+    result.current_invoice_estimate_micros =
+        safe(i128::from(result.base_price_micros) + i128::from(charged.max(0)))?;
+    result.storage_cost_micros = 0;
+    if p["usage_hold"] == true && result.status == BillingStatus::Active {
+        result.status = BillingStatus::BillingHold;
+    } else if p["usage_hold"] != true
+        && result.status == BillingStatus::BillingHold
+        && matches!(p["status"].as_str(), Some("active" | "pending"))
+    {
+        result.status = BillingStatus::Active;
+    }
+    result.plan = super::plans::plan_usage(p, used, charged);
+    Ok(())
 }
 fn summary(
     p: &Value,
@@ -298,6 +349,7 @@ fn summary(
         last_polar_reconciled_at: None,
         usage_provisional: false,
         shared_credits: false,
+        plan: None,
     })
 }
 
