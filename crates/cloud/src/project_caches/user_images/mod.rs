@@ -92,11 +92,56 @@ struct ImageRecipe<'a> {
 /// Digest of what goes into the image. `None` means the recipe needs no image
 /// (no setup script) and the account starts from the managed base.
 pub fn image_digest(recipe: &MachineRecipe) -> Option<String> {
-    if recipe.setup_script.trim().is_empty() {
-        return None;
-    }
-    script_digest(&recipe.setup_script, recipe.setup_timeout_seconds)
+    image_digest_for(recipe, false)
 }
+
+/// The script an image runs when the account has repositories but no setup
+/// script: nothing to install, so the image only carries the repositories.
+pub const REPOSITORIES_ONLY_SCRIPT: &str =
+    "# No setup script: this image carries your repositories.\ntrue\n";
+
+/// The script built into the account's image: its setup script, else, when
+/// it has repositories to carry, [`REPOSITORIES_ONLY_SCRIPT`]. `None` means
+/// no image is needed and computers start from the managed base.
+pub fn image_script(recipe: &MachineRecipe, has_repositories: bool) -> Option<&str> {
+    if !recipe.setup_script.trim().is_empty() {
+        Some(&recipe.setup_script)
+    } else if has_repositories {
+        Some(REPOSITORIES_ONLY_SCRIPT)
+    } else {
+        None
+    }
+}
+
+/// [`image_digest`] for an account that may have repositories: one with
+/// repositories gets an image even without a setup script.
+pub fn image_digest_for(recipe: &MachineRecipe, has_repositories: bool) -> Option<String> {
+    script_digest(
+        image_script(recipe, has_repositories)?,
+        recipe.setup_timeout_seconds,
+    )
+}
+
+/// Whether account `owner` has an included repository to carry in its image.
+pub(crate) async fn has_repositories_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    owner: &str,
+) -> Result<bool, ApiError> {
+    let present: bool = sqlx::query_scalar("SELECT to_regclass('api_cloud_projects') IS NOT NULL")
+        .fetch_one(&mut **tx)
+        .await?;
+    if !present {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar(HAS_REPOSITORIES)
+        .bind(owner)
+        .fetch_one(&mut **tx)
+        .await?)
+}
+
+/// SQL: does account `$1` have an included repository?
+pub(crate) const HAS_REPOSITORIES: &str =
+    "SELECT EXISTS(SELECT 1 FROM api_cloud_projects WHERE account_id=$1 AND included=true)";
 
 fn script_digest(script: &str, timeout: u32) -> Option<String> {
     serde_json::to_vec(&ImageRecipe {

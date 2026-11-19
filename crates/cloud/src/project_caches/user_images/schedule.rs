@@ -138,11 +138,12 @@ impl UserImageControl {
     pub(crate) async fn schedule_one(&self, now: i64) -> Result<bool, ApiError> {
         self.staleness_pass(now).await.map(|queued| queued > 0)
     }
-    /// One hourly pass over recently active accounts with a setup script.
+    /// One hourly pass over recently active accounts with a setup script or
+    /// repositories.
     /// Returns how many rebuilds it queued.
     pub(crate) async fn staleness_pass(&self, now: i64) -> Result<usize, ApiError> {
         self.mark_scheduled(now);
-        let owners: Vec<String> = sqlx::query_scalar("SELECT v.owner_id FROM (SELECT DISTINCT ON (owner_id) owner_id,recipe FROM cloud_machine_versions ORDER BY owner_id,revision DESC) v WHERE v.recipe->>'setupScript' ~ '\\S' AND EXISTS(SELECT 1 FROM api_cloud_workspaces w WHERE w.account_id=v.owner_id AND w.last_activity_at>$1) ORDER BY v.owner_id LIMIT $2")
+        let owners: Vec<String> = sqlx::query_scalar("SELECT v.owner_id FROM (SELECT DISTINCT ON (owner_id) owner_id,recipe FROM cloud_machine_versions ORDER BY owner_id,revision DESC) v WHERE (v.recipe->>'setupScript' ~ '\\S' OR EXISTS(SELECT 1 FROM api_cloud_projects p WHERE p.account_id=v.owner_id AND p.included=true)) AND EXISTS(SELECT 1 FROM api_cloud_workspaces w WHERE w.account_id=v.owner_id AND w.last_activity_at>$1) ORDER BY v.owner_id LIMIT $2")
             .bind(now - ACTIVE_WINDOW_MS)
             .bind(PASS_LIMIT)
             .fetch_all(self.pool())
@@ -174,7 +175,7 @@ impl UserImageControl {
 
     /// Start deleting one image nobody can use: a newer ready image on a
     /// verified base replaced it, its base is no longer verified, the
-    /// account's recipe no longer has a setup script, or the account no longer
+    /// account has neither a setup script nor repositories, or the account no longer
     /// uses that (non-default) provider. Never while any non-deleted computer
     /// (including an archived one) references it.
     pub(crate) async fn retire_one(&self, now: i64) -> Result<bool, ApiError> {
@@ -182,7 +183,7 @@ impl UserImageControl {
             .replace("$1", "a.owner_id")
             .replace("$2", "a.provider")
             .replace("$3", "$2");
-        let candidates: Vec<String> = sqlx::query_scalar(&format!("SELECT a.image_id FROM cloud_machine_images a WHERE a.state='ready' AND ((a.provider<>$1 AND NOT {unused}) OR EXISTS(SELECT 1 FROM cloud_machine_images n JOIN cloud_managed_bases b ON b.provider=n.provider AND b.release_id=n.base_release_id AND b.state='verified' WHERE n.owner_id=a.owner_id AND n.provider=a.provider AND n.state='ready' AND n.built_at>a.built_at) OR NOT EXISTS(SELECT 1 FROM cloud_managed_bases b WHERE b.provider=a.provider AND b.release_id=a.base_release_id AND b.state='verified' AND b.artifact_id=a.base_artifact_id) OR NOT coalesce((SELECT recipe->>'setupScript' FROM cloud_machine_versions v WHERE v.owner_id=a.owner_id ORDER BY revision DESC LIMIT 1) ~ '\\S',false)) AND NOT EXISTS(SELECT 1 FROM api_cloud_workspaces w WHERE w.state<>'deleted' AND w.request_config->'rustMachineImage'->>'imageId'=a.image_id) AND NOT EXISTS(SELECT 1 FROM cloud_machine_images o WHERE o.owner_id=a.owner_id AND o.state IN('building','cleaning','retiring')) ORDER BY a.built_at LIMIT 8"))
+        let candidates: Vec<String> = sqlx::query_scalar(&format!("SELECT a.image_id FROM cloud_machine_images a WHERE a.state='ready' AND ((a.provider<>$1 AND NOT {unused}) OR EXISTS(SELECT 1 FROM cloud_machine_images n JOIN cloud_managed_bases b ON b.provider=n.provider AND b.release_id=n.base_release_id AND b.state='verified' WHERE n.owner_id=a.owner_id AND n.provider=a.provider AND n.state='ready' AND n.built_at>a.built_at) OR NOT EXISTS(SELECT 1 FROM cloud_managed_bases b WHERE b.provider=a.provider AND b.release_id=a.base_release_id AND b.state='verified' AND b.artifact_id=a.base_artifact_id) OR (NOT coalesce((SELECT recipe->>'setupScript' FROM cloud_machine_versions v WHERE v.owner_id=a.owner_id ORDER BY revision DESC LIMIT 1) ~ '\\S',false) AND NOT EXISTS(SELECT 1 FROM api_cloud_projects p WHERE p.account_id=a.owner_id AND p.included=true))) AND NOT EXISTS(SELECT 1 FROM api_cloud_workspaces w WHERE w.state<>'deleted' AND w.request_config->'rustMachineImage'->>'imageId'=a.image_id) AND NOT EXISTS(SELECT 1 FROM cloud_machine_images o WHERE o.owner_id=a.owner_id AND o.state IN('building','cleaning','retiring')) ORDER BY a.built_at LIMIT 8"))
             .bind(DEFAULT_PROVIDER.as_str())
             .bind(now - ACTIVE_WINDOW_MS)
             .fetch_all(self.pool())

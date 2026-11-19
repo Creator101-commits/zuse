@@ -8,7 +8,7 @@ pub(super) struct MachineView {
     setup: Entity<TextInput>,
     instructions: Entity<TextInput>,
     pub error: Option<String>,
-    notice: Option<String>,
+    pub(super) notice: Option<String>,
     /// Refreshes the status while a build is waiting or running and the
     /// account feed is disconnected.
     pub(super) poll: Option<Task<()>>,
@@ -63,6 +63,9 @@ impl MachineView {
         for input in [&self.setup, &self.instructions] {
             input.update(cx, |input, cx| input.set_value(String::new(), cx));
         }
+    }
+    pub(super) fn version(&self) -> Option<&MachineVersion> {
+        self.version.as_ref()
     }
     pub(super) fn image_state(&self) -> Option<&str> {
         self.version.as_ref().map(|v| v.image_state.as_str())
@@ -180,7 +183,7 @@ impl RepositoryPanel {
     pub(super) fn load_machine(&mut self, cx: &mut Context<Self>) {
         self.call("machine-read", methods::CLOUD_MACHINE, json!({}), cx);
     }
-    fn rebuild_machine(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn rebuild_machine(&mut self, cx: &mut Context<Self>) {
         if self.pending.values().any(|p| p.kind.starts_with("machine")) {
             return;
         }
@@ -203,12 +206,17 @@ impl RepositoryPanel {
                     .version
                     .as_ref()
                     .is_some_and(|v| v.revision < version.revision);
-                self.machine.setup.update(cx, |input, cx| {
-                    input.set_value(version.recipe.setup_script.clone(), cx)
-                });
-                self.machine.instructions.update(cx, |input, cx| {
-                    input.set_value(version.recipe.instructions.clone(), cx)
-                });
+                // A status read (a build hint, the image backstop) never
+                // replaces what someone is typing; a save shows the saved text.
+                let editing = !saved && self.machine_dirty(cx);
+                if !editing {
+                    self.machine.setup.update(cx, |input, cx| {
+                        input.set_value(version.recipe.setup_script.clone(), cx)
+                    });
+                    self.machine.instructions.update(cx, |input, cx| {
+                        input.set_value(version.recipe.instructions.clone(), cx)
+                    });
+                }
                 if saved {
                     self.machine.notice = Some(saved_notice(&version.recipe).into());
                 }
@@ -222,6 +230,7 @@ impl RepositoryPanel {
                 self.machine.error = None;
                 self.machine.poll = None;
                 self.schedule_machine_poll(cx);
+                self.schedule_image_check(cx);
             }
             Err(_) => {
                 self.machine.error =
@@ -448,20 +457,31 @@ impl RepositoryPanel {
             };
             body = body.child(div().px(px(kit::INSET)).pb(px(12.)).child(kit::help(line)));
         }
+        // It builds by itself; a manual rebuild stays in the "…" menu.
         let rebuild = (version.image_state != "none" && self.can_manage()).then(|| {
-            cs::button(
-                "cloud-machine-rebuild",
-                "Rebuild now",
-                false,
+            self.overflow_menu(
+                "cloud-machine-more".into(),
+                "More image actions".into(),
                 busy || version.image_state == "building",
-                false,
+                vec![super::presentation::MenuItem {
+                    id: "cloud-machine-rebuild".into(),
+                    glyph: "refresh",
+                    label: "Rebuild now".into(),
+                    danger: false,
+                    run: std::rc::Rc::new(
+                        |this: &mut RepositoryPanel,
+                         _: &mut Window,
+                         cx: &mut Context<RepositoryPanel>| {
+                            this.rebuild_machine(cx)
+                        },
+                    ),
+                }],
+                cx,
             )
-            .on_click(cx.listener(|this, _, _, cx| this.rebuild_machine(cx)))
-            .into_any_element()
         });
         kit::section(
             "Image",
-            "Your setup script, built once into the image every new computer boots from.",
+            "Your setup script and repositories, built into the image every new computer boots from. It rebuilds by itself when they change.",
             rebuild,
             body,
         )
@@ -487,7 +507,7 @@ impl RepositoryPanel {
         }
         root = root.child(kit::section(
             "Setup script",
-            "Runs once with sudo when your image is built: apt packages, runtimes, global CLIs. Leave it empty to use the standard machine.",
+            "Runs once with sudo when your image builds: apt packages, runtimes, global CLIs. Leave it empty if your repositories need nothing extra.",
             None,
             div()
                 .p(px(kit::INSET))

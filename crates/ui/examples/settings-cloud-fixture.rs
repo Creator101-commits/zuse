@@ -8,6 +8,9 @@
 //! and the standard machine. `FIXTURE_ONBOARDING=<step>` opens first-run
 //! onboarding at `welcome`, `repositories`, `setup`, `agents` or `start`.
 //! `FIXTURE_NO_REPOS=1` keeps GitHub connected but adds no repositories.
+//! `FIXTURE_IMAGE` sets the account image (`queued`, `building`, `ready`,
+//! `failed`, or `none` for no machine version yet; default `ready`).
+//! `FIXTURE_LOCAL_SPACE=1` adds a local checkout of a Cloud repository.
 //! `FIXTURE_ACCOUNT=signed-out` starts signed out. `FIXTURE_ARCHIVED=1`
 //! archives the first chat. `FIXTURE_CLICKS="x,y;x,y"` clicks those window
 //! points (via XTest, under Xvfb) before the capture, and
@@ -364,8 +367,61 @@ fn sessions() -> SessionsPage {
     }
 }
 
+/// The account's machine and image as `FIXTURE_IMAGE` describes it.
+fn machine(image: &str) -> Value {
+    let recipe = json!({"version": 1, "setupScript": "curl -fsSL https://bun.sh/install | bash\nnpm i -g pnpm@9 turbo\napt-get install -y ripgrep jq",
+        "skills": [{"name": "release-notes", "content": "Write release notes from merged PRs."}],
+        "instructions": "Prefer small commits. Run the tests that cover what you changed before pushing.",
+        "files": [], "setupTimeoutSeconds": 900});
+    let baked = json!([
+        {"repositoryIdentity": "github.com/opcodehq/zuse", "state": "baked", "commit": "a".repeat(40)},
+        {"repositoryIdentity": "github.com/opcodehq/web", "state": "baked", "commit": "b".repeat(40)},
+        {"repositoryIdentity": "github.com/swarajbachu/spacekey", "state": "baked", "commit": "c".repeat(40)}
+    ]);
+    match image {
+        "none" => json!({"revision": 0, "createdAt": 0, "imageState": "none", "imageError": null,
+            "recipe": {"version": 1, "setupScript": "", "skills": [], "instructions": "", "files": [], "setupTimeoutSeconds": 900}}),
+        "queued" => {
+            json!({"revision": 3, "createdAt": now() - DAY, "imageState": "queued", "imageError": null, "recipe": recipe,
+            "image": {"state": "queued", "reason": "recipe", "recipeRevision": 3, "updatedAt": now()}})
+        }
+        "building" => {
+            json!({"revision": 3, "createdAt": now() - DAY, "imageState": "building", "imageError": null, "recipe": recipe,
+            "image": {"state": "building", "phase": "setup", "reason": "recipe", "recipeRevision": 3, "updatedAt": now(), "repositories": baked}})
+        }
+        "failed" => {
+            json!({"revision": 3, "createdAt": now() - DAY, "imageState": "failed", "imageError": "user_image_setup_failed", "recipe": recipe,
+            "image": {"state": "failed", "reason": "recipe", "recipeRevision": 3, "error": "user_image_setup_failed", "updatedAt": now(),
+                "logExcerpt": "+ npm i -g pnpm@9 turbo\nnpm ERR! code E404\nnpm ERR! 404 Not Found - GET https://registry.npmjs.org/turbo"}})
+        }
+        _ => {
+            json!({"revision": 3, "createdAt": now() - 2 * DAY, "imageState": "ready", "imageError": null, "recipe": recipe,
+            "image": {"state": "ready", "reason": "recipe", "recipeRevision": 3, "builtAt": now() - DAY, "updatedAt": now() - DAY, "repositories": baked}})
+        }
+    }
+}
+
+/// What the composer's pickers read to offer Cloud: the repositories, a
+/// ready computer and one connected agent.
+fn cloud_context() -> Value {
+    let projects: Vec<Value> = projects()["projects"].as_array().unwrap().iter().map(|p| json!({
+        "projectId": p["projectId"], "repositoryIdentity": p["repositoryIdentity"], "displayName": p["displayName"],
+        "repositoryUrl": p["repositoryUrl"], "defaultBranch": "main", "state": "ready", "canCreate": true})).collect();
+    json!({"accountId": OWNER, "organizationId": null, "ownerId": OWNER, "apiOrigin": "https://cloud.example.test",
+        "projects": projects, "commandAdmissionVersion": 2,
+        "computerCapabilities": {"defaultProvider": "boxd", "providers": [{"id": "boxd", "configured": true, "managedBaseReady": true,
+            "commandAdmissionVersion": 2, "preservesDisk": true, "preservesMemory": true, "supportsSnapshots": true, "supportsDocker": false,
+            "sizes": [{"id": "default", "label": "Standard", "vcpus": 4, "memoryMib": 16384, "diskGib": 40}], "unavailableReason": null}],
+            "computerSizes": [{"id": "default", "label": "Standard · 4 vCPU · 16 GB", "vcpus": 4, "memoryMib": 16384, "machineRate": 4, "available": true}]},
+        "providerAgentCatalogs": {"boxd": {"providers": [{"id": "codex", "name": "Codex", "defaultModel": "gpt-5.5",
+            "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}]}]}},
+        "agentConnections": [{"agent": "codex", "state": "connected", "connectionId": "codex"}]})
+}
+
 struct Controller {
     start: i64,
+    /// `FIXTURE_IMAGE`.
+    image: String,
     plan: PlanState,
     /// A just-subscribed account with nothing set up yet.
     fresh: bool,
@@ -456,6 +512,13 @@ impl RpcService for Controller {
                         "instructions": "", "files": [], "setupTimeoutSeconds": 900}}),
                     );
                 }
+                // Nothing to carry yet: saving queues no image.
+                methods::CLOUD_MACHINE_SAVE => {
+                    let mut saved = machine("none");
+                    saved["revision"] = json!(1);
+                    saved["recipe"] = _params["recipe"].clone();
+                    return bound(saved);
+                }
                 _ => {}
             }
         }
@@ -490,13 +553,12 @@ impl RpcService for Controller {
                 {"connectionId": "codex", "agent": "codex", "method": "device-code", "state": "connected", "accountLabel": "you@example.com", "expiresAt": null, "version": 1, "errorCode": null},
                 {"connectionId": "claude", "agent": "claude", "method": "setup-token", "state": "connected", "accountLabel": "Claude Max", "expiresAt": null, "version": 1, "errorCode": null}
             ], "supportsDeviceReconnect": true})),
-            methods::CLOUD_MACHINE => bound(
-                json!({"revision": 3, "createdAt": now() - 2 * DAY, "imageState": "ready", "imageError": null,
-                "recipe": {"version": 1, "setupScript": "curl -fsSL https://bun.sh/install | bash\nnpm i -g pnpm@9 turbo\napt-get install -y ripgrep jq",
-                    "skills": [{"name": "release-notes", "content": "Write release notes from merged PRs."}],
-                    "instructions": "Prefer small commits. Run the tests that cover what you changed before pushing.",
-                    "files": [], "setupTimeoutSeconds": 900}}),
-            ),
+            methods::CLOUD_MACHINE => bound(machine(&self.image)),
+            // Saving or a rebuild starts the image build.
+            methods::CLOUD_MACHINE_SAVE | methods::CLOUD_MACHINE_REBUILD => {
+                bound(machine("building"))
+            }
+            methods::CLOUD_CONTEXT => RpcReply::value(&cloud_context()),
             methods::CLOUD_PROJECT_ENVIRONMENT => bound(
                 json!({"projectId": _params["projectId"], "revision": 2, "source": "project", "createdAt": now() - DAY,
                 "recipe": {"version": 1, "scripts": {"initialize": "pnpm install", "refresh": "pnpm install --frozen-lockfile"},
@@ -545,6 +607,7 @@ fn main() {
         start,
         plan,
         fresh,
+        image: std::env::var("FIXTURE_IMAGE").unwrap_or_else(|_| "ready".into()),
         no_repos: std::env::var("FIXTURE_NO_REPOS").is_ok(),
         polls: Default::default(),
         new_install: std::env::var("FIXTURE_NEW_INSTALL").is_ok(),
@@ -597,7 +660,14 @@ fn main() {
             {
                 chat.archived = true;
             }
-            s.fixture_cloud_sidebar_catalog(client, &json!({}), &json!({"accountId": OWNER, "organizationId": null, "workspaces": []}));
+            s.fixture_cloud_sidebar_catalog(client, &cloud_context(), &json!({"accountId": OWNER, "organizationId": null, "workspaces": []}));
+            // `FIXTURE_LOCAL_SPACE=1`: a checkout of opcodehq/zuse on this
+            // computer, the same repository as a Cloud one.
+            if std::env::var("FIXTURE_LOCAL_SPACE").is_ok() {
+                s.spaces.push(serde_json::from_value(json!({"id": "space-zuse", "deviceId": "fixture-local",
+                    "path": "/Users/you/code/zuse", "name": "zuse", "gitDetected": true,
+                    "remoteRepository": "github.com/opcodehq/zuse", "createdAt": "2026-11-01T12:00:00Z"})).unwrap());
+            }
             s
         });
         let boot = EngineBootConfig { target: None, data_dir: data, ipc_port: 0, edge_url: String::new(),

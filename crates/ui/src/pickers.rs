@@ -1881,10 +1881,13 @@ impl Pickers {
         // The keyboard-nav highlight starts ON the selected row — row 0
         // otherwise reads as a second active row (user report).
         self.active = match kind {
-            PickerKind::Checkout => match self.config.checkout {
-                CheckoutKind::NewWorktree => 0,
-                CheckoutKind::Local => 1,
-            },
+            PickerKind::Checkout => {
+                let current = self.workspace_choice(cx);
+                self.workspace_choices(cx)
+                    .iter()
+                    .position(|choice| *choice == current)
+                    .unwrap_or(0)
+            }
             PickerKind::Branch => self.selected_ref_index(cx),
             PickerKind::HarnessModel => self.selected_model_index(cx),
             PickerKind::Space => self.selected_space_menu_index(cx),
@@ -3495,7 +3498,7 @@ impl Pickers {
                 let delta = if key == MenuKey::Up { -1 } else { 1 };
                 let count = match self.open_kind() {
                     Some(PickerKind::Branch) => self.filtered_ref_rows(cx).len().min(MAX_REF_ROWS),
-                    Some(PickerKind::Checkout) => 2,
+                    Some(PickerKind::Checkout) => self.workspace_choices(cx).len(),
                     // Continue from model rows into the pinned settings triggers.
                     Some(PickerKind::HarnessModel) => {
                         self.model_rows_len(cx)
@@ -3512,7 +3515,7 @@ impl Pickers {
                     }
                     Some(PickerKind::Device) => {
                         self.filtered_device_rows(cx).len()
-                            + usize::from(self.cloud_destination(cx).is_some())
+                            + usize::from(self.cloud_offer_selectable(cx))
                     }
                     None => 0,
                 };
@@ -3534,12 +3537,9 @@ impl Pickers {
                 if self.open_kind() == Some(PickerKind::HarnessModel) {
                     self.activate_model_row(cx);
                 } else if self.open_kind() == Some(PickerKind::Checkout) {
-                    let kind = if self.active == 0 {
-                        CheckoutKind::NewWorktree
-                    } else {
-                        CheckoutKind::Local
-                    };
-                    self.pick_checkout(kind, cx);
+                    if let Some(choice) = self.workspace_choices(cx).get(self.active).copied() {
+                        self.pick_workspace(choice, cx);
+                    }
                 } else {
                     self.on_search_submit(cx);
                 }

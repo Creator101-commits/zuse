@@ -143,6 +143,9 @@ impl ProjectControl {
                 "cloud_project_already_exists",
             )
         })?;
+        // The account's image carries its repositories: rebuild it.
+        crate::project_caches::user_images::worker::enqueue_repositories_tx(&mut tx, owner, now)
+            .await?;
         tx.commit().await?;
         Ok(row)
     }
@@ -150,6 +153,8 @@ impl ProjectControl {
         let mut tx = self.owned(owner).await?;
         let row:Option<Value>=sqlx::query_scalar("UPDATE api_cloud_projects AS p SET included=false,updated_at=$3 WHERE project_id=$1 AND account_id=$2 RETURNING to_jsonb(p)").bind(id).bind(owner).bind(now).fetch_optional(&mut *tx).await?;
         let row = row.ok_or_else(|| ApiError::not_found("cloud_project_not_found"))?;
+        crate::project_caches::user_images::worker::enqueue_repositories_tx(&mut tx, owner, now)
+            .await?;
         tx.commit().await?;
         Ok(row)
     }

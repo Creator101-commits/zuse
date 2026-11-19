@@ -374,6 +374,94 @@ mod tests {
             })
         }
     }
+    /// The owner's case: the sidebar project "zuse" is both a local checkout
+    /// and a Cloud repository. A new chat in it must be a cloud chat, with
+    /// the checkout kept as the Local alternative.
+    #[gpui::test]
+    fn new_chat_in_a_cloud_backed_project_starts_on_cloud(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(UiSettings::default(), directory.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            std::sync::Arc::new(Pending),
+        ));
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+                    state.set_cloud_subscription_for_test(true);
+                    assert!(state.apply_cloud_sidebar_catalog(
+                        &json!({"accountId":"owner","organizationId":null,"ownerId":"owner","projects":[{"projectId":"project-zuse","displayName":"opcodehq/zuse","repositoryIdentity":"github.com/opcodehq/zuse","canCreate":true}]}),
+                        &json!({"accountId":"owner","organizationId":null,"workspaces":[]})
+                    ));
+                    state.spaces.push(zuse_protocol::Space {
+                        id: "space-zuse".into(),
+                        device_id: "device".into(),
+                        path: "/work/zuse".into(),
+                        name: None,
+                        git_detected: true,
+                        git_checked_at: None,
+                        checkout_id: None,
+                        repository_id: None,
+                        remote_repository: Some("github.com/OpcodeHQ/zuse".into()),
+                        created_at: chrono::Utc::now(),
+                    });
+                    state
+                });
+                state.update(cx, |state, _| state.set_test_engine(controller));
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        target: None,
+                        data_dir: directory.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zuse_protocol::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.reduced_motion = true;
+                shell.settings.space_filter = Some("space-zuse".into());
+                shell.open_new_session(None, cx);
+                shell
+            });
+            ProjectList {
+                shell,
+                _directory: directory,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        shell.read_with(cx, |shell, cx| {
+            let state = shell.state.read(cx);
+            assert_eq!(
+                state.cloud_project.as_ref().expect("a cloud chat")["projectId"],
+                "project-zuse"
+            );
+            assert_eq!(state.selected_space.as_deref(), Some("space-zuse"));
+        });
+    }
+
     #[gpui::test]
     fn typed_cloud_workspaces_paint_under_project_and_pencil_opens_current_canvas(
         cx: &mut TestAppContext,

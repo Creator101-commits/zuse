@@ -91,11 +91,12 @@ impl CloudView {
     }
 }
 /// Asks Settings to show another page (overview rows, billing links).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Navigate {
     Cloud(CloudView),
-    /// The last onboarding step: leave Settings for a new cloud chat.
-    StartCloudChat,
+    /// The last onboarding step: leave Settings for a new cloud chat on the
+    /// chosen repository.
+    StartCloudChat(zuse_viewport::cloud_repositories::StartChat),
 }
 /// The most usage pages fetched for one period (100 entries each).
 const USAGE_PAGES: usize = 10;
@@ -248,8 +249,8 @@ impl CloudBillingPage {
         .detach();
         cx.subscribe(
             &repository_panel,
-            |_, _, _: &zuse_viewport::cloud_repositories::StartChat, cx| {
-                cx.emit(Navigate::StartCloudChat);
+            |_, _, event: &zuse_viewport::cloud_repositories::StartChat, cx| {
+                cx.emit(Navigate::StartCloudChat(event.clone()));
             },
         )
         .detach();

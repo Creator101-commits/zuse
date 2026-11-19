@@ -35,7 +35,8 @@ impl UserImageHit {
 }
 
 /// The account's current image digest; `None` when the recipe has no setup
-/// script, in which case every computer starts from the managed base.
+/// script and the account no repositories, in which case every computer
+/// starts from the managed base.
 pub(crate) async fn current_digest_tx(
     tx: &mut Transaction<'_, Postgres>,
     owner: &str,
@@ -46,9 +47,11 @@ pub(crate) async fn current_digest_tx(
     .bind(owner)
     .fetch_optional(&mut **tx)
     .await?;
-    Ok(recipe
-        .and_then(|r| serde_json::from_value::<MachineRecipe>(r).ok())
-        .and_then(|r| image_digest(&r)))
+    let Some(recipe) = recipe.and_then(|r| serde_json::from_value::<MachineRecipe>(r).ok()) else {
+        return Ok(None);
+    };
+    let repositories = super::has_repositories_tx(tx, owner).await?;
+    Ok(image_digest_for(&recipe, repositories))
 }
 
 /// A ready image row is usable on `base` (a locked registry row) only if

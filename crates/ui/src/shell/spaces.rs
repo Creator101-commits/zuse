@@ -5978,13 +5978,21 @@ impl Shell {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        if let Some(project) = cloud_project
-                            .as_ref()
-                            .filter(|_| group_space.is_none() || this.cloud_conversation.is_some())
-                        {
-                            this.open_new_cloud_session(project.clone(), cx);
-                        } else {
-                            this.open_new_session(group_space.clone(), cx);
+                        // A project backed by a Cloud repository starts its
+                        // chats on Cloud; the checkout stays the Local pick.
+                        let subscribed = this.state.read(cx).cloud_access().subscribed();
+                        match crate::cloud_destination::new_chat(
+                            cloud_project.as_ref(),
+                            group_space.as_deref(),
+                            subscribed,
+                        ) {
+                            crate::cloud_destination::NewChat::Cloud {
+                                project,
+                                local_space,
+                            } => this.open_new_cloud_session_in(project, local_space, cx),
+                            crate::cloud_destination::NewChat::Local(space) => {
+                                this.open_new_session(space, cx)
+                            }
                         }
                     }))
                     .into_any_element(),

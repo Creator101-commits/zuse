@@ -338,23 +338,40 @@ impl Shell {
                     .as_deref()
                     .and_then(|id| state.space_row(id))
                     .or_else(|| state.selected_space_row())
-                    .is_some_and(|space| {
+                    .filter(|space| {
                         !zuse_protocol::projectless::is_projectless_cwd(Some(&space.path))
                     });
-                if explicit_local {
-                    None
+                if let Some(space) = explicit_local {
+                    // A project backed by a Cloud repository starts on Cloud
+                    // for a subscriber, keeping the checkout as Local.
+                    let cloud = space.remote_repository.as_deref().and_then(|remote| {
+                        crate::cloud_destination::matching_project(remote, &projects)
+                    });
+                    match crate::cloud_destination::new_chat(
+                        cloud,
+                        Some(&space.id),
+                        state.cloud_access().subscribed(),
+                    ) {
+                        crate::cloud_destination::NewChat::Cloud {
+                            project,
+                            local_space,
+                        } => Some((project, local_space)),
+                        crate::cloud_destination::NewChat::Local(_) => None,
+                    }
                 } else {
-                    remembered.or_else(|| {
-                        (!state.spaces.iter().any(|space| {
-                            !zuse_protocol::projectless::is_projectless_cwd(Some(&space.path))
-                        }))
-                        .then(|| projects.into_iter().next())
-                        .flatten()
-                    })
+                    remembered
+                        .or_else(|| {
+                            (!state.spaces.iter().any(|space| {
+                                !zuse_protocol::projectless::is_projectless_cwd(Some(&space.path))
+                            }))
+                            .then(|| projects.into_iter().next())
+                            .flatten()
+                        })
+                        .map(|project| (project, None))
                 }
             };
-            if let Some(project) = cloud_only {
-                self.open_new_cloud_session(project, cx);
+            if let Some((project, local_space)) = cloud_only {
+                self.open_new_cloud_session_in(project, local_space, cx);
                 return;
             }
         }
