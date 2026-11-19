@@ -18,7 +18,11 @@ asking again and again from the server:
    launch lines, which install the credential for the task user privately.
 
 Status is kept in <root>/<operation>/status.json (root 0600). The server
-reads it only once, as a fallback, if the runtime has not enrolled in time.
+reads it only as a fallback, if the runtime has not enrolled in time. Every
+step is bounded: the wait and the helper by `deadlineSeconds`, the launch by
+`launchSeconds`, so the unit has finished by their sum. The server's last
+read also stops the unit and removes the credential before it starts the
+runtime itself.
 """
 import base64, ctypes, hashlib, json, os, re, select, stat, subprocess, sys, time
 from pathlib import Path
@@ -28,6 +32,11 @@ ROOT = Path('/run/zuse-fresh-start')
 HELPER = Path('/usr/local/lib/zuse/managed-base-fresh-boot.py')
 FALLBACK_SECONDS = 0.25
 REJECTED_RETRY_SECONDS = 0.5
+HELPER_SECONDS = 40
+UNIT_SUBMIT_SECONDS = 15
+# Helper refusals that clear on their own right after the helper's own start.
+# Every other refusal (a hash mismatch, for one) ends the attempt at once.
+TRANSIENT_REFUSALS = frozenset({'fresh_boot_resident_not_owned_idle'})
 SAFE_ID = re.compile(r'[A-Za-z0-9_.:-]{1,160}\Z')
 HEX64 = re.compile(r'[a-f0-9]{64}\Z')
 BINDING = ('version', 'provider', 'purpose', 'operationId', 'workspaceId', 'generation',
@@ -131,20 +140,32 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
 
 
+def same_json(a, b):
+    """JSON equality that also compares types (`true` is not `1`)."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(same_json(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        return len(a) == len(b) and all(same_json(x, y) for x, y in zip(a, b))
+    return a == b
+
+
 def accepted_receipt(raw, request):
     """The same acceptance the server applies to a fresh boot receipt."""
     try:
         value = json.loads(raw)
     except ValueError:
         return None
-    if not isinstance(value, dict) or any(value.get(k) != request[k] for k in BINDING):
+    if not isinstance(value, dict) or any(k not in value or not same_json(value[k], request[k]) for k in BINDING):
         return None
     resident = value.get('resident')
-    pid, ticks = (resident or {}).get('residentPid'), (resident or {}).get('residentStartTicks')
-    nonce = (resident or {}).get('bootNonceSha256')
+    if not isinstance(resident, dict):
+        return None
+    pid, ticks = resident.get('residentPid'), resident.get('residentStartTicks')
+    nonce = resident.get('bootNonceSha256')
     if (value.get('status') != 'ready'
             or value.get('requestSha256') != hashlib.sha256(canonical(request)).hexdigest()
-            or not isinstance(resident, dict)
             or resident.get('ipcVerified') is not True
             or resident.get('unbound') is not True
             or resident.get('childAlive') is not False
@@ -221,6 +242,7 @@ def validated(args):
     require(SAFE_ID.fullmatch(args['operationId']) and HEX64.fullmatch(args['helperSha256']), 'fresh_start_arguments_invalid')
     require(args['staged'] == '/tmp/zuse-rust-boot-' + args['operationId'], 'fresh_start_staged_path_invalid')
     require(type(args.get('deadlineSeconds')) is int and 5 <= args['deadlineSeconds'] <= 300, 'fresh_start_arguments_invalid')
+    require(type(args.get('launchSeconds')) is int and 5 <= args['launchSeconds'] <= 300, 'fresh_start_arguments_invalid')
     request = json.loads(base64.b64decode(args['request'], validate=True))
     require(isinstance(request, dict) and request.get('provider') == 'boat'
             and request.get('purpose') == 'initial-allocation'
@@ -256,6 +278,23 @@ def take_credential(staged, target):
     write_private(target, data)
 
 
+def unit_name(operation):
+    return 'zuse-fresh-start-' + hashlib.sha256(operation.encode()).hexdigest()[:16]
+
+
+def unit_loaded(unit, run=None):
+    """True/False when the service manager answers, None when it does not."""
+    run = run or subprocess.run
+    try:
+        shown = run(['systemctl', 'show', '--property=LoadState', '--value', unit],
+                    capture_output=True, timeout=UNIT_SUBMIT_SECONDS, env={'PATH': '/usr/bin:/bin'})
+    except subprocess.TimeoutExpired:
+        return None
+    if shown.returncode != 0:
+        return None
+    return shown.stdout.strip() == b'loaded'
+
+
 def dispatch(args, root=ROOT):
     """The provider command: secure the credential, start the waiter, answer."""
     args, _ = validated(args)
@@ -277,12 +316,23 @@ def dispatch(args, root=ROOT):
     # This same program, from the root-only directory, for the waiting unit.
     write_private(directory / 'start.py', args['starter'].encode())
     status(directory, args['operationId'], 'waiting')
-    unit = 'zuse-fresh-start-' + hashlib.sha256(args['operationId'].encode()).hexdigest()[:16]
-    started = subprocess.run(
-        ['systemd-run', '--quiet', '--collect', '--unit=' + unit, '/usr/bin/python3', '-I', '-B',
-         str(directory / 'start.py'), '--wait', str(directory)],
-        capture_output=True, timeout=15, env={'PATH': '/usr/bin:/bin'})
-    if started.returncode != 0:
+    unit = unit_name(args['operationId'])
+    try:
+        started = subprocess.run(
+            ['systemd-run', '--quiet', '--collect', '--unit=' + unit, '/usr/bin/python3', '-I', '-B',
+             str(directory / 'start.py'), '--wait', str(directory)],
+            capture_output=True, timeout=UNIT_SUBMIT_SECONDS, env={'PATH': '/usr/bin:/bin'}).returncode == 0
+    except subprocess.TimeoutExpired:
+        # The reply was lost, not necessarily the unit: ask the service manager.
+        loaded = unit_loaded(unit, subprocess.run)
+        if loaded is None:
+            # Unknown either way. Keep the credential and the `waiting` record:
+            # a repeat finds it, and the server's last read stops whatever
+            # runs and removes the credential before its own start.
+            raise Refused('fresh_start_unit_uncertain') from None
+        # A unit that already finished is collected; its status moved on.
+        started = loaded or read_status(directory).get('status') != 'waiting'
+    if not started:
         (directory / 'boot').unlink(missing_ok=True)
         status(directory, args['operationId'], 'failed', 'fresh_start_unit_failed')
         raise Refused('fresh_start_unit_failed')
@@ -299,22 +349,30 @@ def run_start(directory, watch=None, clock=time.monotonic, run=subprocess.run, s
         while True:
             if not wait_until(lambda: path_safe(HELPER), deadline, watch, clock):
                 return status(directory, operation, 'timeout', 'fresh_start_path_unsafe_until_deadline')
-            result = run(['/usr/bin/python3', '-I', '-B', '-c', args['loader'], args['helperSha256'], args['request']],
-                         capture_output=True, timeout=40, env={'PATH': '/usr/bin:/bin'})
+            # The helper never outlives the deadline, so neither can a launch.
+            left = deadline - clock()
+            if left <= 0:
+                return status(directory, operation, 'timeout', 'fresh_start_helper_pending_until_deadline')
+            try:
+                result = run(['/usr/bin/python3', '-I', '-B', '-c', args['loader'], args['helperSha256'], args['request']],
+                             capture_output=True, timeout=min(HELPER_SECONDS, left), env={'PATH': '/usr/bin:/bin'})
+            except subprocess.TimeoutExpired:
+                return status(directory, operation, 'timeout', 'fresh_start_helper_pending_until_deadline')
             state = helper_state(result)
             if state == 'rejected':
                 # Right after its own `systemctl start` the helper can see the
                 # resident before it has switched to the task user
-                # (`fresh_boot_resident_not_owned_idle`). The server path
-                # retried every refusal on its next attempt; do the same here,
-                # bounded by the deadline. The helper's journal makes a retry
-                # observe the original start, never issue another.
+                # (`fresh_boot_resident_not_owned_idle`). Retry only such
+                # refusals, bounded by the deadline. The helper's journal makes
+                # a retry observe the original start, never issue another.
                 rejected = helper_code(result)
-                if clock() + REJECTED_RETRY_SECONDS >= deadline:
+                if rejected not in TRANSIENT_REFUSALS or clock() + REJECTED_RETRY_SECONDS >= deadline:
                     return status(directory, operation, 'rejected', 'fresh_start_helper_rejected',
                                   helper=rejected)
                 sleep(REJECTED_RETRY_SECONDS)
                 continue
+            if state == 'ready' and clock() >= deadline:
+                return status(directory, operation, 'timeout', 'fresh_start_helper_pending_until_deadline')
             if state == 'ready':
                 receipt = accepted_receipt(result.stdout, request)
                 if receipt is None:
@@ -324,8 +382,11 @@ def run_start(directory, watch=None, clock=time.monotonic, run=subprocess.run, s
                 return status(directory, operation, 'timeout', 'fresh_start_helper_pending_until_deadline')
             watch.wait(min(FALLBACK_SECONDS, max(0, deadline - clock())))
         status(directory, operation, 'launching', receipt=receipt)
-        launched = run(['/bin/sh', '-c', args['launch']], capture_output=True, timeout=60,
-                       env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'})
+        try:
+            launched = run(['/bin/sh', '-c', args['launch']], capture_output=True, timeout=args['launchSeconds'],
+                           env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin'})
+        except subprocess.TimeoutExpired:
+            return status(directory, operation, 'failed', 'fresh_start_launch_timeout', receipt)
         if launched.returncode == 78:
             return status(directory, operation, 'rejected', 'fresh_start_runtime_hash_mismatch', receipt)
         if launched.returncode != 0:

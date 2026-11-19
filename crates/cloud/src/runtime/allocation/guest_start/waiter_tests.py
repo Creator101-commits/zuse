@@ -26,30 +26,40 @@ link.symlink_to(safe)
 check(not ns['path_safe'](link, owner=uid), 'symlink must be unsafe')
 check(not ns['path_safe'](tmp / 'missing', owner=uid), 'missing path is not yet safe')
 
-# An attribute event wakes the wait long before the fallback interval.
+# A real attribute event wakes the wait long before the 5 s fallback interval.
 watched = tmp / 'watched'
 watched.mkdir()
 os.chmod(watched, 0o775)
 watch = ns['Watch']([watched])
-threading.Timer(0.3, lambda: os.chmod(watched, 0o755)).start()
 started = time.monotonic()
+threading.Timer(0.3, lambda: os.chmod(watched, 0o755)).start()
 ok = ns['wait_until'](lambda: not (watched.stat().st_mode & 0o022), time.monotonic() + 10, watch, fallback=5)
 took = time.monotonic() - started
-check(ok and 0.25 <= took < 1.5, f'event wake took {took:.2f}s')
+check(ok and took < 2.5, f'event wake took {took:.2f}s')
+watch.close()
+
+
+# Fallback polling and the deadline, on a fake clock: each wait advances it.
+class FakeClock:
+    def __init__(self):
+        self.now, self.waits = 0.0, []
+    def __call__(self):
+        return self.now
+    def wait(self, seconds):
+        self.waits.append(seconds)
+        self.now += seconds
+        return False
 
 # A missed event (nothing watched changes) still ends within the fallback.
-flip_at = time.monotonic() + 0.6
-started = time.monotonic()
-ok = ns['wait_until'](lambda: time.monotonic() >= flip_at, time.monotonic() + 10, watch, fallback=0.25)
-took = time.monotonic() - started
-check(ok and 0.6 <= took < 0.95, f'fallback wake took {took:.2f}s')
+clock = FakeClock()
+ok = ns['wait_until'](lambda: clock.now >= 0.6, 10, clock, clock, fallback=0.25)
+check(ok and clock.now == 0.75 and clock.waits == [0.25] * 3, f'fallback: {clock.now} {clock.waits}')
 
-# The hard deadline ends the wait with False.
-started = time.monotonic()
-ok = ns['wait_until'](lambda: False, time.monotonic() + 0.5, watch, fallback=0.25)
-took = time.monotonic() - started
-check(not ok and 0.5 <= took < 0.9, f'deadline took {took:.2f}s')
-watch.close()
+# The hard deadline ends the wait with False, the last wait cut to what is left.
+clock = FakeClock()
+ok = ns['wait_until'](lambda: False, 0.6, clock, clock, fallback=0.25)
+check(not ok and abs(clock.now - 0.6) < 1e-9 and len(clock.waits) == 3 and abs(clock.waits[-1] - 0.1) < 1e-9,
+      f'deadline: {clock.now} {clock.waits}')
 
 # Receipt acceptance mirrors the server.
 pins = {k: c * 64 for k, c in (('runtimeSha256', 'a'), ('supervisorSha256', 'b'), ('serviceSha256', 'c'), ('manifestSha256', 'd'), ('helperSha256', 'e'))}
@@ -66,6 +76,13 @@ for change in ({'childAlive': True}, {'unbound': False}, {'residentPid': 1}, {'b
     check(ns['accepted_receipt'](json.dumps(bad), request) is None, f'receipt with {change} refused')
 check(ns['accepted_receipt'](json.dumps({**ready, 'workspaceId': 'other'}), request) is None, 'binding mismatch refused')
 check(ns['accepted_receipt'](json.dumps({**ready, 'requestSha256': '0' * 64}), request) is None, 'digest mismatch refused')
+# Binding fields compare JSON types too: `true` is not the generation 1.
+check(ns['accepted_receipt'](json.dumps({**ready, 'generation': True}), request) is None, 'boolean generation refused')
+check(ns['accepted_receipt'](json.dumps({**ready, 'generation': 1.0}), request) is None, 'float generation refused')
+missing = dict(ready); del missing['imagePins']
+check(ns['accepted_receipt'](json.dumps(missing), request) is None, 'missing binding refused')
+for resident in ([42], 'resident', None, 7):
+    check(ns['accepted_receipt'](json.dumps({**ready, 'resident': resident}), request) is None, f'resident {resident!r} refused')
 
 
 class Result:
@@ -83,17 +100,27 @@ check(ns['helper_state'](Result(0, json.dumps(ready))) == 'ready', 'ready')
 # and a repeated dispatch never starts twice.
 class Units:
     calls = []
+    submit = 'ok'  # 'ok', 'fail', or 'timeout'
+    load_state = b'loaded\n'  # or None when systemctl itself times out
     @staticmethod
-    def run(argv, **_):
+    def run(argv, **kwargs):
         Units.calls.append(argv)
+        if argv[0] == 'systemd-run':
+            if Units.submit == 'timeout':
+                raise subprocess.TimeoutExpired(argv, kwargs.get('timeout'))
+            return Result(0 if Units.submit == 'ok' else 1, '')
+        if argv[0] == 'systemctl':
+            if Units.load_state is None:
+                raise subprocess.TimeoutExpired(argv, kwargs.get('timeout'))
+            return Result(0, Units.load_state)
         return Result(0, '')
-ns['subprocess'] = type('S', (), {'run': staticmethod(Units.run)})
+ns['subprocess'] = type('S', (), {'run': staticmethod(Units.run), 'TimeoutExpired': subprocess.TimeoutExpired})
 ns['private_root'] = lambda root: root.mkdir(mode=0o700, exist_ok=True)
 root = tmp / 'run'
 staged = Path('/tmp/zuse-rust-boot-' + operation)
 args = {'version': 1, 'operationId': operation, 'staged': str(staged), 'starter': '# starter', 'loader': '# loader',
         'helperSha256': 'e' * 64, 'request': base64.b64encode(json.dumps(request).encode()).decode(),
-        'launch': 'true', 'deadlineSeconds': 60}
+        'launch': 'true', 'deadlineSeconds': 60, 'launchSeconds': 60}
 staged.write_bytes(b'private-boot-credential')
 check(ns['dispatch'](args, root) == {'status': 'accepted'}, 'first dispatch accepted')
 directory = root / operation
@@ -112,21 +139,55 @@ except ns['Refused'] as error:
     check(str(error) == 'fresh_start_staged_path_invalid', str(error))
 
 
+def fresh_dispatch(submit, load_state):
+    """A new operation's dispatch with the given systemd-run outcome."""
+    op = 'op-' + os.urandom(6).hex()
+    a = {**args, 'operationId': op, 'staged': '/tmp/zuse-rust-boot-' + op,
+         'request': base64.b64encode(json.dumps({**request, 'operationId': op}).encode()).decode()}
+    Path(a['staged']).write_bytes(b'private-boot-credential')
+    Units.calls, Units.submit, Units.load_state = [], submit, load_state
+    try:
+        reply = ns['dispatch'](a, root)
+    except ns['Refused'] as error:
+        reply = str(error)
+    finally:
+        Units.submit, Units.load_state = 'ok', b'loaded\n'
+        Path(a['staged']).unlink(missing_ok=True)
+    d = root / op
+    return reply, (d / 'boot').exists(), ns['read_status'](d).get('status')
+
+# A lost systemd-run reply: the service manager decides, never a guess.
+reply, kept, state = fresh_dispatch('timeout', b'loaded\n')
+check(reply == {'status': 'accepted'} and kept and state == 'waiting', f'timeout, unit loaded: {reply} {kept} {state}')
+reply, kept, state = fresh_dispatch('timeout', b'not-found\n')
+check(reply == 'fresh_start_unit_failed' and not kept and state == 'failed', f'timeout, no unit: {reply} {kept} {state}')
+reply, kept, state = fresh_dispatch('timeout', None)
+check(reply == 'fresh_start_unit_uncertain' and kept and state == 'waiting', f'timeout, unknown: {reply} {kept} {state}')
+reply, kept, state = fresh_dispatch('fail', b'loaded\n')
+check(reply == 'fresh_start_unit_failed' and not kept and state == 'failed', f'submit failed: {reply} {kept} {state}')
+
+
 # The waiting unit: retry while the loader refuses, accept, launch once.
-def start(helper_results, launch_code, safe_after=0.0, deadline=60):
+def start(helper_results, launch_code, safe_after=0.0, deadline=60, helper_seconds=0.0):
     (directory / 'arguments.json').write_bytes(ns['canonical']({**args, 'deadlineSeconds': deadline}))
     (directory / 'boot').write_bytes(b'private-boot-credential')
-    calls = []
-    def run(argv, **_):
+    calls, timeouts = [], []
+    clock = FakeClock()
+    def run(argv, timeout=None, **_):
         calls.append(argv[1] if argv[0] == '/bin/sh' else 'helper')
+        timeouts.append(timeout)
         if argv[0] == '/bin/sh':
+            if launch_code == 'timeout':
+                raise subprocess.TimeoutExpired(argv, timeout)
             return Result(launch_code, '')
+        if helper_seconds > timeout:
+            clock.now += timeout
+            raise subprocess.TimeoutExpired(argv, timeout)
+        clock.now += helper_seconds
         return helper_results.pop(0) if len(helper_results) > 1 else helper_results[0]
-    began = time.monotonic()
-    ns['path_safe'] = lambda path, owner=0: time.monotonic() - began >= safe_after
-    class NoEvents:
-        def wait(self, seconds): time.sleep(seconds)
-    ns['run_start'](directory, watch=NoEvents(), run=run)
+    ns['path_safe'] = lambda path, owner=0: clock.now >= safe_after
+    ns['run_start'](directory, watch=clock, clock=clock, run=run, sleep=clock.wait)
+    start.timeouts = timeouts
     record = json.loads((directory / 'status.json').read_bytes())
     check(not (directory / 'boot').exists(), 'credential removed after the start')
     return record, calls
@@ -136,8 +197,20 @@ check(record['status'] == 'launched' and record['receipt']['status'] == 'ready',
 check(calls == ['helper', 'helper', 'helper', '-c'], f'calls {calls}')
 record, calls = start([Result(0, json.dumps(ready))], 0, safe_after=0.4)
 check(record['status'] == 'launched', 'safe after a wait')
+# A permanent helper refusal ends the attempt on the first answer.
 record, calls = start([Result(1, json.dumps({'status': 'rejected', 'code': 'fresh_boot_file_hash_mismatch'})), Result(0, json.dumps(ready))], 0)
-check(record['status'] == 'launched' and calls[0] == 'helper', 'waits for the path, then starts')
+check(record['status'] == 'rejected' and record['helperCode'] == 'fresh_boot_file_hash_mismatch'
+      and calls == ['helper'], f'permanent refusal: {record} {calls}')
+# The helper only gets what is left of the deadline, and a late ready never launches.
+record, calls = start([Result(0, json.dumps(ready))], 0, safe_after=58, deadline=60)
+check(record['status'] == 'launched' and start.timeouts[0] <= 2 and start.timeouts[1] == 60, f'capped: {start.timeouts}')
+record, calls = start([Result(0, json.dumps(ready))], 0, safe_after=58, deadline=60, helper_seconds=30)
+check(record['status'] == 'timeout' and calls == ['helper'], f'helper outlived the deadline: {record} {calls}')
+record, calls = start([Result(0, json.dumps(ready))], 0, safe_after=58, deadline=60, helper_seconds=2)
+check(record['status'] == 'timeout' and calls == ['helper'], f'ready at the deadline: {record} {calls}')
+# A launch that outlives its bound is a visible failure, never a hang.
+record, calls = start([Result(0, json.dumps(ready))], 'timeout')
+check(record['status'] == 'failed' and record['code'] == 'fresh_start_launch_timeout', f'launch timeout: {record}')
 record, calls = start([Result(0, json.dumps(ready))], 78)
 check(record['status'] == 'rejected' and record['code'] == 'fresh_start_runtime_hash_mismatch', f'{record}')
 bad = json.loads(json.dumps(ready)); bad['resident']['childAlive'] = True

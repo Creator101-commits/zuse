@@ -1,6 +1,8 @@
 //! Connect the runtime controller to a provider selected from the workspace's durable identity.
 use super::allocation::{
-    AllocationProvider, RuntimeLaunch, guest_start::GuestStart, launch_command, launch_lines,
+    AllocationProvider, RuntimeLaunch,
+    guest_start::{GuestStart, PreparedGuestStart},
+    launch_command, launch_lines,
 };
 use super::deletion::DeletionProvider;
 use super::lifecycle::RetainedProvider;
@@ -269,7 +271,10 @@ impl AllocationProvider for RuntimeProvider {
     fn guest_start(&self) -> bool {
         self.provider.id() == zuse_protocol::cloud_computers::ProviderId::Boat
     }
-    async fn start_in_guest(&self, start: &GuestStart<'_>) -> Result<(), ProviderError> {
+    async fn prepare_guest_start(
+        &self,
+        start: &GuestStart<'_>,
+    ) -> Result<PreparedGuestStart, ProviderError> {
         use crate::managed_bases::bootstrap::Purpose;
         let request = start.request;
         if !self.guest_start()
@@ -321,18 +326,40 @@ impl AllocationProvider for RuntimeProvider {
         );
         let staged = layout.staged_boot(operation);
         let command = super::allocation::guest_start::command(request, &lines, &staged)?;
+        Ok(PreparedGuestStart {
+            machine: start.machine.to_owned(),
+            operation: operation.clone(),
+            staged,
+            command,
+        })
+    }
+    async fn dispatch_guest_start(
+        &self,
+        start: &GuestStart<'_>,
+        prepared: &PreparedGuestStart,
+    ) -> Result<(), ProviderError> {
+        if !self.guest_start()
+            || prepared.machine != start.machine
+            || prepared.operation != start.request.operation_id
+            || start.launch.operation_id != start.request.operation_id
+        {
+            return Err(ProviderError::Rejected);
+        }
         self.startup_timings
             .measure(
                 "bootCredentialUpload",
-                self.provider
-                    .upload(start.machine, &staged, start.launch.boot_token.as_bytes()),
+                self.provider.upload(
+                    start.machine,
+                    &prepared.staged,
+                    start.launch.boot_token.as_bytes(),
+                ),
             )
             .await?;
         let result = self
             .startup_timings
             .measure(
                 "guestStartDispatch",
-                self.provider.execute(start.machine, &command),
+                self.provider.execute(start.machine, &prepared.command),
             )
             .await?;
         super::allocation::guest_start::dispatch_reply(result.exit_code, &result.stdout)
@@ -341,6 +368,7 @@ impl AllocationProvider for RuntimeProvider {
         &self,
         machine: &str,
         operation: &str,
+        stop: bool,
     ) -> Result<Value, ProviderError> {
         if !self.guest_start()
             || operation.is_empty()
@@ -357,7 +385,7 @@ impl AllocationProvider for RuntimeProvider {
                 "guestStartStatus",
                 self.provider.execute(
                     machine,
-                    &super::allocation::guest_start::status_command(operation),
+                    &super::allocation::guest_start::status_command(operation, stop),
                 ),
             )
             .await?;
