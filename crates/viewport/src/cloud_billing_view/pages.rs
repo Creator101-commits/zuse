@@ -1046,8 +1046,8 @@ pub fn billing<T: 'static>(
         root = root.child(section(
             "Buy more minutes",
             "",
-            None,
-            credits_body(data, focus, cx, act),
+            Some(credits_header(data, cx, act)),
+            credits_body(data, focus, false, cx, act),
         ));
     }
     let disabled = !subscribed || busy;
