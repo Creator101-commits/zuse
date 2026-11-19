@@ -11286,21 +11286,30 @@ impl Shell {
         };
         let interactive = action != StripAction::None;
         let focus_ring = theme.accent;
-        let lead = match glyph {
-            Some(glyph) => icon(glyph)
-                .size(px(12.0))
-                .flex_none()
-                .text_color(fg)
-                .into_any_element(),
-            None => loaders::mini_glyph_spinner(
-                "sidebar-update-progress",
-                1.5,
-                theme.loader_glyph(),
-                cx.entity_id(),
-                cx,
-            )
-            .into_any_element(),
+        // Icon only, the same size as the footer's other buttons, so update
+        // status never adds a row; the label and notes live in the hover card.
+        let _ = label;
+        let glyph = glyph.unwrap_or(match flow {
+            Flow::Installed => icons::RESTART,
+            _ => icons::ARROW_DOWN,
+        });
+        let fg = match tone {
+            Tone::Solid => theme.accent,
+            _ => fg,
         };
+        let bg = match tone {
+            Tone::Solid => theme.accent_wash,
+            _ => bg,
+        };
+        let bg_hover = match tone {
+            Tone::Solid => theme.accent.opacity(0.18),
+            _ => bg_hover,
+        };
+        let lead = icon(glyph)
+            .size(px(14.0))
+            .flex_none()
+            .text_color(fg)
+            .into_any_element();
         Some(
             div()
                 .id("sidebar-update")
@@ -11311,19 +11320,15 @@ impl Shell {
                     gpui::Role::Status
                 })
                 .aria_label(tip.clone())
-                .h(px(22.0))
-                .px(px(8.0))
+                .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
                 .flex_none()
                 .flex()
                 .items_center()
-                .gap(px(4.0))
-                .rounded_full()
+                .justify_center()
+                .rounded(px(8.0))
                 .border_1()
                 .border_color(gpui::transparent_black())
                 .bg(bg)
-                .text_size(crate::typography::text_xs())
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(fg)
                 .map(|el| match notes {
                     // Hoverable so the pointer can reach the card's link. It
                     // sits at the window's bottom edge, so gpui flips it up.
@@ -11349,7 +11354,6 @@ impl Shell {
                         )
                 })
                 .child(lead)
-                .child(label)
                 .into_any_element(),
         )
     }
@@ -11654,8 +11658,8 @@ impl Shell {
             .into_any_element()
     }
 
-    /// Keep update status above the account and settings controls so it cannot
-    /// squeeze their contents out of the sidebar at narrow widths.
+    /// Update status is an icon button beside settings, so it never adds a row
+    /// or squeezes the account and usage controls.
     fn render_sidebar_footer(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
         self.update_sidebar_controls(cx);
         let update = self.render_update_pill(theme, cx);
@@ -11670,27 +11674,18 @@ impl Shell {
     ) -> AnyElement {
         div()
             .w_full()
+            .min_w_0()
             .flex()
-            .flex_col()
-            .gap(px(6.))
-            .when_some(update, |el, update| {
-                el.child(div().w_full().flex().justify_end().child(update))
-            })
+            .items_center()
+            .gap(px(2.))
             .child(
                 div()
-                    .w_full()
+                    .flex_1()
                     .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .child(self.sidebar_controls.clone()),
-                    )
-                    .child(settings),
+                    .child(self.sidebar_controls.clone()),
             )
+            .when_some(update, |el, update| el.child(update))
+            .child(settings)
             .into_any_element()
     }
 
@@ -18309,10 +18304,9 @@ mod exit_regressions {
                         div()
                             .id("fixture-update")
                             .debug_selector(|| "fixture-update".into())
-                            .h(px(22.))
-                            .px(px(8.))
+                            .aria_label(label)
+                            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
                             .flex_none()
-                            .child(label)
                             .into_any_element()
                     });
                     let settings = shell.render_settings_trigger(&Theme::default(), cx);
@@ -18394,9 +18388,9 @@ mod exit_regressions {
                     }
                     if status.is_some() {
                         let update = cx.debug_bounds("fixture-update").unwrap();
-                        assert!(update.bottom() <= agents.top());
-                        assert!(update.left() >= footer.left());
-                        assert!(update.right() <= footer.right());
+                        assert!(agents.right() <= update.left());
+                        assert!(update.right() <= settings.left());
+                        assert_eq!(update.top(), settings.top(), "one footer row");
                     }
                 }
             }
