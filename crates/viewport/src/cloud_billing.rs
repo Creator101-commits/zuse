@@ -456,7 +456,9 @@ impl WorkspaceView {
             // Account/repository/environment setup is available before compute
             // entitlement. Allocation keeps its independent server-side gate.
             body = body.child(self.repository_panel.clone());
-            body = body.child(self.slack_panel.clone());
+            if crate::slack_settings::SHOW_SLACK_SETTINGS {
+                body = body.child(self.slack_panel.clone());
+            }
         } else {
             if storage {
                 body = body.child(self.repository_panel.clone());

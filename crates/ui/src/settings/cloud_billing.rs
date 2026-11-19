@@ -1074,9 +1074,12 @@ impl Render for CloudBillingPage {
                     .child(self.repository_panel.clone())
                     // Slack connections start cloud tasks, so they sit with the
                     // computer overview, once first-run setup is out of the way.
-                    .when(self.view == CloudView::Overview && !onboarding, |d| {
-                        d.child(div().mt(px(24.)).child(self.slack_panel.clone()))
-                    })
+                    .when(
+                        zuse_viewport::slack_settings::SHOW_SLACK_SETTINGS
+                            && self.view == CloudView::Overview
+                            && !onboarding,
+                        |d| d.child(div().mt(px(24.)).child(self.slack_panel.clone())),
+                    )
             }
         };
         body = body.child(content.mt(px(if self.view == CloudView::Compute {
