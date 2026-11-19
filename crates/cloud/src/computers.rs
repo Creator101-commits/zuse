@@ -105,7 +105,11 @@ mod plan_size_tests {
         let providers = vec![
             provider(ProviderId::Boat, &["small", "default", "large"], None),
             provider(ProviderId::Boxd, &["default", "large"], None),
-            provider(ProviderId::E2b, &[], Some("E2B is not enabled for this account.")),
+            provider(
+                ProviderId::E2b,
+                &[],
+                Some("E2B is not enabled for this account."),
+            ),
         ];
         assert_eq!(default_provider(&providers), Some(ProviderId::Boxd));
         let sizes = computer_sizes(&providers, Some(PlanId::Cloud));

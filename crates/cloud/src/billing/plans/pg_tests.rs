@@ -103,7 +103,15 @@ async fn period(pool: &PgPool, owner: &str, at: i64) -> Value {
 }
 /// One settled usage segment: `awake` running time on a machine of `memory`
 /// bytes that cost the provider `cost`.
-async fn settle(pool: &PgPool, owner: &str, entry: &str, at: i64, awake: Option<i64>, cost: i64, memory: u64) {
+async fn settle(
+    pool: &PgPool,
+    owner: &str,
+    entry: &str,
+    at: i64,
+    awake: Option<i64>,
+    cost: i64,
+    memory: u64,
+) {
     let p = period(pool, owner, at).await;
     let resource = json!({"accountId":owner,"kind":"workspace","id":format!("ws-{owner}"),"createdAt":0,"config":{}});
     let mut tx = pool.begin().await.unwrap();
@@ -164,13 +172,28 @@ async fn machine_minute_plans_trials_metering_and_holds() {
     let trial_end = t0 + 7 * DAY;
 
     // A $1 trial grants 8,400 machine minutes on Cloud machines, no pay as you go.
-    project(&control, &sub("user-trial", "sub-trial", plans::CLOUD_OFFER, true, t0, trial_end), t0).await;
+    project(
+        &control,
+        &sub(
+            "user-trial",
+            "sub-trial",
+            plans::CLOUD_OFFER,
+            true,
+            t0,
+            trial_end,
+        ),
+        t0,
+    )
+    .await;
     let p = period(&pool, "user-trial", t0 + HOUR).await;
     assert_eq!(p["plan_id"], "cloud-trial");
     assert_eq!(p["included_provider_cost_micros"], 5_000_000);
     assert_eq!(p["overage_cap_micros"], 0);
     assert_eq!(trial_state(&pool, "sub-trial").await, "active");
-    let summary = store.billing_summary("user-trial", t0 + HOUR).await.unwrap();
+    let summary = store
+        .billing_summary("user-trial", t0 + HOUR)
+        .await
+        .unwrap();
     let plan = summary.plan.clone().unwrap();
     assert!(plan.trial);
     assert_eq!(plan.trial_ends_at, Some(trial_end));
@@ -180,21 +203,40 @@ async fn machine_minute_plans_trials_metering_and_holds() {
     assert!(size_allowed(Some(plan.plan_id), "large").is_err());
 
     // Once per card: another account with the same card gets no allowance.
-    let mut copycat = sub("user-copycat", "sub-copycat", plans::CLOUD_OFFER, true, t0, trial_end);
+    let mut copycat = sub(
+        "user-copycat",
+        "sub-copycat",
+        plans::CLOUD_OFFER,
+        true,
+        t0,
+        trial_end,
+    );
     copycat.card_fingerprint = Some("fp-user-trial".into());
     project(&control, &copycat, t0).await;
     assert_eq!(trial_state(&pool, "sub-copycat").await, "rejected");
     assert_eq!(
-        capacity(&pool, "user-copycat", t0 + HOUR).await.unwrap_err(),
+        capacity(&pool, "user-copycat", t0 + HOUR)
+            .await
+            .unwrap_err(),
         "cloud_usage_hold"
     );
-    let held = store.billing_summary("user-copycat", t0 + HOUR).await.unwrap();
+    let held = store
+        .billing_summary("user-copycat", t0 + HOUR)
+        .await
+        .unwrap();
     assert_eq!(
         held.plan.unwrap().hold_reason,
         Some(HoldReason::TrialUnavailable)
     );
     // Once per account: a second trial subscription is rejected too.
-    let mut again = sub("user-trial", "sub-trial-2", plans::CLOUD_OFFER, true, t0 + DAY, trial_end + DAY);
+    let mut again = sub(
+        "user-trial",
+        "sub-trial-2",
+        plans::CLOUD_OFFER,
+        true,
+        t0 + DAY,
+        trial_end + DAY,
+    );
     again.card_fingerprint = Some("fp-other-card".into());
     let mut tx = pool.begin().await.unwrap();
     control
@@ -206,29 +248,64 @@ async fn machine_minute_plans_trials_metering_and_holds() {
     assert!(rejected);
 
     // Asleep time is free; provider cost is still recorded for margin.
-    settle(&pool, "user-trial", "asleep", t0 + 2 * HOUR, Some(0), 400_000, 16 * GIB).await;
+    settle(
+        &pool,
+        "user-trial",
+        "asleep",
+        t0 + 2 * HOUR,
+        Some(0),
+        400_000,
+        16 * GIB,
+    )
+    .await;
     let used: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(amount_micros),0)::bigint FROM api_cloud_billing_ledger WHERE period_id=$1 AND kind='machine-time'").bind(p["period_id"].as_str()).fetch_one(&pool).await.unwrap();
     assert_eq!(used, 0);
     let cost: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(amount_micros),0)::bigint FROM api_cloud_billing_ledger WHERE period_id=$1 AND kind='provider-cost'").bind(p["period_id"].as_str()).fetch_one(&pool).await.unwrap();
     assert_eq!(cost, 400_000);
     // 35 awake hours on 4 vCPU / 16 GB use the whole trial: computers pause.
-    settle(&pool, "user-trial", "awake-35h", t0 + 3 * HOUR, Some(35 * HOUR), 9_000_000, 16 * GIB).await;
+    settle(
+        &pool,
+        "user-trial",
+        "awake-35h",
+        t0 + 3 * HOUR,
+        Some(35 * HOUR),
+        9_000_000,
+        16 * GIB,
+    )
+    .await;
     let p = period(&pool, "user-trial", t0 + 4 * HOUR).await;
     assert_eq!(p["usage_hold"], true);
     assert_eq!(p["hold_reason"], "trial-allowance-used");
     assert_eq!(
-        capacity(&pool, "user-trial", t0 + 4 * HOUR).await.unwrap_err(),
+        capacity(&pool, "user-trial", t0 + 4 * HOUR)
+            .await
+            .unwrap_err(),
         "cloud_usage_hold"
     );
-    let trial = store.billing_summary("user-trial", t0 + 4 * HOUR).await.unwrap().plan.unwrap();
+    let trial = store
+        .billing_summary("user-trial", t0 + 4 * HOUR)
+        .await
+        .unwrap()
+        .plan
+        .unwrap();
     assert_eq!(trial.used_machine_minutes, 8_400);
     assert_eq!(trial.remaining_machine_minutes, 0);
-    assert_eq!(trial.extra_charge_micros, 0, "no pay as you go during the trial");
+    assert_eq!(
+        trial.extra_charge_micros, 0,
+        "no pay as you go during the trial"
+    );
     let charged: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(amount_micros),0)::bigint FROM api_cloud_billing_ledger WHERE kind='overage-charge'").fetch_one(&pool).await.unwrap();
     assert_eq!(charged, 0);
 
     // Day 7: the subscription renews as Cloud with 33,600 machine minutes.
-    let mut renewed = sub("user-trial", "sub-trial", plans::CLOUD_OFFER, false, trial_end, trial_end + 30 * DAY);
+    let mut renewed = sub(
+        "user-trial",
+        "sub-trial",
+        plans::CLOUD_OFFER,
+        false,
+        trial_end,
+        trial_end + 30 * DAY,
+    );
     renewed.status = "active".into();
     project(&control, &renewed, trial_end).await;
     assert_eq!(trial_state(&pool, "sub-trial").await, "converted");
@@ -237,21 +314,71 @@ async fn machine_minute_plans_trials_metering_and_holds() {
     assert_eq!(cloud["included_provider_cost_micros"], 20_000_000);
     assert_eq!(cloud["overage_cap_micros"], 25_000_000);
     assert_eq!(cloud["usage_hold"], false);
-    assert!(capacity(&pool, "user-trial", trial_end + HOUR).await.is_ok());
+    assert!(
+        capacity(&pool, "user-trial", trial_end + HOUR)
+            .await
+            .is_ok()
+    );
 
     // "Start Cloud now" ends the trial early: the trial period ends where the
     // paid period starts, so periods never overlap.
-    project(&control, &sub("user-early", "sub-early", plans::CLOUD_OFFER, true, t0, trial_end), t0).await;
+    project(
+        &control,
+        &sub(
+            "user-early",
+            "sub-early",
+            plans::CLOUD_OFFER,
+            true,
+            t0,
+            trial_end,
+        ),
+        t0,
+    )
+    .await;
     let now = t0 + DAY;
-    project(&control, &sub("user-early", "sub-early", plans::CLOUD_OFFER, false, now, now + 30 * DAY), now).await;
+    project(
+        &control,
+        &sub(
+            "user-early",
+            "sub-early",
+            plans::CLOUD_OFFER,
+            false,
+            now,
+            now + 30 * DAY,
+        ),
+        now,
+    )
+    .await;
     let trial_period: i64 = sqlx::query_scalar("SELECT period_end FROM api_cloud_billing_periods WHERE account_id='user-early' AND period_start=$1").bind(t0).fetch_one(&pool).await.unwrap();
     assert_eq!(trial_period, now);
-    assert_eq!(period(&pool, "user-early", now + HOUR).await["plan_id"], "cloud");
+    assert_eq!(
+        period(&pool, "user-early", now + HOUR).await["plan_id"],
+        "cloud"
+    );
     assert_eq!(trial_state(&pool, "sub-early").await, "converted");
 
     // Cancelled during the trial: no paid period, the trial just ends.
-    project(&control, &sub("user-cancel", "sub-cancel", plans::CLOUD_OFFER, true, t0, trial_end), t0).await;
-    let mut cancelled = sub("user-cancel", "sub-cancel", plans::CLOUD_OFFER, false, t0, t0 + DAY);
+    project(
+        &control,
+        &sub(
+            "user-cancel",
+            "sub-cancel",
+            plans::CLOUD_OFFER,
+            true,
+            t0,
+            trial_end,
+        ),
+        t0,
+    )
+    .await;
+    let mut cancelled = sub(
+        "user-cancel",
+        "sub-cancel",
+        plans::CLOUD_OFFER,
+        false,
+        t0,
+        t0 + DAY,
+    );
     cancelled.status = "ended".into();
     project(&control, &cancelled, t0 + 2 * DAY).await;
     assert_eq!(trial_state(&pool, "sub-cancel").await, "ended");
@@ -263,42 +390,110 @@ async fn machine_minute_plans_trials_metering_and_holds() {
 
     // Cloud: past the allowance, extra machine minutes bill at the same rate
     // (no markup) up to the cap, then computers pause.
-    project(&control, &sub("user-cloud", "sub-cloud", plans::CLOUD_OFFER, false, t0, t0 + 30 * DAY), t0).await;
-    settle(&pool, "user-cloud", "cloud-150h", t0 + HOUR, Some(152 * HOUR), 30_000_000, 16 * GIB).await;
-    let s = store.billing_summary("user-cloud", t0 + 2 * HOUR).await.unwrap();
+    project(
+        &control,
+        &sub(
+            "user-cloud",
+            "sub-cloud",
+            plans::CLOUD_OFFER,
+            false,
+            t0,
+            t0 + 30 * DAY,
+        ),
+        t0,
+    )
+    .await;
+    settle(
+        &pool,
+        "user-cloud",
+        "cloud-150h",
+        t0 + HOUR,
+        Some(152 * HOUR),
+        30_000_000,
+        16 * GIB,
+    )
+    .await;
+    let s = store
+        .billing_summary("user-cloud", t0 + 2 * HOUR)
+        .await
+        .unwrap();
     let plan = s.plan.clone().unwrap();
     assert_eq!(plan.used_machine_minutes, 36_480);
     assert_eq!(plan.extra_machine_minutes, 2_880);
     assert_eq!(plan.extra_charge_micros, 1_714_286);
     assert_eq!(s.markup_basis_points, 0);
-    assert_eq!(s.provider_cost_micros, 21_714_286, "list value, never provider cost");
+    assert_eq!(
+        s.provider_cost_micros, 21_714_286,
+        "list value, never provider cost"
+    );
     let exported: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(amount_cents),0)::bigint FROM api_cloud_billing_outbox WHERE account_id='user-cloud'").fetch_one(&pool).await.unwrap();
-    assert_eq!(exported, 171, "pay as you go is exported in cents to the meter");
+    assert_eq!(
+        exported, 171,
+        "pay as you go is exported in cents to the meter"
+    );
     // Lower the cap to just above what is charged, then use one more hour.
     store
-        .billing_set_cap("user-cloud", BillingCapRequest { overage_cap_micros: 1_800_000, idempotency_key: "cap-1".into() }, t0 + 2 * HOUR)
+        .billing_set_cap(
+            "user-cloud",
+            BillingCapRequest {
+                overage_cap_micros: 1_800_000,
+                idempotency_key: "cap-1".into(),
+            },
+            t0 + 2 * HOUR,
+        )
         .await
         .unwrap();
-    settle(&pool, "user-cloud", "cloud-1h", t0 + 3 * HOUR, Some(HOUR), 200_000, 16 * GIB).await;
-    let held = store.billing_summary("user-cloud", t0 + 4 * HOUR).await.unwrap();
+    settle(
+        &pool,
+        "user-cloud",
+        "cloud-1h",
+        t0 + 3 * HOUR,
+        Some(HOUR),
+        200_000,
+        16 * GIB,
+    )
+    .await;
+    let held = store
+        .billing_summary("user-cloud", t0 + 4 * HOUR)
+        .await
+        .unwrap();
     let plan = held.plan.clone().unwrap();
     assert!(plan.usage_hold);
     assert_eq!(plan.hold_reason, Some(HoldReason::CapReached));
-    assert_eq!(plan.extra_charge_micros, 1_800_000, "never charged past the cap");
     assert_eq!(
-        capacity(&pool, "user-cloud", t0 + 4 * HOUR).await.unwrap_err(),
+        plan.extra_charge_micros, 1_800_000,
+        "never charged past the cap"
+    );
+    assert_eq!(
+        capacity(&pool, "user-cloud", t0 + 4 * HOUR)
+            .await
+            .unwrap_err(),
         "cloud_usage_hold"
     );
     // Raising the cap resumes.
     store
-        .billing_set_cap("user-cloud", BillingCapRequest { overage_cap_micros: 25_000_000, idempotency_key: "cap-2".into() }, t0 + 4 * HOUR)
+        .billing_set_cap(
+            "user-cloud",
+            BillingCapRequest {
+                overage_cap_micros: 25_000_000,
+                idempotency_key: "cap-2".into(),
+            },
+            t0 + 4 * HOUR,
+        )
         .await
         .unwrap();
     assert!(capacity(&pool, "user-cloud", t0 + 4 * HOUR).await.is_ok());
     // Nothing a person sees names the provider.
-    let usage = store.billing_usage("user-cloud", None, 50, t0 + 4 * HOUR).await.unwrap();
+    let usage = store
+        .billing_usage("user-cloud", None, 50, t0 + 4 * HOUR)
+        .await
+        .unwrap();
     assert!(usage.items.iter().all(|i| i.provider == "cloud"));
-    let item = usage.items.iter().find(|i| i.entry_id == "cloud-150h").unwrap();
+    let item = usage
+        .items
+        .iter()
+        .find(|i| i.entry_id == "cloud-150h")
+        .unwrap();
     assert_eq!(item.machine_rate, Some(4));
     assert_eq!(item.machine_minutes, Some(36_480));
     for text in [
@@ -309,22 +504,75 @@ async fn machine_minute_plans_trials_metering_and_holds() {
     }
 
     // Cloud Max: larger machines use machine minutes twice as fast.
-    project(&control, &sub("user-max", "sub-max", plans::CLOUD_MAX_OFFER, false, t0, t0 + 30 * DAY), t0).await;
-    settle(&pool, "user-max", "max-1h", t0 + HOUR, Some(HOUR), 300_000, 32 * GIB).await;
-    let max = store.billing_summary("user-max", t0 + 2 * HOUR).await.unwrap().plan.unwrap();
+    project(
+        &control,
+        &sub(
+            "user-max",
+            "sub-max",
+            plans::CLOUD_MAX_OFFER,
+            false,
+            t0,
+            t0 + 30 * DAY,
+        ),
+        t0,
+    )
+    .await;
+    settle(
+        &pool,
+        "user-max",
+        "max-1h",
+        t0 + HOUR,
+        Some(HOUR),
+        300_000,
+        32 * GIB,
+    )
+    .await;
+    let max = store
+        .billing_summary("user-max", t0 + 2 * HOUR)
+        .await
+        .unwrap()
+        .plan
+        .unwrap();
     assert_eq!(max.included_machine_minutes, 84_000);
     assert_eq!(max.used_machine_minutes, 480);
     assert!(size_allowed(Some(max.plan_id), "large").is_ok());
-    assert_eq!(current_plan(&pool, "user-max", t0 + HOUR).await.unwrap(), Some(PlanId::CloudMax));
+    assert_eq!(
+        current_plan(&pool, "user-max", t0 + HOUR).await.unwrap(),
+        Some(PlanId::CloudMax)
+    );
 
     // The original $40 subscription gets Cloud's allowance; a period already
     // on original terms keeps them until it renews.
     sqlx::query("INSERT INTO api_cloud_billing_periods(period_id,account_id,provider_subscription_id,billing_provider,status,currency,period_start,period_end,base_price_micros,included_provider_cost_micros,markup_basis_points,price_catalog_version,overage_cap_micros,created_at,updated_at) VALUES('legacy-now','user-max','sub-legacy','stripe','active','USD',$1,$2,40000000,35000000,500,'provider-compute-v1',25000000,0,0)").bind(t0 + 40 * DAY).bind(t0 + 70 * DAY).execute(&pool).await.unwrap();
-    project(&control, &sub("user-max", "sub-legacy", plans::LEGACY_OFFER, false, t0 + 40 * DAY, t0 + 70 * DAY), t0 + 40 * DAY).await;
+    project(
+        &control,
+        &sub(
+            "user-max",
+            "sub-legacy",
+            plans::LEGACY_OFFER,
+            false,
+            t0 + 40 * DAY,
+            t0 + 70 * DAY,
+        ),
+        t0 + 40 * DAY,
+    )
+    .await;
     let kept = period(&pool, "user-max", t0 + 41 * DAY).await;
     assert_eq!(kept["price_catalog_version"], "provider-compute-v1");
     assert!(plan_usage(&kept, 0, 0).is_none());
-    project(&control, &sub("user-max", "sub-legacy", plans::LEGACY_OFFER, false, t0 + 70 * DAY, t0 + 100 * DAY), t0 + 70 * DAY).await;
+    project(
+        &control,
+        &sub(
+            "user-max",
+            "sub-legacy",
+            plans::LEGACY_OFFER,
+            false,
+            t0 + 70 * DAY,
+            t0 + 100 * DAY,
+        ),
+        t0 + 70 * DAY,
+    )
+    .await;
     let legacy = period(&pool, "user-max", t0 + 71 * DAY).await;
     assert_eq!(legacy["plan_id"], "legacy");
     assert_eq!(legacy["base_price_micros"], 40_000_000);
