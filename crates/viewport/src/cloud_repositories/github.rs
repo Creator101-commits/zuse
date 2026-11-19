@@ -1,5 +1,8 @@
 //! One pending GitHub transaction, shared by native and browser settings.
 use super::*;
+/// The desktop app receives `zuse://github/confirm` links from the OAuth
+/// browser; the browser-hosted settings page cannot, so it keeps typing.
+const CODE_ARRIVES_BY_LINK: bool = !cfg!(target_arch = "wasm32");
 impl RepositoryPanel {
     pub(super) fn github_started(&mut self, data: Value, cx: &mut Context<Self>) {
         if let Some(id) = data["operationId"].as_str() {
@@ -73,6 +76,10 @@ impl RepositoryPanel {
     /// Sends the code the OAuth browser displayed. Only this app's session can
     /// finish linking a GitHub identity that a browser signed in to.
     fn github_confirm(&mut self, cx: &mut Context<Self>) {
+        let code = self.github_code.read(cx).value(cx).trim().to_owned();
+        self.github_submit_code(code, cx);
+    }
+    fn github_submit_code(&mut self, code: String, cx: &mut Context<Self>) {
         let Some(id) = self
             .github_operation
             .as_ref()
@@ -84,7 +91,6 @@ impl RepositoryPanel {
         if self.pending.values().any(|p| p.kind == "github-confirm") {
             return;
         }
-        let code = self.github_code.read(cx).value(cx).trim().to_owned();
         if code.is_empty() {
             self.error = Some("Enter the code shown in your browser.".into());
             cx.notify();
@@ -98,6 +104,37 @@ impl RepositoryPanel {
             cx,
         );
         cx.notify();
+    }
+    /// Submits the code the OAuth browser handed back through
+    /// `zuse://github/confirm`. Only the operation this panel started, for
+    /// the bound account, and is still waiting on is confirmed. Any other id,
+    /// such as a connect link someone else started, is ignored: that is what
+    /// keeps the code from linking a stranger's GitHub account. Returns
+    /// whether the code was submitted.
+    pub fn confirm_github_from_link(
+        &mut self,
+        operation_id: &str,
+        code: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(operation) = &self.github_operation else {
+            return false;
+        };
+        if operation_id.is_empty() || operation["operationId"].as_str() != Some(operation_id) {
+            return false;
+        }
+        if matches!(
+            operation["state"].as_str(),
+            Some("expired" | "cancelled" | "failed" | "complete")
+        ) {
+            return false;
+        }
+        if self.pending.values().any(|p| p.kind == "github-confirm") {
+            return false;
+        }
+        self.github_poll = None;
+        self.github_submit_code(code.to_owned(), cx);
+        self.pending.values().any(|p| p.kind == "github-confirm")
     }
     fn schedule_github_poll(&mut self, cx: &mut Context<Self>) {
         if self.account_feed_live {
@@ -241,9 +278,15 @@ impl RepositoryPanel {
             let login = operation["user"]["login"]
                 .as_str()
                 .unwrap_or("a GitHub account");
-            format!(
-                "Your browser signed in as {login}. Enter the code shown there to connect it to this account. If you did not just sign in to GitHub yourself, cancel."
-            )
+            if CODE_ARRIVES_BY_LINK {
+                format!(
+                    "Your browser signed in as {login}. Click Open Zuse there and Zuse finishes connecting. If you did not just sign in to GitHub yourself, cancel."
+                )
+            } else {
+                format!(
+                    "Your browser signed in as {login}. Enter the code shown there to connect it to this account. If you did not just sign in to GitHub yourself, cancel."
+                )
+            }
         } else if state == "choosing" {
             operation["user"]["login"]
                 .as_str()
@@ -258,10 +301,23 @@ impl RepositoryPanel {
         let mut body = column().child(cs::setting_row(true, title, description, None));
         if state == "confirming" {
             let ready = !self.github_code.read(cx).value(cx).trim().is_empty();
+            // On the desktop this is a fallback: the browser hands the code
+            // over through the Zuse app link.
+            let (title, description) = if CODE_ARRIVES_BY_LINK {
+                (
+                    "Zuse didn't open?",
+                    "Enter the code shown in the browser tab instead.",
+                )
+            } else {
+                (
+                    "Confirmation code",
+                    "Shown in the browser tab where you signed in to GitHub.",
+                )
+            };
             body = body.child(cs::setting_row_content(
                 false,
-                "Confirmation code",
-                "Shown in the browser tab where you signed in to GitHub.",
+                title,
+                description,
                 None,
                 row()
                     .gap(px(8.))
@@ -272,8 +328,14 @@ impl RepositoryPanel {
                             .child(self.github_code.clone()),
                     )
                     .child(
-                        cs::button("github-confirm-code", "Confirm", true, busy || !ready, busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.github_confirm(cx))),
+                        cs::button(
+                            "github-confirm-code",
+                            "Confirm",
+                            !CODE_ARRIVES_BY_LINK,
+                            busy || !ready,
+                            busy,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.github_confirm(cx))),
                     ),
             ));
         }
@@ -381,5 +443,92 @@ impl RepositoryPanel {
                 })),
             );
         Some(body.child(cs::setting_row_content(false, "", "", None, controls)))
+    }
+}
+#[cfg(test)]
+mod confirm_link_tests {
+    use super::*;
+    use std::prelude::v1::test;
+    fn waiting(panel: &mut RepositoryPanel, state: &str, cx: &mut Context<RepositoryPanel>) {
+        panel.bind_owner(Some(("account".into(), None)), cx);
+        panel.github_operation = Some(json!({"operationId":"op-mine","state":state}));
+    }
+    fn confirms(panel: &RepositoryPanel) -> usize {
+        panel
+            .pending
+            .values()
+            .filter(|p| p.kind == "github-confirm")
+            .count()
+    }
+    #[gpui::test]
+    fn only_the_operation_this_app_started_is_confirmed(cx: &mut TestAppContext) {
+        cx.update(crate::initialize);
+        let window = cx.add_window(RepositoryPanel::new);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::<Value>::new()));
+        let seen = sent.clone();
+        let panel = window.root(cx).unwrap();
+        cx.update(|cx| {
+            cx.subscribe(&panel, move |_, event: &Request, _| {
+                if let Request::Call { params, .. } = event {
+                    seen.borrow_mut().push(params.clone());
+                }
+            })
+            .detach()
+        });
+        window
+            .update(cx, |panel, _, cx| {
+                // Nothing pending: a link someone else started is ignored.
+                assert!(!panel.confirm_github_from_link("op-mine", "ABCD-EFGH", cx));
+                waiting(panel, "confirming", cx);
+                assert!(!panel.confirm_github_from_link("op-theirs", "ABCD-EFGH", cx));
+                assert!(!panel.confirm_github_from_link("", "ABCD-EFGH", cx));
+                assert_eq!(confirms(panel), 0);
+                // Its own operation is confirmed once, with no clicks.
+                assert!(panel.confirm_github_from_link("op-mine", "ABCDEFGH", cx));
+                assert!(!panel.confirm_github_from_link("op-mine", "ABCDEFGH", cx));
+                assert_eq!(confirms(panel), 1);
+            })
+            .unwrap();
+        {
+            let sent = sent.borrow();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0]["action"], "confirm");
+            assert_eq!(sent[0]["operationId"], "op-mine");
+            assert_eq!(sent[0]["confirmationCode"], "ABCDEFGH");
+            assert_eq!(sent[0]["expectedAccountId"], "account");
+        }
+        window
+            .update(cx, |panel, _, cx| {
+                let id = *panel.pending.keys().next().unwrap();
+                panel.receive(
+                    id,
+                    Ok(json!({"accountId":"account","organizationId":null,"data":{}})),
+                    cx,
+                );
+                assert!(panel.github_operation.is_none());
+                assert_eq!(
+                    panel.notice.as_deref(),
+                    Some("GitHub connected. Choose your repositories below.")
+                );
+            })
+            .unwrap();
+    }
+    #[gpui::test]
+    fn finished_or_reassigned_operations_ignore_the_link(cx: &mut TestAppContext) {
+        cx.update(crate::initialize);
+        let window = cx.add_window(RepositoryPanel::new);
+        window
+            .update(cx, |panel, _, cx| {
+                for state in ["expired", "cancelled", "failed"] {
+                    waiting(panel, state, cx);
+                    assert!(!panel.confirm_github_from_link("op-mine", "ABCDEFGH", cx));
+                }
+                // Switching accounts forgets the operation, so its link is ignored.
+                waiting(panel, "confirming", cx);
+                panel.bind_owner(Some(("other".into(), None)), cx);
+                assert!(!panel.confirm_github_from_link("op-mine", "ABCDEFGH", cx));
+                assert_eq!(confirms(panel), 0);
+            })
+            .unwrap();
     }
 }

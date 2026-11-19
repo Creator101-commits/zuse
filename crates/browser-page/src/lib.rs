@@ -144,6 +144,11 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 }
 
 fn document(title: &str, styles: &str, body: &str, forms: bool) -> String {
+    document_with_head(title, styles, body, forms, "")
+}
+
+/// [`document`] with extra `<head>` markup the caller already escaped.
+fn document_with_head(title: &str, styles: &str, body: &str, forms: bool, head: &str) -> String {
     let submit = if forms {
         format!("<script>{SUBMIT_JS}</script>")
     } else {
@@ -152,7 +157,7 @@ fn document(title: &str, styles: &str, body: &str, forms: bool) -> String {
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>{} · Zuse</title><style>{BASE_CSS}{styles}</style></head>\
+         <title>{} · Zuse</title>{head}<style>{BASE_CSS}{styles}</style></head>\
          <body>{body}<script>{DITHER_JS}</script>{submit}</body></html>",
         escape(title)
     )
@@ -499,6 +504,25 @@ fn action_html(action: &Action<'_>, class: &str, aria: Option<&str>) -> String {
 }
 
 pub fn card(card: &Card<'_>) -> String {
+    card_with_head(card, "")
+}
+
+/// A [`card`] that also asks the browser to open a `zuse://` link as soon as
+/// it loads. A meta refresh needs no script, so the policy stays as strict.
+/// Put the same link in the card's actions for browsers that want a click.
+/// Anything other than a `zuse://` link renders the plain card.
+pub fn card_opening_zuse(card: &Card<'_>, link: &str) -> String {
+    if !link.starts_with("zuse://") {
+        return self::card(card);
+    }
+    let refresh = format!(
+        "<meta http-equiv=\"refresh\" content=\"0;url={}\">",
+        escape(link)
+    );
+    card_with_head(card, &refresh)
+}
+
+fn card_with_head(card: &Card<'_>, head: &str) -> String {
     let forms = card
         .rows
         .iter()
@@ -603,7 +627,7 @@ pub fn card(card: &Card<'_>) -> String {
         title = escape(card.title),
         description = escape(card.description),
     );
-    document(card.title, CARD_CSS, &body, forms)
+    document_with_head(card.title, CARD_CSS, &body, forms, head)
 }
 
 /// A plain Zuse notice for stray or invalid requests to a callback listener.
@@ -664,6 +688,28 @@ mod tests {
         assert!(page.contains(&format!("<script>{SUBMIT_JS}</script>")));
         assert!(page.contains("aria-label=\"Use team\""));
         assert!(!sign_in(Outcome::Success, None).contains(SUBMIT_JS));
+    }
+
+    #[test]
+    fn opening_zuse_adds_only_a_refresh_and_keeps_the_policy() {
+        let before = content_security_policy().to_owned();
+        let notice = || Card::notice("GitHub", "Confirm", Tone::Waiting, "Confirm", "d");
+        let page = card_opening_zuse(&notice(), "zuse://github/confirm?operation=a&code=B");
+        assert!(page.contains(
+            "<meta http-equiv=\"refresh\" content=\"0;url=zuse://github/confirm?operation=a&amp;code=B\">"
+        ));
+        // No new script: the hashed backdrop script is still the only one.
+        assert_eq!(page.matches("<script>").count(), 1);
+        assert_eq!(content_security_policy(), before);
+        let scripts = before
+            .split("; ")
+            .find(|directive| directive.starts_with("script-src"))
+            .unwrap();
+        assert!(!scripts.contains("unsafe"));
+        // Only Zuse links are opened automatically.
+        let other = card_opening_zuse(&notice(), "https://example.com");
+        assert!(!other.contains("http-equiv=\"refresh\""));
+        assert_eq!(other, card(&notice()));
     }
 
     #[test]

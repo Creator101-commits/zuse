@@ -1074,10 +1074,15 @@ mod database {
         // A fresh GitHub identity is not linked by the browser alone: whoever
         // opened the link sees a code and the initiating Zuse account's name.
         assert!(!html.contains("GitHub connected"));
-        assert!(html.contains("Enter this code in Zuse"));
+        assert!(html.contains("Finish in Zuse"));
         assert!(html.contains("actor-one@example.test"));
         let code = browser_code(&authority, &pool, &id).await;
         assert!(html.contains(&format!("{}-{}", &code[..4], &code[4..])));
+        // The code goes back to the initiating app by its own link; only that
+        // app knows this operation id.
+        let link = confirmation::app_link(&id, &code).replace('&', "&amp;");
+        assert!(html.contains(&format!("content=\"0;url={link}\"")));
+        assert!(html.contains(&format!("href=\"{link}\"")));
         let status = authority.operation(&access, &id).await.unwrap();
         assert_eq!(status["state"], "confirming");
         assert_eq!(status["identityOnly"], false);

@@ -3,13 +3,20 @@
 //! The browser that completed GitHub OAuth proves who the GitHub user is, but
 //! anyone can open a connect link that someone else started. The app holding
 //! the initiating bearer proves which Zuse account asked, but cannot prove that
-//! its user is the one in the browser. So after the browser chooses, it shows a
-//! one-time code and nothing is linked until the initiating app submits it. A
-//! visitor who opened another person's link would have to read that code out
-//! to them, past a page that names the Zuse account it would connect to.
+//! its user is the one in the browser. So after the browser chooses, it gets a
+//! one-time code and nothing is linked until the initiating app submits it.
+//!
+//! The page hands the code to the Zuse app on the same computer through
+//! [`app_link`] (`zuse://github/confirm?operation=…&code=…`). That app submits
+//! it only when the operation id is the one it started and is still waiting
+//! on, and the server only accepts it from the initiating account. A visitor
+//! who opened another person's connect link lands in their own app, which never
+//! started that operation and ignores the link, so they would still have to
+//! read the code out to the other person, past a page that names the Zuse
+//! account it would connect to. The code stays on the page as a typed fallback.
 use super::*;
 use subtle::ConstantTimeEq;
-use zuse_browser_page::{Card, Tone};
+use zuse_browser_page::{Action, Card, Tone};
 
 /// Code alphabet without look-alike characters (no 0/O, 1/I/L, U).
 const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTVWXYZ23456789";
@@ -68,7 +75,18 @@ fn display(code: &str) -> String {
     format!("{head}-{tail}")
 }
 
+/// The link that hands the code to the Zuse app that started `operation_id`.
+pub(super) fn app_link(operation_id: &str, code: &str) -> String {
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+    format!(
+        "zuse://github/confirm?operation={}&code={}",
+        utf8_percent_encode(operation_id, NON_ALPHANUMERIC),
+        utf8_percent_encode(code, NON_ALPHANUMERIC),
+    )
+}
+
 pub(super) fn page(
+    operation_id: &str,
     code: &str,
     github_login: &str,
     account: &str,
@@ -83,20 +101,30 @@ pub(super) fn page(
     if let Some(installation) = installation {
         facts.push(("Installation", installation.to_string()));
     }
-    facts.push(("Confirmation code", display(code)));
-    zuse_browser_page::card(&Card {
-        facts,
-        hint: Some(
-            "Only enter this code in your own Zuse app. Never share it: anyone with this code can connect your GitHub account to their Zuse account. If you did not start this from your own Zuse app, close this tab. Nothing has been connected.",
-        ),
-        ..Card::notice(
-            "GitHub",
-            "Confirm in Zuse",
-            Tone::Waiting,
-            "Enter this code in Zuse",
-            "To finish connecting, type the confirmation code below into the Zuse app that started this connection. Check that the Zuse account shown is yours.",
-        )
-    })
+    let shown = display(code);
+    facts.push(("If Zuse didn't open, enter this code", shown));
+    let link = app_link(operation_id, code);
+    zuse_browser_page::card_opening_zuse(
+        &Card {
+            facts,
+            actions: vec![Action::Link {
+                label: "Open Zuse",
+                href: &link,
+                external: false,
+            }],
+            hint: Some(
+                "Never share this code: anyone with it can connect your GitHub account to their Zuse account. If you did not start this from your own Zuse app, close this tab. Nothing has been connected.",
+            ),
+            ..Card::notice(
+                "GitHub",
+                "Confirm in Zuse",
+                Tone::Waiting,
+                "Finish in Zuse",
+                "Zuse finishes connecting as soon as it opens. Check that the Zuse account shown is yours.",
+            )
+        },
+        &link,
+    )
 }
 
 impl NativeGithub {
@@ -229,19 +257,43 @@ mod tests {
     #[test]
     fn confirmation_page_names_the_initiating_account_and_warns_against_sharing() {
         let html = page(
+            "op-1",
             "ABCDEFGH",
             "octo-visitor",
             "Owner Person <owner@example.test>",
             "Personal",
             Some(9),
         );
-        assert!(html.contains("ABCD-EFGH"));
+        assert!(
+            html.contains("ABCD-EFGH"),
+            "the typed fallback stays visible"
+        );
+        assert!(html.contains("If Zuse didn&#39;t open"));
         assert!(html.contains("octo-visitor"));
         assert!(html.contains("owner@example.test"));
-        assert!(html.contains("Never share it"));
+        assert!(html.contains("Never share this code"));
         assert!(
             !html.contains("<form"),
             "the browser cannot complete the link itself"
+        );
+    }
+
+    #[test]
+    fn confirmation_page_hands_the_code_to_the_initiating_app() {
+        let link = app_link("op-1", "ABCDEFGH");
+        assert_eq!(link, "zuse://github/confirm?operation=op%2D1&code=ABCDEFGH");
+        let html = page("op-1", "ABCDEFGH", "octo", "Owner", "Personal", None);
+        let escaped = link.replace('&', "&amp;");
+        // Opened automatically on load, and by a button when the browser asks.
+        assert!(html.contains(&format!(
+            "<meta http-equiv=\"refresh\" content=\"0;url={escaped}\">"
+        )));
+        assert!(html.contains(&format!("href=\"{escaped}\"")));
+        assert!(html.contains("Open Zuse"));
+        // Hostile ids cannot break out of the link.
+        let hostile = app_link("a&code=X\"><script>", "ABCDEFGH");
+        assert!(
+            hostile.starts_with("zuse://github/confirm?operation=a%26code%3DX%22%3E%3Cscript%3E&")
         );
     }
 }
