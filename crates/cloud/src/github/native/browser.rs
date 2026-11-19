@@ -15,6 +15,66 @@ pub struct BrowserTransaction {
     pub confirmation: bool,
 }
 use zuse_browser_page::{Action, Card, Row as PageRow, Tone};
+/// Whose GitHub account an installation lives on, in chooser order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum AccountKind {
+    /// The signed-in GitHub user's own account.
+    Own,
+    Organization,
+    /// Another user's personal account that shares repositories with the
+    /// signed-in user. Selecting it grants only their writable subset.
+    Shared,
+}
+/// One selectable installation on the chooser page.
+#[derive(Debug, PartialEq, Eq)]
+struct Choice {
+    id: i64,
+    login: String,
+    avatar: Option<String>,
+    kind: AccountKind,
+    /// Already linked to this Zuse owner; selecting it again refreshes it.
+    connected: bool,
+}
+impl Choice {
+    /// `installation` is a `/user/installations` entry; `profile` is the
+    /// signed-in GitHub user. Unusable entries yield `None`.
+    fn parse(installation: &Value, profile: &Value, connected: &BTreeSet<i64>) -> Option<Self> {
+        let id = installation["id"].as_i64().filter(|n| *n > 0)?;
+        if !installation["suspended_at"].is_null() {
+            return None;
+        }
+        let account = &installation["account"];
+        let login = account["login"].as_str().filter(|s| valid_component(s))?;
+        let kind = match account["type"].as_str() {
+            Some("Organization") => AccountKind::Organization,
+            Some("User") if account["id"].as_i64() != profile["id"].as_i64() => AccountKind::Shared,
+            _ => AccountKind::Own,
+        };
+        Some(Self {
+            id,
+            login: login.to_owned(),
+            // Validated and sized by the page renderer.
+            avatar: account["avatar_url"].as_str().map(str::to_owned),
+            kind,
+            connected: connected.contains(&id),
+        })
+    }
+    fn meta(&self) -> &'static str {
+        match (self.kind, self.connected) {
+            (AccountKind::Own, false) => "Personal account",
+            (AccountKind::Own, true) => "Personal account · Connected",
+            (AccountKind::Organization, false) => "Organization",
+            (AccountKind::Organization, true) => "Organization · Connected",
+            (AccountKind::Shared, false) => "Personal account · shared with you",
+            (AccountKind::Shared, true) => "Personal account · shared with you · Connected",
+        }
+    }
+}
+/// Connected first, then the user's own account, organizations, and shared
+/// accounts; GitHub's order is kept within each group.
+fn sort_choices(choices: &mut [Choice]) {
+    choices.sort_by_key(|choice| (!choice.connected, choice.kind));
+}
 impl NativeGithub {
     pub fn browser_origin_matches(&self, origin: &str) -> bool {
         origin == self.config.origin.origin().ascii_serialization()
@@ -99,7 +159,15 @@ impl NativeGithub {
                 pending.browser_installation.filter(|id| *id > 0),
             ));
         }
-        let mut installations: Vec<(i64, String, bool)> = Vec::new();
+        let connected: BTreeSet<i64> = sqlx::query_scalar(
+            "SELECT installation_id FROM zuse_rust_github_installations WHERE owner_id=$1 AND state='active'",
+        )
+        .bind(&owner)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect();
+        let mut installations: Vec<Choice> = Vec::new();
         for page_number in 1..=100 {
             let response = self
                 .get(
@@ -111,26 +179,16 @@ impl NativeGithub {
                 .as_array()
                 .ok_or_else(unavailable)?;
             for installation in entries {
-                let Some(installation_id) = installation["id"].as_i64().filter(|n| *n > 0) else {
+                let Some(choice) = Choice::parse(installation, &pending.profile, &connected) else {
                     continue;
                 };
                 if pending
                     .browser_installation
-                    .is_some_and(|id| id != installation_id)
+                    .is_some_and(|id| id != choice.id)
                 {
                     continue;
                 }
-                if !installation["suspended_at"].is_null() {
-                    continue;
-                }
-                let Some(login) = installation["account"]["login"]
-                    .as_str()
-                    .filter(|s| valid_component(s))
-                else {
-                    continue;
-                };
-                let organization = installation["account"]["type"].as_str() == Some("Organization");
-                installations.push((installation_id, login.to_owned(), organization));
+                installations.push(choice);
             }
             if entries.len() < 100 {
                 break;
@@ -139,20 +197,18 @@ impl NativeGithub {
                 return Err(ApiError::unavailable("github_pagination_limit"));
             }
         }
+        sort_choices(&mut installations);
         let ids: Vec<String> = installations
             .iter()
-            .map(|(id, ..)| id.to_string())
+            .map(|choice| choice.id.to_string())
             .collect();
         let rows = installations
             .iter()
             .zip(&ids)
-            .map(|((_, login, organization), id)| PageRow {
-                name: login,
-                meta: Some(if *organization {
-                    "Organization"
-                } else {
-                    "Personal account"
-                }),
+            .map(|(choice, id)| PageRow {
+                name: &choice.login,
+                meta: Some(choice.meta()),
+                avatar: choice.avatar.as_deref(),
                 action: Action::Form {
                     label: "Use",
                     action: "/v1/cloud/github/browser/select",
@@ -274,5 +330,110 @@ impl NativeGithub {
             self.announce_confirmation(&transaction).await;
         }
         Ok(transaction)
+    }
+}
+
+#[cfg(test)]
+mod chooser_tests {
+    use super::*;
+
+    fn entry(id: i64, account_id: i64, login: &str, kind: &str) -> Value {
+        json!({
+            "id": id,
+            "account": {
+                "id": account_id,
+                "login": login,
+                "type": kind,
+                "avatar_url": format!("https://avatars.githubusercontent.com/u/{account_id}?v=4"),
+            },
+            "suspended_at": null,
+        })
+    }
+
+    #[test]
+    fn installations_are_labelled_by_whose_account_they_live_on() {
+        let profile = json!({"id": 42, "login": "member"});
+        let none = BTreeSet::new();
+        let own = Choice::parse(&entry(1, 42, "member", "User"), &profile, &none).unwrap();
+        assert_eq!(own.kind, AccountKind::Own);
+        assert_eq!(own.meta(), "Personal account");
+        assert_eq!(
+            own.avatar.as_deref(),
+            Some("https://avatars.githubusercontent.com/u/42?v=4")
+        );
+        let org = Choice::parse(&entry(2, 81, "team", "Organization"), &profile, &none).unwrap();
+        assert_eq!(org.meta(), "Organization");
+        let shared = Choice::parse(&entry(3, 77, "friend", "User"), &profile, &none).unwrap();
+        assert_eq!(shared.kind, AccountKind::Shared);
+        assert_eq!(shared.meta(), "Personal account · shared with you");
+        let mut missing = entry(4, 0, "noavatar", "User");
+        missing["account"]["avatar_url"] = Value::Null;
+        missing["account"]["id"] = json!(42);
+        let missing = Choice::parse(&missing, &profile, &none).unwrap();
+        assert_eq!(missing.avatar, None);
+        assert_eq!(missing.kind, AccountKind::Own);
+    }
+
+    #[test]
+    fn unusable_installations_are_skipped() {
+        let profile = json!({"id": 42});
+        let none = BTreeSet::new();
+        let mut suspended = entry(1, 81, "team", "Organization");
+        suspended["suspended_at"] = json!("2026-01-01T00:00:00Z");
+        assert_eq!(Choice::parse(&suspended, &profile, &none), None);
+        assert_eq!(
+            Choice::parse(&entry(0, 81, "team", "Organization"), &profile, &none),
+            None
+        );
+        assert_eq!(
+            Choice::parse(&entry(1, 81, "<b>", "Organization"), &profile, &none),
+            None
+        );
+    }
+
+    #[test]
+    fn connected_installations_are_marked_and_listed_first() {
+        let profile = json!({"id": 42});
+        let connected = BTreeSet::from([5]);
+        let mut choices: Vec<Choice> = [
+            entry(1, 77, "friend", "User"),
+            entry(2, 81, "team", "Organization"),
+            entry(3, 42, "member", "User"),
+            entry(4, 82, "other-team", "Organization"),
+            entry(5, 83, "linked", "Organization"),
+        ]
+        .iter()
+        .filter_map(|e| Choice::parse(e, &profile, &connected))
+        .collect();
+        sort_choices(&mut choices);
+        let order: Vec<(&str, &str)> = choices
+            .iter()
+            .map(|c| (c.login.as_str(), c.meta()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("linked", "Organization · Connected"),
+                ("member", "Personal account"),
+                ("team", "Organization"),
+                ("other-team", "Organization"),
+                ("friend", "Personal account · shared with you"),
+            ]
+        );
+        let own = Choice::parse(
+            &entry(9, 42, "member", "User"),
+            &profile,
+            &BTreeSet::from([9]),
+        );
+        assert_eq!(own.unwrap().meta(), "Personal account · Connected");
+        let shared = Choice::parse(
+            &entry(9, 7, "friend", "User"),
+            &profile,
+            &BTreeSet::from([9]),
+        );
+        assert_eq!(
+            shared.unwrap().meta(),
+            "Personal account · shared with you · Connected"
+        );
     }
 }

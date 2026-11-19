@@ -4,9 +4,10 @@
 //! a receipt for a payment) or a compact card when the browser still has a
 //! choice to make.
 //!
-//! Pages carry no external resources. The only scripts are the inline
-//! backdrop and form-feedback scripts, admitted by hash in
-//! [`content_security_policy`]; serve every page with it.
+//! Pages carry no external resources except GitHub account avatars on card
+//! rows (see [`Row::avatar`]). The only scripts are the inline backdrop and
+//! form-feedback scripts, admitted by hash in [`content_security_policy`];
+//! serve every page with it.
 
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
@@ -27,6 +28,11 @@ const INK: &str = "#181713";
 const MESSAGE_MAX: usize = 220;
 const NAME_MAX: usize = 40;
 const VALUE_MAX: usize = 100;
+/// The only origin images may load from, mirrored in the CSP `img-src`.
+const AVATAR_ORIGIN: &str = "https://avatars.githubusercontent.com";
+const AVATAR_URL_MAX: usize = 512;
+/// Twice the 28px tile, for sharp avatars on high-density screens.
+const AVATAR_SIZE: &str = "64";
 
 /// Escape a value for HTML text or a quoted attribute.
 pub fn escape(value: &str) -> String {
@@ -68,12 +74,12 @@ fn script_source(script: &str) -> String {
 }
 
 /// CSP for every page in this crate: inline styles, the two hashed inline
-/// scripts, same-origin form posts, and nothing else.
+/// scripts, GitHub avatar images, same-origin form posts, and nothing else.
 pub fn content_security_policy() -> &'static str {
     static CSP: OnceLock<String> = OnceLock::new();
     CSP.get_or_init(|| {
         format!(
-            "default-src 'none'; style-src 'unsafe-inline'; script-src {} {}; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'none'; style-src 'unsafe-inline'; img-src {AVATAR_ORIGIN}; script-src {} {}; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             script_source(DITHER_JS),
             script_source(SUBMIT_JS),
         )
@@ -398,7 +404,37 @@ pub enum Action<'a> {
 pub struct Row<'a> {
     pub name: &'a str,
     pub meta: Option<&'a str>,
+    /// A GitHub avatar URL shown over the letter tile. Anything other than
+    /// an `https://avatars.githubusercontent.com/` URL is ignored and only
+    /// the letter tile is shown.
+    pub avatar: Option<&'a str>,
     pub action: Action<'a>,
+}
+
+/// A validated, sized avatar `src`, or `None` when `url` is not a plain
+/// GitHub avatar URL. The result is still escaped before it is emitted.
+fn avatar_src(url: &str) -> Option<String> {
+    if url.len() > AVATAR_URL_MAX {
+        return None;
+    }
+    // A literal prefix ending in `/` pins the scheme and the exact host, and
+    // leaves no room for credentials or a port.
+    let rest = url.strip_prefix(AVATAR_ORIGIN)?.strip_prefix('/')?;
+    let allowed = |b: u8| b.is_ascii_alphanumeric() || b"-._~/?=&%".contains(&b);
+    if !rest.bytes().all(allowed) {
+        return None;
+    }
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    if path.is_empty() || query.contains('?') {
+        return None;
+    }
+    let size = format!("s={AVATAR_SIZE}");
+    let pairs: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && pair.split('=').next() != Some("s"))
+        .chain([size.as_str()])
+        .collect();
+    Some(format!("{AVATAR_ORIGIN}/{path}?{}", pairs.join("&")))
 }
 
 /// The tone of the dot next to a card's status badge.
@@ -556,6 +592,19 @@ fn card_with_head(card: &Card<'_>, head: &str) -> String {
                     .next()
                     .map(|c| escape(&c.to_string()))
                     .unwrap_or_default();
+                // The letter stays underneath so a failed image load still
+                // leaves the tile readable.
+                let avatar = row
+                    .avatar
+                    .and_then(avatar_src)
+                    .map(|src| {
+                        format!(
+                            "<img src=\"{}\" alt=\"\" width=\"28\" height=\"28\" \
+                             referrerpolicy=\"no-referrer\" loading=\"lazy\" decoding=\"async\">",
+                            escape(&src)
+                        )
+                    })
+                    .unwrap_or_default();
                 let meta = row
                     .meta
                     .map(|m| format!("<span class=\"meta\">{}</span>", clamp(m, VALUE_MAX)))
@@ -564,7 +613,7 @@ fn card_with_head(card: &Card<'_>, head: &str) -> String {
                     Action::Link { label, .. } | Action::Form { label, .. } => *label,
                 };
                 format!(
-                    "<div class=\"row\"><span class=\"mark\" aria-hidden=\"true\">{initial}</span>\
+                    "<div class=\"row\"><span class=\"mark\" aria-hidden=\"true\">{initial}{avatar}</span>\
                      <div><span class=\"name\">{}</span>{meta}</div>{}</div>",
                     clamp(row.name, VALUE_MAX),
                     action_html(
@@ -675,6 +724,7 @@ mod tests {
             rows: vec![Row {
                 name: "team",
                 meta: None,
+                avatar: None,
                 action: Action::Form {
                     label: "Use",
                     action: "/select",
@@ -710,6 +760,90 @@ mod tests {
         let other = card_opening_zuse(&notice(), "https://example.com");
         assert!(!other.contains("http-equiv=\"refresh\""));
         assert_eq!(other, card(&notice()));
+    }
+
+    #[test]
+    fn policy_admits_only_github_avatar_images() {
+        let csp = content_security_policy();
+        assert!(csp.contains("; img-src https://avatars.githubusercontent.com;"));
+        assert_eq!(csp.matches("img-src").count(), 1);
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("form-action 'self'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+        assert!(csp.contains("base-uri 'none'"));
+    }
+
+    #[test]
+    fn avatar_urls_are_validated_and_sized() {
+        assert_eq!(
+            avatar_src("https://avatars.githubusercontent.com/u/81?v=4").as_deref(),
+            Some("https://avatars.githubusercontent.com/u/81?v=4&s=64")
+        );
+        assert_eq!(
+            avatar_src("https://avatars.githubusercontent.com/u/81").as_deref(),
+            Some("https://avatars.githubusercontent.com/u/81?s=64")
+        );
+        assert_eq!(
+            avatar_src("https://avatars.githubusercontent.com/u/81?s=460&v=4").as_deref(),
+            Some("https://avatars.githubusercontent.com/u/81?v=4&s=64")
+        );
+        for rejected in [
+            "",
+            "http://avatars.githubusercontent.com/u/81",
+            "https://avatars.githubusercontent.com",
+            "https://avatars.githubusercontent.com/",
+            "https://avatars.githubusercontent.com.evil.test/u/81",
+            "https://avatars.githubusercontent.com:8443/u/81",
+            "https://user:pass@avatars.githubusercontent.com/u/81",
+            "https://avatars.githubusercontent.com@evil.test/u/81",
+            "https://evil.test/avatars.githubusercontent.com/u/81",
+            "//avatars.githubusercontent.com/u/81",
+            "javascript:alert(1)",
+            "https://avatars.githubusercontent.com/u/81\"onerror=\"x",
+            "https://avatars.githubusercontent.com/u/81?v=4#frag",
+            "https://avatars.githubusercontent.com/u/8 1",
+            "https://avatars.githubusercontent.com/u/81?a=1?b=2",
+            "HTTPS://AVATARS.GITHUBUSERCONTENT.COM/u/81",
+        ] {
+            assert_eq!(avatar_src(rejected), None, "{rejected}");
+        }
+        let long = format!("https://avatars.githubusercontent.com/{}", "a".repeat(600));
+        assert_eq!(avatar_src(&long), None);
+    }
+
+    fn chooser(avatar: Option<&str>) -> String {
+        card(&Card {
+            rows: vec![Row {
+                name: "nova",
+                meta: Some("Organization"),
+                avatar,
+                action: Action::Form {
+                    label: "Use",
+                    action: "/select",
+                    fields: vec![("state", "s".into())],
+                    pending: "Connecting…",
+                },
+            }],
+            ..Card::notice("GitHub", "Choose", Tone::Waiting, "Choose", "d")
+        })
+    }
+
+    #[test]
+    fn rows_show_avatars_over_the_letter_tile() {
+        let page = chooser(Some("https://avatars.githubusercontent.com/u/81?v=4"));
+        assert!(page.contains(
+            "<span class=\"mark\" aria-hidden=\"true\">n<img src=\"https://avatars.githubusercontent.com/u/81?v=4&amp;s=64\" alt=\"\" width=\"28\" height=\"28\" referrerpolicy=\"no-referrer\""
+        ));
+        for fallback in [
+            None,
+            Some("https://evil.test/u/81"),
+            Some("https://avatars.githubusercontent.com/u/81\"><script>x</script>"),
+        ] {
+            let page = chooser(fallback);
+            assert!(page.contains("<span class=\"mark\" aria-hidden=\"true\">n</span>"));
+            assert!(!page.contains("<img"));
+            assert!(!page.contains("<script>x"));
+        }
     }
 
     #[test]
@@ -771,6 +905,7 @@ mod tests {
                     rows: vec![Row {
                         name: "team",
                         meta: Some("Organization"),
+                        avatar: Some("https://avatars.githubusercontent.com/u/81?v=4"),
                         action: Action::Form {
                             label: "Use",
                             action: "/select",
