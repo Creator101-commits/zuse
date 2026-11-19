@@ -687,31 +687,14 @@ pub fn group_with_action(
                     .child(description),
             )
         });
-    div()
-        .flex()
-        .flex_col()
-        .p(px(4.))
-        .rounded(px(zuse_viewport::settings_style::FRAME_RADIUS))
+    // The frame and header geometry are the shared settings section's
+    // (`settings_style`), which the Cloud pages draw through as well; only
+    // the colours follow the active theme here.
+    zuse_viewport::settings_style::frame()
         .bg(theme.settings_frame_bg())
         .child(
-            div()
-                .flex()
-                .when(description_empty, |row| row.items_center())
-                .when(!description_empty, |row| row.items_start())
-                .gap(px(12.))
-                .px(px(10.))
-                .py(px(8.))
-                .child(header.flex_1().min_w_0())
-                .when_some(action, |row, action| {
-                    row.child(
-                        div()
-                            .flex_none()
-                            .h(px(zuse_viewport::settings_style::CONTROL_HEIGHT))
-                            .flex()
-                            .items_center()
-                            .child(action),
-                    )
-                }),
+            zuse_viewport::settings_style::header_bar(header, action)
+                .when(!description_empty, |row| row.items_start()),
         )
 }
 
@@ -731,39 +714,20 @@ pub fn row_divider(theme: &Theme) -> gpui::Hsla {
 /// a section's worth of air above them; inside [`section`] the wrapper owns
 /// the spacing and zeroes this margin.
 pub fn section_card(theme: &Theme) -> gpui::Div {
-    div()
+    zuse_viewport::settings_style::card()
         .mt(px(24.0))
-        .rounded(px(zuse_viewport::settings_style::CARD_RADIUS))
-        .border_1()
         .border_color(if theme.variant_id.as_ref() == "zuse-dark" {
             gpui::white().opacity(0.08)
         } else {
             theme.border
         })
         .bg(block_fill(theme))
-        .overflow_hidden()
-        .flex()
-        .flex_col()
 }
 
 /// One row in a [`section_card`]: title and muted description on the left,
 /// the control on the right, split from the previous row by a hairline.
 pub fn card_row(theme: &Theme, first: bool) -> gpui::Div {
-    div()
-        .px(px(zuse_viewport::settings_style::ROW_PAD_X))
-        .py(px(zuse_viewport::settings_style::ROW_PAD_Y))
-        .when(!first, |el| {
-            el.border_t_1().border_color(row_divider(theme))
-        })
-        .flex()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap(px(zuse_viewport::settings_style::ROW_GAP))
-        // A 28px control plus the row padding, so title-only rows and rows
-        // with a control line up from page to page.
-        .min_h(px(zuse_viewport::settings_style::CONTROL_HEIGHT
-            + 2.0 * zuse_viewport::settings_style::ROW_PAD_Y))
+    zuse_viewport::settings_style::row(first).border_color(row_divider(theme))
 }
 
 /// Bare leading glyph for rows whose icon carries identity (a device's

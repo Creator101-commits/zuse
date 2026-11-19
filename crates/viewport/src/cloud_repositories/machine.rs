@@ -340,14 +340,8 @@ impl RepositoryPanel {
             help,
             None,
             column().child(div().p(px(kit::INSET)).child(cards)).child(
-                div()
-                    .border_t_1()
-                    .border_color(palette::rgb(BORDER).opacity(0.7))
-                    .px(px(kit::INSET))
-                    .py(px(10.))
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
+                s::row(false)
+                    .flex_nowrap()
                     .child(kit::icon_tile("clock-circle", 28.))
                     .child(div().flex_1().child(kit::title_with_tip(
                         "Sleeps when quiet",
@@ -557,12 +551,7 @@ impl RepositoryPanel {
                 .chain(recipe.files.iter().map(|f| ("File", f.path.clone())));
             for (i, (kind, name)) in items.enumerate() {
                 rows = rows.child(
-                    row()
-                        .items_center()
-                        .gap(px(10.))
-                        .px(px(kit::INSET))
-                        .py(px(9.))
-                        .when(i > 0, |v| v.border_t_1().border_color(palette::rgb(BORDER)))
+                    s::row(i == 0)
                         .child(kit::pill(kind, kit::Tone::Neutral))
                         .child(form::mono(name)),
                 );

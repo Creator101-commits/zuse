@@ -15,8 +15,8 @@ use gpui::{prelude::*, *};
 
 /// Gap between stacked sections on a page.
 pub const SECTION_GAP: f32 = 16.;
-/// Horizontal padding inside cards and rows.
-pub const INSET: f32 = 12.;
+/// Horizontal padding inside cards and rows: the shared row inset.
+pub const INSET: f32 = s::ROW_PAD_X;
 
 /// The Zuse lime, tuned per theme.
 pub fn accent() -> Hsla {
@@ -217,6 +217,8 @@ pub fn info_tip(title: impl Into<SharedString>, text: impl Into<SharedString>) -
         .aria_description(text.clone())
         .tab_index(0)
         .size(px(20.))
+        // Keep the header at the title's 16px line, like local sections.
+        .my(px(-2.))
         .flex_none()
         .flex()
         .items_center()
@@ -288,59 +290,20 @@ pub fn menu_item(
         .child(label)
 }
 
-/// A titled section in one [`container`]. The description is help text
-/// behind an info glyph next to the title, so pages stay short. The
-/// standard section on every Cloud page.
+/// A titled Cloud section: the shared settings double card
+/// ([`s::section`]), the same frame, header and inner card every local
+/// settings page uses. The description is help text behind an info glyph
+/// next to the title, so pages stay short.
 pub fn section(
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
     action: Option<AnyElement>,
     body: impl IntoElement,
 ) -> Div {
-    let description: SharedString = description.into();
-    let header = div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(12.))
-        .px(px(INSET))
-        .pt(px(10.))
-        .pb(px(10.))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .child(title_with_tip(title, description)),
-        )
-        .when_some(action, |v, action| {
-            v.child(
-                div()
-                    .flex_none()
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(action),
-            )
-        });
-    container()
-        .child(header)
-        .child(div().border_t_1().border_color(hairline()).child(body))
-}
-
-/// One section container: a subtle surface, hairline border and one radius.
-/// Rows inside are separated by hairlines; no card sits inside another.
-pub fn container() -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .rounded(px(s::CARD_RADIUS))
-        .border_1()
-        .border_color(hairline())
-        .bg(s::card_bg())
-        .overflow_hidden()
+    s::section(
+        s::header_bar(title_with_tip(title, description), action),
+        body,
+    )
 }
 
 /// The hairline between rows and around containers.
@@ -497,7 +460,8 @@ pub fn empty_state(
         .when_some(action, |v, action| v.child(div().mt(px(8.)).child(action)))
 }
 
-/// A row: leading element, title and description, trailing element.
+/// A row of a section's inner card ([`s::row`]): leading element, title and
+/// description, trailing element.
 pub fn row_item(
     first: bool,
     leading: Option<AnyElement>,
@@ -506,17 +470,8 @@ pub fn row_item(
     trailing: Option<AnyElement>,
 ) -> Div {
     let description = description.into();
-    div()
-        .flex()
-        .items_center()
-        .gap(px(10.))
-        .px(px(INSET))
-        .py(px(10.))
-        .min_h(px(52.))
-        .when(!first, |v| {
-            v.border_t_1()
-                .border_color(palette::rgb(BORDER).opacity(0.7))
-        })
+    s::row(first)
+        .flex_nowrap()
         .when_some(leading, |v, leading| v.child(leading))
         .child(
             div()

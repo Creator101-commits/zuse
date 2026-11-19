@@ -310,11 +310,10 @@ impl RepositoryPanel {
                     .child(step.label()),
             );
         }
-        let intro = row()
+        let intro = s::row(false)
+            .flex_nowrap()
             .items_start()
             .gap(px(14.))
-            .px(px(16.))
-            .py(px(16.))
             .child(kit::icon_tile(current.glyph(), 40.))
             .child(
                 column()
@@ -334,49 +333,34 @@ impl RepositoryPanel {
             .when(current.optional(), |v| {
                 v.child(kit::pill("Optional", Tone::Neutral))
             });
-        kit::container()
-            .child(
-                column()
-                    .px(px(10.))
-                    .pt(px(8.))
-                    .pb(px(10.))
-                    .child(
-                        row()
-                            .items_center()
-                            .justify_between()
-                            .mb(px(8.))
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(palette::rgb(MUTED))
-                                    .child("SET UP CLOUD"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(palette::rgb(MUTED))
-                                    .child(SharedString::from(format!(
-                                        "Step {} of {}",
-                                        current.index() + 1,
-                                        Step::ALL.len()
-                                    ))),
-                            ),
-                    )
-                    .child(kit::step_progress(&marks))
-                    .child(labels),
-            )
-            .child(
+        kit::section(
+            "Set up Cloud",
+            "",
+            Some(
                 div()
-                    .border_t_1()
-                    .border_color(kit::hairline())
-                    .child(intro),
-            )
+                    .text_size(px(10.))
+                    .text_color(palette::rgb(MUTED))
+                    .child(SharedString::from(format!(
+                        "Step {} of {}",
+                        current.index() + 1,
+                        Step::ALL.len()
+                    )))
+                    .into_any_element(),
+            ),
+            column()
+                .child(
+                    column()
+                        .px(px(s::ROW_PAD_X))
+                        .py(px(s::ROW_PAD_Y))
+                        .child(kit::step_progress(&marks))
+                        .child(labels),
+                )
+                .child(intro),
+        )
     }
 
     fn onboarding_plan_card(&self) -> Div {
         let plan = self.plan_glance();
-        let mut card = column().gap(px(14.)).p(px(16.));
         let (name, status) = match &plan {
             Some(plan) => (
                 plan.label(),
@@ -388,58 +372,50 @@ impl RepositoryPanel {
             ),
             None => ("Cloud".to_owned(), kit::pill("Active", Tone::Ready)),
         };
-        card = card.child(
-            row().items_center().gap(px(10.)).child(
-                column()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(palette::rgb(MUTED))
-                            .child("YOUR PLAN"),
-                    )
-                    .child(
-                        row()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .text_size(px(15.))
-                                    .line_height(px(20.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(palette::rgb(TEXT))
-                                    .child(name),
-                            )
-                            .child(status),
-                    ),
-            ),
-        );
-        card = match &plan {
-            Some(plan) => card.child(kit::quantity(
+        let minutes = match &plan {
+            Some(plan) => kit::quantity(
                 "Machine minutes",
                 plan.minutes_line(),
                 plan.fraction_left(),
                 plan.hours_line(),
-            )),
-            None => card.child(kit::quantity(
-                "Machine minutes",
-                "Checking your plan…",
-                0.,
-                "",
-            )),
+            ),
+            None => kit::quantity("Machine minutes", "Checking your plan…", 0., ""),
         };
-        card.child(
-            row()
-                .items_center()
-                .justify_between()
-                .gap(px(12.))
-                .pt(px(12.))
-                .border_t_1()
-                .border_color(palette::rgb(BORDER).opacity(0.7))
-                .child(s::title_text("Your cloud computer"))
-                .child(kit::spec_chip(DEFAULT_MACHINE)),
+        kit::section(
+            "Your plan",
+            "",
+            None,
+            column()
+                .child(
+                    s::row(true).child(
+                        column()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(14.))
+                            .child(
+                                row()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .line_height(px(20.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(palette::rgb(TEXT))
+                                            .child(name),
+                                    )
+                                    .child(status),
+                            )
+                            .child(minutes),
+                    ),
+                )
+                .child(kit::row_item(
+                    false,
+                    None,
+                    "Your cloud computer",
+                    "",
+                    Some(kit::spec_chip(DEFAULT_MACHINE).into_any_element()),
+                )),
         )
     }
 
@@ -500,9 +476,9 @@ impl RepositoryPanel {
         cx: &mut Context<Self>,
     ) -> Div {
         match current {
-            Step::Welcome => column().gap(px(kit::SECTION_GAP)).child(
-                kit::container().child(self.onboarding_plan_card()),
-            )
+            Step::Welcome => column()
+                .gap(px(kit::SECTION_GAP))
+                .child(self.onboarding_plan_card())
             .child(kit::section(
                 "What's next",
                 "Three quick steps. Skip any of them and finish later from Settings → Cloud computer.",
@@ -534,26 +510,21 @@ impl RepositoryPanel {
                     None,
                     self.onboarding_checklist(progress, cx),
                 ))
-                .child(
-                    kit::container().child(
-                        div().child(
-                            row()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(12.))
-                                .p(px(16.))
-                                .child(
-                                    column()
-                                        .gap(px(2.))
-                                        .child(s::title_text("Your cloud computer"))
-                                        .child(s::description_text(
-                                            "Every chat gets a fresh one. It sleeps when it goes quiet and wakes when you reply.",
-                                        )),
-                                )
-                                .child(kit::spec_chip(DEFAULT_MACHINE)),
-                        ),
-                    ),
-                ),
+                .child(kit::section(
+                    "Your cloud computer",
+                    "",
+                    None,
+                    s::row(true)
+                        .flex_nowrap()
+                        .child(
+                            s::description_text(
+                                "Every chat gets a fresh one. It sleeps when it goes quiet and wakes when you reply.",
+                            )
+                            .flex_1()
+                            .min_w_0(),
+                        )
+                        .child(kit::spec_chip(DEFAULT_MACHINE)),
+                )),
         }
     }
 
