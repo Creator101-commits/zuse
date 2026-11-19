@@ -4,23 +4,51 @@
 
 ### Added
 
-- Show each agent's own `/` commands in the composer, with a per-agent **Provider commands** switch under Settings → Providers → Settings → Completion.
 - Add opt-in Slack cloud tasks with threaded status/results, sender/channel attribution, and a workspace/repository connection flow in Cloud settings. Server credentials stay encrypted; enablement requires the Slack migration and a rebuilt compatible runtime image.
 - Link a chat or a Zapper to a Slack channel from its right-click menu. Finished replies post into a Slack thread, your replies in that thread come back to the chat, and Zappers post under their own name and avatar. Their worker threads get their own threads in the same channel. Requires the new Slack migration and re-authorizing the Slack app for its added scopes.
 
+## 0.27.0 - 2026-11-19
+
+### Added
+
+- Cloud plans billed in machine minutes: **Cloud** ($20) and **Cloud Max** ($50, machines up to 8 vCPU / 32 GB), with a $1 first-week trial and optional pay-as-you-go minutes up to a cap you set. Settings shows Cloud to signed-in accounts based on their subscription, with no restart.
+- Redesigned Cloud onboarding, Billing, Usage, Repositories and GitHub settings, with plan cards, a Buy more minutes grid and one floating bar for unsaved changes.
+- Archive cloud chats: the computer sleeps right away and is deleted after 7 days.
+- **Open via SSH** lists the editors and terminals installed on your computer, plus Copy SSH command.
+- Sidebar chat rows show Archive on hover, a cloud icon for cloud chats (green while running) and a details card with title, project, location and branch.
+- Every Claude Code model is available in cloud chats.
+- Zappers run on issues: each issue has one owner, a **Needs you** status for questions to you, done criteria, new avatars and a rebuilt Overview.
+- Agents can show a plugin connect card in chat, and `/mcp` shows a card with the agent's MCP servers and your Zuse plugins.
+- Plugin logos on mentions and plugin tool calls.
+- Each agent's own `/` commands appear in the composer, with a per-agent **Provider commands** switch under Settings → Providers → Settings → Completion.
+- Oh My Pi as a built-in agent provider.
+
 ### Changed
 
+- Cloud chats behave like local chats: queued and sent messages appear instantly, a stopped queue shows **Queue paused** with Resume and resumes when you send a new message, and messages steer into a running turn when the agent supports it.
+- One Cloud option in destination pickers, a simpler cloud chat header with agent tab icons and a live status color, and a single cloud computer card with status, resources, SSH and sync.
+- Nested menus open to the side, and load and usage bars use dithered meters.
 - Typing `zuse` in a terminal, or an agent running it, now prints help instead of opening a second window. Open the app with `zuse app`; the dock, Start menu, `zuse:` links and GNOME-style Linux launchers work as before. Mistyped commands such as `zuse commands` report an unknown command. On Linux launchers that do not record the started process (KDE, for example), the first launcher click after updating from 0.26.1 can do nothing: the previous version's installer writes the old desktop entry. That start repairs the entry, so the next click opens Zuse, or run `zuse app`.
 - Name the chat's agent in the composer's empty `/` menu, so a command that only exists in another agent reads as that agent's catalog instead of a missing feature.
-- Settings shows Cloud based on your Zuse account instead of the build. Signed-in accounts see Billing to subscribe. Accounts with an active Cloud subscription also see the Cloud computer group, the Cloud compute usage tab, cloud destinations in the pickers and new cloud chats. These appear or disappear as soon as the subscription changes, with no restart. Cloud computers now work against production.
+- Checkout diff review moves into the sidebar; pull request editing, filter tabs, the review toolbar, git glyphs, tabs and the working loader are refreshed.
+- Attachment previews in the composer and chat: staged documents preview inline, sent images show as thumbnails and files as compact tiles.
 - Render Markdown tables with compact rows, rounded borders, clearer headers, and better wrapping.
+- Richer file previews, inline diffs in chat, and cards for generated images.
+- Cloud settings cards use the same framed sections as the rest of Settings.
+- The plugin sign-in page opens automatically, and the Plugins page explains why plugins are unavailable.
 
 ### Fixed
 
+- Cloud computers never stay awake unnoticed: quiet computers sleep reliably, and machines are regularly reconciled with your account so leftovers are slept or removed.
+- Cloud chats and settings update from pushed events instead of polling.
+- The cloud tab shows its agent icon from the first frame, archived cloud chats stay hidden, and cloud repositories prepare reliably after a computer is resized or recreated.
+- False account or server changes no longer block new cloud chats.
 - Sending a command picked from the `/` menu in a new OpenCode 2.x chat no longer fails with "no longer available in this project" while OpenCode is still loading its command list.
 - OpenCode 2.x answers its command catalog only after its config and plugins load; Zuse now waits for that list instead of reporting no commands, so commands like `/goal` appear in the composer.
 - On Linux, an agent whose builds exhaust memory no longer takes the whole app down: each agent runs in its own systemd scope, and Zuse stops the agent using the most memory (with a notice in its chat) before the system's OOM handling kills the app.
 - Keep the Settings Back to app button clickable on Windows by excluding it from the window-drag region.
+- Archive chats that have open checkout terminals.
+- More reliable update footer, restart flow and Linux self-updates, CLI and browser startup, desktop shutdown and standalone installs.
 
 ## 0.26.1 - 2026-11-15
 
