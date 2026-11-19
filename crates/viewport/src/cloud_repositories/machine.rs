@@ -316,14 +316,13 @@ impl RepositoryPanel {
         let cards = kit::choice_cards(vec![
             Choice {
                 title: DEFAULT_MACHINE.into(),
-                detail: "Every chat starts here. Plenty for most repositories.".into(),
+                detail: "Default".into(),
                 selected: true,
                 locked: None,
             },
             Choice {
                 title: LARGE_MACHINE.into(),
-                detail: "For heavy builds and large test suites. Uses minutes twice as fast."
-                    .into(),
+                detail: "Uses minutes twice as fast".into(),
                 selected: false,
                 locked: Some(large_note),
             },
@@ -338,25 +337,30 @@ impl RepositoryPanel {
         };
         kit::section(
             "Your cloud computer",
-            "The machine each cloud chat runs on.",
+            help,
             None,
-            column()
-                .child(
-                    column()
-                        .gap(px(10.))
-                        .p(px(kit::INSET))
-                        .child(cards)
-                        .child(kit::help(help)),
-                )
-                .child(kit::row_item(
-                    false,
-                    Some(kit::icon_tile("clock-circle", 28.).into_any_element()),
-                    "Sleeps when quiet",
-                    format!(
-                        "After {SLEEP_AFTER_MINUTES} minutes without activity. A sleeping computer uses no minutes and wakes as soon as you reply."
-                    ),
-                    Some(kit::pill("Automatic", Tone::Neutral).into_any_element()),
-                )),
+            column().child(div().p(px(kit::INSET)).child(cards)).child(
+                div()
+                    .border_t_1()
+                    .border_color(palette::rgb(BORDER).opacity(0.7))
+                    .px(px(kit::INSET))
+                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(kit::icon_tile("clock-circle", 28.))
+                    .child(div().flex_1().child(kit::title_with_tip(
+                        "Sleeps when quiet",
+                        "A sleeping computer uses no minutes and wakes as soon as you reply.",
+                    )))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette::rgb(MUTED))
+                            .child(format!("After {SLEEP_AFTER_MINUTES} min")),
+                    )
+                    .child(kit::pill("Automatic", Tone::Neutral)),
+            ),
         )
     }
 
@@ -379,6 +383,8 @@ impl RepositoryPanel {
             ("queued", Some(b)) if b.error.is_some() => {
                 error_copy(b.error.as_deref().unwrap_or_default()).into()
             }
+            // Ready and standard images need no sentence; the pill says it.
+            ("ready" | "none", _) => SharedString::default(),
             _ => detail.into(),
         };
         let built = match build {
@@ -501,7 +507,7 @@ impl RepositoryPanel {
         }
         root.child(form::save_bar(
             "cloud-machine",
-            "Your image builds in the background; chats can start right away.".into(),
+            String::new(),
             self.machine_dirty(cx) && self.can_manage(),
             busy,
             |this, cx| this.discard_machine(cx),
@@ -582,7 +588,7 @@ impl RepositoryPanel {
         }
         root.child(form::save_bar(
             "cloud-machine",
-            "Instructions, skills and files apply to new chats. Setup script changes wait for the image build.".into(),
+            format!("Version {}", version.revision),
             self.machine_dirty(cx) && self.can_manage(),
             busy,
             |this, cx| this.discard_machine(cx),

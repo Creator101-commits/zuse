@@ -94,6 +94,8 @@ pub struct RepositoryPanel {
     error: Option<String>,
     notice: Option<String>,
     picker: bool,
+    /// The open overflow ("…") menu, by its trigger id.
+    overflow: Option<SharedString>,
     usage_only: bool,
     storage_usage: Option<i64>,
     picker_focus: FocusHandle,
@@ -157,6 +159,7 @@ impl RepositoryPanel {
             error: None,
             notice: None,
             picker: false,
+            overflow: None,
             usage_only: false,
             storage_usage: None,
             picker_focus: cx.focus_handle(),
@@ -215,6 +218,7 @@ impl RepositoryPanel {
         self.error = None;
         self.notice = None;
         self.picker = false;
+        self.overflow = None;
         self.choice_focus.clear();
         self.selected.clear();
         self.queue.clear();

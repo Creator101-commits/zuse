@@ -5,6 +5,7 @@
 //!
 //! Spacing scale: 4 · 8 · 12 · 16 · 24. Type scale: 10 (caption) · 11
 //! (description) · 12 (title) · 15 (step title) · 18 (welcome headline).
+use crate::tooltip::TooltipExt as _;
 use crate::{
     assets::icon,
     palette, settings_style as s,
@@ -204,18 +205,102 @@ pub fn step_progress(marks: &[StepMark]) -> Div {
     bar
 }
 
-/// A titled card whose description stays visible as inline help. The
-/// standard section on every Cloud computer page.
+/// A small info glyph that explains `title` on hover or focus. Pages keep
+/// short titles; the why lives here instead of in paragraphs.
+pub fn info_tip(title: impl Into<SharedString>, text: impl Into<SharedString>) -> Stateful<Div> {
+    let title = title.into();
+    let text = text.into();
+    div()
+        .id(SharedString::from(format!("cloud-tip-{title}")))
+        .role(Role::Button)
+        .aria_label(title)
+        .aria_description(text.clone())
+        .tab_index(0)
+        .size(px(20.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .text_color(palette::rgb(MUTED))
+        .hover(|v| v.text_color(palette::rgb(TEXT)))
+        .child(icon("info-circle").size(px(12.)))
+        .tip(text)
+}
+
+/// A title with its explanation behind an [`info_tip`].
+pub fn title_with_tip(title: impl Into<SharedString>, tip: impl Into<SharedString>) -> Div {
+    let title = title.into();
+    let tip = tip.into();
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .min_w_0()
+        .child(s::title_text(title.clone()).truncate())
+        .when(!tip.is_empty(), |v| v.child(info_tip(title, tip)))
+}
+
+/// The floating surface of an overflow ("…") menu.
+pub fn menu_surface() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(180.))
+        .p(px(4.))
+        .rounded(px(9.))
+        .bg(palette::tone(hsla(132. / 360., 0.05, 0.105, 1.), white()))
+        .border_1()
+        .border_color(s::card_border())
+        .shadow_lg()
+        .occlude()
+}
+
+/// One item of an overflow menu. `danger` items use the destructive colour.
+pub fn menu_item(
+    id: impl Into<ElementId>,
+    glyph: &'static str,
+    label: impl Into<SharedString>,
+    danger: bool,
+) -> Stateful<Div> {
+    let label = label.into();
+    let color: Hsla = if danger {
+        s::destructive_text()
+    } else {
+        palette::rgb(TEXT).into()
+    };
+    div()
+        .id(id)
+        .role(Role::MenuItem)
+        .aria_label(label.clone())
+        .tab_index(0)
+        .h(px(28.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .text_color(color)
+        .hover(|v| v.bg(s::frame_bg()))
+        .child(icon(glyph).size(px(13.)).text_color(color))
+        .child(label)
+}
+
+/// A titled card. The description is help text behind an info glyph next
+/// to the title, so pages stay short. The standard section on every Cloud
+/// computer page.
 pub fn section(
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
     action: Option<AnyElement>,
     body: impl IntoElement,
 ) -> Div {
-    let description = description.into();
+    let description: SharedString = description.into();
     let header = div()
         .flex()
-        .items_start()
+        .items_center()
         .justify_between()
         .gap(px(12.))
         .px(px(INSET))
@@ -227,11 +312,7 @@ pub fn section(
                 .flex_col()
                 .flex_1()
                 .min_w_0()
-                .gap(px(2.))
-                .child(s::title_text(title))
-                .when(!description.is_empty(), |v| {
-                    v.child(s::description_text(description))
-                }),
+                .child(title_with_tip(title, description)),
         )
         .when_some(action, |v, action| {
             v.child(
@@ -274,6 +355,7 @@ pub fn empty_state(
     body: impl Into<SharedString>,
     action: Option<AnyElement>,
 ) -> Div {
+    let body: SharedString = body.into();
     div()
         .flex()
         .flex_col()
@@ -283,12 +365,14 @@ pub fn empty_state(
         .gap(px(8.))
         .child(icon_tile(glyph, 36.))
         .child(div().mt(px(4.)).child(s::title_text(title)))
-        .child(
-            div()
-                .max_w(px(360.))
-                .text_center()
-                .child(s::description_text(body)),
-        )
+        .when(!body.is_empty(), |v| {
+            v.child(
+                div()
+                    .max_w(px(360.))
+                    .text_center()
+                    .child(s::description_text(body)),
+            )
+        })
         .when_some(action, |v, action| v.child(div().mt(px(8.)).child(action)))
 }
 
@@ -407,7 +491,9 @@ pub fn choice_cards(choices: Vec<Choice>) -> Div {
                             v.child(pill(note, Tone::Neutral))
                         }),
                 )
-                .child(s::description_text(choice.detail)),
+                .when(!choice.detail.is_empty(), |v| {
+                    v.child(s::description_text(choice.detail))
+                }),
         );
     }
     row
