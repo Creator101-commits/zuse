@@ -356,7 +356,14 @@ impl Shell {
                     .as_ref()
                     .map(|view| view.read(cx).title.clone())
                     .unwrap_or_else(|| "New chat".into());
-                let harness = view.as_ref().and_then(|view| view.read(cx).harness());
+                let harness = view.as_ref().and_then(|view| {
+                    let view = view.read(cx);
+                    view.harness(
+                        self.state
+                            .read(cx)
+                            .cloud_sidebar_workspace(&view.target.workspace),
+                    )
+                });
                 let active = index == self.cloud_tabs.active;
                 crate::surface_chrome::workspace_tab(
                     ("cloud-conversation-tab", index),

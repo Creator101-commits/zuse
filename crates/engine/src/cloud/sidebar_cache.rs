@@ -47,6 +47,9 @@ fn snapshot(method: &str, value: &Value) -> Value {
                 "createdAt",
                 "rpcProtocol",
                 "statusCode",
+                // The agent id (never its connection) lets a saved row show
+                // the right agent icon before the fresh list arrives.
+                "agent",
             ],
         )
     };
@@ -135,9 +138,11 @@ mod tests {
         );
         let v = snapshot(
             LIST,
-            &json!({"workspaces":[{"workspaceId":"w","state":"paused","bootstrap":{"secret":"hidden"},"messages":["private text"]}]}),
+            &json!({"workspaces":[{"workspaceId":"w","state":"paused","agent":"codex","agentConnectionId":"connection-secret","bootstrap":{"secret":"hidden"},"messages":["private text"]}]}),
         );
         assert_eq!(v["workspaces"][0]["state"], "paused");
+        assert_eq!(v["workspaces"][0]["agent"], "codex");
         assert!(!v.to_string().contains("private text"));
+        assert!(!v.to_string().contains("connection-secret"));
     }
 }

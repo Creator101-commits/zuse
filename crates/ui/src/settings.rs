@@ -653,6 +653,65 @@ pub fn set_transcript_compact_mode(enabled: bool, cx: &mut App) {
     }
 }
 
+/// How many cloud workspaces remember their last-known agent.
+pub const CLOUD_WORKSPACE_AGENTS_CAPACITY: usize = 64;
+
+/// One cloud workspace's last-known agent. The agent is kept as its wire id
+/// so a build that no longer knows it still loads the settings file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudWorkspaceAgent {
+    pub workspace_id: String,
+    pub agent: String,
+}
+
+/// The agent `workspace` last ran, as remembered on this device.
+pub fn remembered_cloud_agent(workspace: &str, cx: &App) -> Option<zuse_protocol::HarnessId> {
+    let store = cx.try_global::<SettingsStore>()?;
+    remembered_agent_in(&store.current.cloud_workspace_agents, workspace)
+}
+
+fn remembered_agent_in(
+    entries: &[CloudWorkspaceAgent],
+    workspace: &str,
+) -> Option<zuse_protocol::HarnessId> {
+    let entry = entries
+        .iter()
+        .find(|entry| entry.workspace_id == workspace)?;
+    zuse_protocol::HarnessId::try_from(entry.agent.clone()).ok()
+}
+
+/// Record `agent` as the one `workspace` runs. Most recent last; the oldest
+/// entries fall off past the capacity.
+pub fn remember_cloud_agent(workspace: &str, agent: zuse_protocol::HarnessId, cx: &mut App) {
+    if workspace.is_empty() {
+        return;
+    }
+    let agent = String::from(agent);
+    let current = cx
+        .try_global::<SettingsStore>()
+        .map(|store| store.current.cloud_workspace_agents.last().cloned());
+    let Some(last) = current else { return };
+    if last.is_some_and(|last| last.workspace_id == workspace && last.agent == agent) {
+        return;
+    }
+    update(SavePolicy::Debounced, cx, |settings| {
+        remember_agent_in(&mut settings.cloud_workspace_agents, workspace, agent);
+    });
+}
+
+fn remember_agent_in(entries: &mut Vec<CloudWorkspaceAgent>, workspace: &str, agent: String) {
+    entries.retain(|entry| entry.workspace_id != workspace);
+    entries.push(CloudWorkspaceAgent {
+        workspace_id: workspace.to_owned(),
+        agent,
+    });
+    let excess = entries
+        .len()
+        .saturating_sub(CLOUD_WORKSPACE_AGENTS_CAPACITY);
+    entries.drain(..excess);
+}
+
 pub fn update(policy: SavePolicy, cx: &mut App, mutate: impl FnOnce(&mut UiSettings)) -> bool {
     if !cx.has_global::<SettingsStore>() {
         return false;
@@ -1091,6 +1150,12 @@ pub struct UiSettings {
     /// the thread and lists under the strip's history menu until reopened.
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub closed_thread_conversations: HashMap<String, Vec<String>>,
+    /// The last agent each recently opened cloud workspace was seen running,
+    /// so its tab paints the right icon before the chat's details load.
+    /// Oldest first, bounded by [`CLOUD_WORKSPACE_AGENTS_CAPACITY`]. Display
+    /// only: the conversation's own config always wins once it arrives.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cloud_workspace_agents: Vec<CloudWorkspaceAgent>,
     /// Interactive identity overlay; imported themes default to their own accent.
     pub accent: zuse_theme::AccentSelection,
     /// Glass policy, independent from the selected appearance, theme, and accent.
@@ -1215,6 +1280,7 @@ impl Default for UiSettings {
             files_word_wrap: false,
             files_show_all: false,
             closed_thread_conversations: HashMap::new(),
+            cloud_workspace_agents: Vec::new(),
             accent: zuse_theme::AccentSelection::default(),
             surface: zuse_theme::SurfacePreference::default(),
             new_thread_composer_background: None,
@@ -2112,6 +2178,7 @@ impl UiSettings {
             files_word_wrap,
             files_show_all,
             closed_thread_conversations,
+            cloud_workspace_agents,
             accent,
             surface,
             new_thread_composer_background,
@@ -2347,6 +2414,38 @@ pub use zuse_protocol::SidebarSection;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_workspace_agents_remember_the_latest_agent_and_stay_bounded() {
+        use zuse_protocol::HarnessId;
+        let mut entries = Vec::new();
+        remember_agent_in(&mut entries, "w1", HarnessId::Codex.into());
+        assert_eq!(remembered_agent_in(&entries, "w1"), Some(HarnessId::Codex));
+        // A later sighting replaces the old agent instead of adding a row.
+        remember_agent_in(&mut entries, "w1", HarnessId::ClaudeCode.into());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            remembered_agent_in(&entries, "w1"),
+            Some(HarnessId::ClaudeCode)
+        );
+        for n in 0..CLOUD_WORKSPACE_AGENTS_CAPACITY {
+            remember_agent_in(&mut entries, &format!("other-{n}"), HarnessId::Grok.into());
+        }
+        assert_eq!(entries.len(), CLOUD_WORKSPACE_AGENTS_CAPACITY);
+        assert_eq!(remembered_agent_in(&entries, "w1"), None, "oldest evicted");
+        assert_eq!(remembered_agent_in(&entries, "missing"), None);
+        // An agent this build cannot name never breaks the settings file.
+        let unknown = vec![CloudWorkspaceAgent {
+            workspace_id: "w2".into(),
+            agent: "future-agent".into(),
+        }];
+        assert_eq!(remembered_agent_in(&unknown, "w2"), None);
+        let mut settings = UiSettings::default();
+        settings.cloud_workspace_agents = unknown;
+        let text = serde_json::to_string(&settings).unwrap();
+        let back: UiSettings = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.cloud_workspace_agents, settings.cloud_workspace_agents);
+    }
 
     #[test]
     fn skill_completion_defaults_overrides_and_persistence_are_per_harness() {
@@ -3092,6 +3191,10 @@ mod tests {
                 "thread".into(),
                 vec!["closed-conversation".into()],
             )]),
+            cloud_workspace_agents: vec![CloudWorkspaceAgent {
+                workspace_id: "workspace".into(),
+                agent: "codex".into(),
+            }],
             accent: zuse_theme::AccentSelection::Preset(zuse_theme::AccentPreset::Cyan),
             surface: zuse_theme::SurfacePreference::Frosted,
             new_thread_composer_background: Some(NewThreadComposerBackground {

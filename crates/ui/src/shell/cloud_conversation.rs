@@ -41,6 +41,20 @@ pub(super) fn cloud_harness(config: &Value) -> Option<zuse_protocol::HarnessId> 
     }
 }
 
+/// The agent a cloud tab shows, from the best source on hand: what the chat
+/// itself has learned, then the sidebar's catalog row for its workspace, then
+/// the agent this device last saw the workspace run. `None` (the plain chat
+/// icon) only when no source names an agent yet.
+pub(super) fn resolve_cloud_harness(
+    learned: Option<zuse_protocol::HarnessId>,
+    catalog: Option<&Value>,
+    remembered: Option<zuse_protocol::HarnessId>,
+) -> Option<zuse_protocol::HarnessId> {
+    learned
+        .or_else(|| catalog.and_then(cloud_harness))
+        .or(remembered)
+}
+
 pub(super) struct CloudConversation {
     pub(super) target: CloudTarget,
     pub(super) state: Entity<AppState>,
@@ -49,6 +63,12 @@ pub(super) struct CloudConversation {
     pub(super) terminal: Option<Entity<TerminalPanel>>,
     boot: EngineBootConfig,
     config: Value,
+    /// The agent this chat's own data has named. Only ever replaced by
+    /// another named agent, so a reload never drops the tab's icon back to
+    /// the plain chat glyph.
+    learned_harness: Option<zuse_protocol::HarnessId>,
+    /// The agent this device last saw the workspace run, read at open.
+    remembered_harness: Option<zuse_protocol::HarnessId>,
     status: Value,
     admissions: Value,
     pub(super) first_message: Option<String>,
@@ -211,6 +231,11 @@ impl CloudConversation {
             .map(|title| zuse_protocol::file_mentions::mention_display_text(&title))
             .unwrap_or_else(|| "Cloud chat".into());
         let initial_metadata = config.clone();
+        let learned_harness = cloud_harness(&config);
+        let remembered_harness = crate::settings::remembered_cloud_agent(&target.workspace, cx);
+        if let Some(agent) = learned_harness {
+            crate::settings::remember_cloud_agent(&target.workspace, agent, cx);
+        }
         let mut this = Self {
             target,
             state,
@@ -219,6 +244,8 @@ impl CloudConversation {
             terminal: None,
             boot,
             config,
+            learned_harness,
+            remembered_harness,
             status: json!({"state":"connecting","message":"Opening cloud conversation…"}),
             admissions: Value::Null,
             first_message,
@@ -380,9 +407,23 @@ impl CloudConversation {
             .map(str::to_owned)
     }
 
-    /// The agent this chat runs, for its tab's icon.
-    pub(super) fn harness(&self) -> Option<zuse_protocol::HarnessId> {
-        cloud_harness(&self.config)
+    /// The agent this chat runs, for its tab's icon. `catalog` is the
+    /// sidebar's row for this workspace, when the account list has one.
+    pub(super) fn harness(&self, catalog: Option<&Value>) -> Option<zuse_protocol::HarnessId> {
+        resolve_cloud_harness(self.learned_harness, catalog, self.remembered_harness)
+    }
+
+    /// Adopt the agent the chat's config now names, and remember it for the
+    /// next time this workspace opens. A config without one changes nothing.
+    fn learn_harness(&mut self, cx: &mut Context<Self>) {
+        let Some(agent) = cloud_harness(&self.config) else {
+            return;
+        };
+        if self.learned_harness != Some(agent) {
+            self.learned_harness = Some(agent);
+            cx.notify();
+        }
+        crate::settings::remember_cloud_agent(&self.target.workspace, agent, cx);
     }
 
     /// Whether the computer is up and usable right now. Asleep, paused,
@@ -688,6 +729,7 @@ impl CloudConversation {
                 zuse_protocol::SandboxLevel::Auto => "auto",
                 _ => "approval-required",
             });
+            self.learn_harness(cx);
         }
         self.config["queueRunSelectionVersion"] = value["queueRunSelectionVersion"].clone();
         // Never inject saved pages into the live watch's delta baseline.
@@ -1280,6 +1322,106 @@ mod tests {
     }
 
     #[test]
+    fn cloud_tab_agent_prefers_the_chat_then_the_catalog_then_the_saved_agent() {
+        use zuse_protocol::HarnessId;
+        let catalog = json!({"workspaceId":"task","agent":"claude"});
+        assert_eq!(
+            resolve_cloud_harness(
+                Some(HarnessId::Codex),
+                Some(&catalog),
+                Some(HarnessId::Grok)
+            ),
+            Some(HarnessId::Codex)
+        );
+        assert_eq!(
+            resolve_cloud_harness(None, Some(&catalog), Some(HarnessId::Grok)),
+            Some(HarnessId::ClaudeCode)
+        );
+        // A catalog row without an agent (an older task, or the saved
+        // catalog painted at startup) falls through to the saved agent.
+        assert_eq!(
+            resolve_cloud_harness(
+                None,
+                Some(&json!({"workspaceId":"task"})),
+                Some(HarnessId::Grok)
+            ),
+            Some(HarnessId::Grok)
+        );
+        // Only a brand-new chat with no agent anywhere shows the chat glyph.
+        assert_eq!(resolve_cloud_harness(None, None, None), None);
+    }
+
+    #[gpui::test]
+    fn cloud_tab_agent_paints_from_the_saved_agent_and_never_reverts(cx: &mut TestAppContext) {
+        use zuse_protocol::HarnessId;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            initialize(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+            crate::settings::init(crate::settings::UiSettings::default(), directory.path(), cx);
+            crate::settings::remember_cloud_agent("task", HarnessId::Grok, cx);
+        });
+        let open = |cx: &mut TestAppContext, workspace: &str| {
+            let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+                std::sync::Arc::new(PendingController),
+            ));
+            let path = directory.path().to_owned();
+            let workspace = workspace.to_owned();
+            cx.new(move |cx| {
+                CloudConversation::new(
+                    CloudTarget {
+                        controller,
+                        subject: "owner".into(),
+                        organization: None,
+                        workspace: workspace.clone(),
+                        initial_session: "session".into(),
+                    },
+                    // The saved catalog row carries no agent.
+                    json!({"workspaceId":workspace,"state":"running"}),
+                    Value::Null,
+                    boot(&path),
+                    cx,
+                )
+            })
+        };
+        let view = open(cx, "task");
+        view.update(cx, |view, cx| {
+            view.account = None;
+            assert_eq!(
+                view.harness(None),
+                Some(HarnessId::Grok),
+                "the first frame uses the agent saved for this workspace"
+            );
+            // The chat's details name the real agent: adopt and remember it.
+            view.config["agent"] = json!("codex");
+            view.learn_harness(cx);
+            assert_eq!(view.harness(None), Some(HarnessId::Codex));
+            // A reload whose config has no agent keeps the known icon.
+            view.config["agent"] = Value::Null;
+            view.learn_harness(cx);
+            assert_eq!(view.harness(None), Some(HarnessId::Codex));
+        });
+        cx.update(|cx| {
+            assert_eq!(
+                crate::settings::remembered_cloud_agent("task", cx),
+                Some(HarnessId::Codex),
+                "the learned agent replaces the saved one"
+            );
+        });
+        // A brand-new chat no source knows shows the plain chat glyph.
+        let fresh = open(cx, "fresh");
+        fresh.update(cx, |view, _| {
+            view.account = None;
+            assert_eq!(view.harness(None), None);
+        });
+    }
+
+    #[test]
     fn header_status_is_green_only_while_online() {
         let theme = Theme::default();
         assert_eq!(header_status_color(true, &theme), theme.success);
@@ -1319,7 +1461,7 @@ mod tests {
         view.update(cx, |view, cx| {
             view.account = None;
             view.authorized = true;
-            assert_eq!(view.harness(), Some(zuse_protocol::HarnessId::Codex));
+            assert_eq!(view.harness(None), Some(zuse_protocol::HarnessId::Codex));
             assert!(!view.computer_online(), "starting is not online yet");
             let mut revision = 1;
             let mut apply = |view: &mut CloudConversation, state: &str, cx: &mut Context<_>| {
