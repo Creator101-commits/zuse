@@ -570,8 +570,12 @@ mod tests {
                 assert!(shell.composer.read(cx).input.read(cx).text().is_empty());
                 shell.composer.update(cx, |c, cx| {
                     c.pickers().update(cx, |p, cx| {
+                        // The server picks where new computers run; this
+                        // tab's context names a different default.
+                        let mut context = draft_context();
+                        context["computerCapabilities"]["defaultProvider"] = json!("e2b");
                         p.seed_cloud_creation_for_test(
-                            draft_context(),
+                            context,
                             json!({"projectId":"q","accountId":"owner","providerId":"e2b"}),
                             cx,
                         )

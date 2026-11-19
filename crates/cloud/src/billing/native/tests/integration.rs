@@ -132,9 +132,13 @@ async fn native_commerce_webhooks_wallet_concurrency_and_recovery() {
         .connect(scoped_url.as_str())
         .await
         .unwrap();
+    let wakeups = include_str!("../../../../migrations/0043_work_wakeups.sql");
+    let notify = &wakeups[..wakeups.find("END $body$;").unwrap() + "END $body$;".len()];
     for sql in [
         include_str!("../../../../migrations/0000_application.sql"),
         include_str!("../../../../migrations/0001_control_plane.sql"),
+        notify,
+        include_str!("../../../../migrations/0054_machine_minute_plans.sql"),
         MIGRATION,
     ] {
         sqlx::raw_sql(sql).execute(&pool).await.unwrap();
@@ -475,8 +479,9 @@ async fn native_commerce_webhooks_wallet_concurrency_and_recovery() {
         .unwrap()
         .unwrap();
     assert_eq!(balance.credit_cents, 750);
-    // Compute and models spend the same subscription-funded pool. A confirmed
-    // $5 retail compute cost leaves $2.50 after the prior model reservations.
+    // Compute and models spend the same subscription-funded pool. Machine time
+    // worth $5 at the plan rate (140 awake hours of a 1 GB machine, one machine
+    // minute per minute) leaves $2.50 after the prior model reservations.
     let period: Value = sqlx::query_scalar("SELECT to_jsonb(p) FROM api_cloud_billing_periods p WHERE account_id='user-native' ORDER BY period_start DESC LIMIT 1").fetch_one(&pool).await.unwrap();
     assert_eq!(period["shared_credit_account"], true);
     assert_eq!(period["included_provider_cost_micros"], 40_000_000);
@@ -494,7 +499,7 @@ async fn native_commerce_webhooks_wallet_concurrency_and_recovery() {
                 event: "shared-event",
                 execution: "shared-execution",
                 machine: None,
-                awake_ms: None,
+                awake_ms: Some(140 * 3_600_000),
             },
             &period,
             now - 1000,
