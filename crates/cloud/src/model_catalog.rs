@@ -26,7 +26,9 @@ pub fn claude_code() -> CloudAgentModels {
 
 /// Canonical JSON for the managed-base catalogue file (stable key order, trailing newline).
 pub fn claude_code_base_catalog_json() -> String {
-    let value = serde_json::to_value(claude_code()).expect("catalog serializes");
+    let mut value = serde_json::to_value(claude_code()).expect("catalog serializes");
+    // `preserve_order` can be on through the dependency graph; sort every nested object.
+    value.sort_all_objects();
     let mut text = serde_json::to_string_pretty(&value).expect("catalog serializes");
     text.push('\n');
     text

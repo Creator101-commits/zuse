@@ -205,10 +205,11 @@ print(json.dumps(dict(runId=r['runId'],provider=r['provider'],releaseSha256=r['r
         sql=tool.claude_catalog_sql(SimpleNamespace(schema='zuse_staging',backup_table='zz_backup_claude_catalog'))
         statements=sql.splitlines()
         self.assertEqual((statements[0],statements[-1]),('BEGIN;','COMMIT;'))
-        backup=next(i for i,l in enumerate(statements) if l.startswith('INSERT INTO zz_backup_claude_catalog'))
-        update=next(i for i,l in enumerate(statements) if l.startswith('UPDATE cloud_managed_bases'))
-        self.assertLess(backup,update)
-        self.assertIn("state='verified'",statements[update]);self.assertIn('IS DISTINCT FROM',statements[update])
+        # Lock, backup and update share one statement and one target set.
+        change=next(l for l in statements if l.startswith('WITH targets AS'))
+        self.assertLess(change.index('FOR UPDATE'),change.index('INSERT INTO zz_backup_claude_catalog'))
+        self.assertLess(change.index('INSERT INTO zz_backup_claude_catalog'),change.index('UPDATE cloud_managed_bases'))
+        self.assertIn('FROM targets t WHERE',change);self.assertIn("state='verified'",change);self.assertIn('IS DISTINCT FROM',change)
         self.assertNotIn('candidate_manifest',sql)
         self.assertIn(json.dumps(tool.claude_catalog(),sort_keys=True,separators=(',',':')),sql)
         for schema,table in (('bad;schema','zz_backup_x'),('zuse_staging','cloud_managed_bases'),('zuse_staging','zz_backup_x;drop')):

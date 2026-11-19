@@ -470,27 +470,34 @@ def with_curated_claude(catalogs):
 def claude_catalog_sql(args):
     """Idempotent SQL replacing the Claude catalogue of verified bases, backing rows up first.
 
-    Verified rows bind no digest over harness catalogues (the release ID is the build ID and
-    the certification report covers the artifact, not model metadata), so an in-place update
-    keeps every admission check valid. Staging candidate rows are digest-pinned and are not
-    touched: stage new candidate metadata against the same artifact instead.
+    Runtime admission binds no digest over harness catalogues (it matches release ID, artifact,
+    architecture and capabilities), so updated rows stay admissible. A Python `certify` report's
+    `releaseSha256` does cover catalogues: the backup table keeps the exact certified release
+    for such rows. Staging candidate rows are digest-pinned and are not touched: stage new
+    candidate metadata against the same artifact instead.
+
+    One statement locks the stale rows, backs them up and updates exactly those rows, so a
+    release registered concurrently is either fully handled or left untouched.
     """
     if not SCHEMA.fullmatch(args.schema) or not SCHEMA.fullmatch(args.backup_table) or not args.backup_table.startswith('zz_backup_'):
         raise ValueError('schema_and_zz_backup_table_required')
     catalog = json.dumps(claude_catalog(), sort_keys=True, separators=(',', ':')).replace("'", "''")
-    stale = ("b.state='verified' AND b.runtime_manifest IS NOT NULL AND EXISTS (SELECT 1 FROM "
-             "jsonb_array_elements(b.runtime_manifest->'harnesses') h WHERE h->>'agent'='claude' "
-             "AND h->'catalog' IS DISTINCT FROM (SELECT c FROM curated_claude_catalog))")
+    table = args.backup_table
     return '\n'.join([
         'BEGIN;',
         f'SET LOCAL search_path TO "{args.schema}", pg_catalog;',
         f'CREATE TEMP TABLE curated_claude_catalog ON COMMIT DROP AS SELECT \'{catalog}\'::jsonb AS c;',
-        f'CREATE TABLE IF NOT EXISTS {args.backup_table} AS SELECT now() AS backed_up_at, b.* FROM cloud_managed_bases b WITH NO DATA;',
-        f'INSERT INTO {args.backup_table} SELECT now(), b.* FROM cloud_managed_bases b WHERE {stale} '
-        f'AND NOT EXISTS (SELECT 1 FROM {args.backup_table} k WHERE k.provider=b.provider AND k.release_id=b.release_id);',
+        f'CREATE TABLE IF NOT EXISTS {table} AS SELECT now() AS backed_up_at, b.* FROM cloud_managed_bases b WITH NO DATA;',
+        "WITH targets AS (SELECT b.provider, b.release_id FROM cloud_managed_bases b "
+        "WHERE b.state='verified' AND b.runtime_manifest IS NOT NULL AND EXISTS (SELECT 1 FROM "
+        "jsonb_array_elements(b.runtime_manifest->'harnesses') h WHERE h->>'agent'='claude' "
+        "AND h->'catalog' IS DISTINCT FROM (SELECT c FROM curated_claude_catalog)) FOR UPDATE), "
+        f"backup AS (INSERT INTO {table} SELECT now(), b.* FROM cloud_managed_bases b JOIN targets t USING (provider, release_id) "
+        f"WHERE NOT EXISTS (SELECT 1 FROM {table} k WHERE k.provider=b.provider AND k.release_id=b.release_id) RETURNING 1) "
         "UPDATE cloud_managed_bases b SET runtime_manifest=jsonb_set(b.runtime_manifest,'{harnesses}',"
         "(SELECT jsonb_agg(CASE WHEN h->>'agent'='claude' THEN jsonb_set(h,'{catalog}',(SELECT c FROM curated_claude_catalog)) ELSE h END ORDER BY n) "
-        f"FROM jsonb_array_elements(b.runtime_manifest->'harnesses') WITH ORDINALITY AS x(h,n))) WHERE {stale};",
+        "FROM jsonb_array_elements(b.runtime_manifest->'harnesses') WITH ORDINALITY AS x(h,n))) "
+        "FROM targets t WHERE b.provider=t.provider AND b.release_id=t.release_id;",
         "SELECT provider, release_id, jsonb_array_length(h->'catalog'->'models') AS claude_models "
         "FROM cloud_managed_bases b, jsonb_array_elements(b.runtime_manifest->'harnesses') h "
         "WHERE b.state='verified' AND h->>'agent'='claude' ORDER BY provider, release_id;",

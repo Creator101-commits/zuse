@@ -278,10 +278,21 @@ equal to `zuse_cloud::model_catalog::claude_code` by a test; regenerate with
 models on an unauthenticated base.
 
 To bring already verified bases to the current curated catalogue, print the
-idempotent SQL and run it with the operator role. It backs changed rows up into the
-named `zz_backup_*` table first and touches only verified rows: their release ID is
-the build ID and no digest covers model metadata, so admission stays valid.
-Digest-pinned staging candidates need new candidate metadata and pin instead.
+idempotent SQL and run it with the operator role. One statement locks the verified
+rows whose Claude catalogue differs, copies them into the named `zz_backup_*` table
+and updates exactly those rows. It never touches staging candidates: their pins
+carry a candidate digest, so they need new candidate metadata and a new pin.
+
+Runtime admission stays valid: it matches release ID, artifact, architecture and
+capabilities, and no admission digest covers model metadata. Certification bindings
+are different. A `zuse-cloud-api certify-managed-base` report binds provider,
+release, artifact and runtime only, so it still describes the updated row. A report
+from this tool's `certify` binds `releaseSha256` over the whole release, catalogues
+included, so it no longer matches the updated row and `publication` with that report
+fails. For such releases the backup row is the exact certified release: keep it with
+the report as the record of the catalogue override, and to republish, run
+`publication` against the backed-up release or certify the updated release again to
+get a new report.
 
 ```sh
 python3 infra/cloud/managed-base-release.py claude-catalog-sql \
