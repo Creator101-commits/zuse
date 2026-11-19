@@ -215,9 +215,7 @@ fn section(
     action: Option<AnyElement>,
     body: impl IntoElement,
 ) -> Div {
-    s::frame()
-        .child(s::header_with_action(title, description, action))
-        .child(s::card().child(body))
+    s::section(s::header_with_action(title, description, action), body)
 }
 /// One figure of the usage header: label, big value and a hint.
 fn stat(label: &'static str, value: String, unit: &'static str, hint: String) -> Div {
@@ -924,48 +922,27 @@ pub fn billing<T: 'static>(
             .child(plans::plans_group(data, cx, act))
             .child(billing_footnote(cx, act));
     }
-    let mut card = div().flex().flex_col().child(
+    let header = s::header_bar(
         div()
             .flex()
-            .flex_wrap()
-            .items_start()
-            .gap(px(12.))
-            .px(px(14.))
-            .py(px(14.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(240.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(amount(title, 15.))
-                            .child(badge(label, warning, !subscribed)),
-                    )
-                    .child(s::description_text(detail)),
-            )
-            .child(actions),
+            .items_center()
+            .gap(px(8.))
+            .min_w_0()
+            .child(s::title_text(title).truncate())
+            .child(badge(label, warning, !subscribed)),
+        Some(actions.into_any_element()),
     );
+    let mut card = div()
+        .flex()
+        .flex_col()
+        .child(s::row(true).child(s::description_text(detail).flex_1().min_w_0()));
     let mut pay_as_you_go = false;
     match (subscribed, data.summary, plan) {
         (true, _, Some(p)) => {
             pay_as_you_go = p.pay_as_you_go;
             card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .px(px(14.))
-                    .pt(px(12.))
-                    .pb(px(14.))
-                    .border_t_1()
-                    .border_color(palette::rgb(BORDER))
-                    .child(plans::minutes_block(
+                s::row(false).child(
+                    div().flex_1().min_w_0().child(plans::minutes_block(
                         p,
                         Some(
                             button("billing-open-usage", "See usage", false, false, false)
@@ -975,6 +952,7 @@ pub fn billing<T: 'static>(
                                 .into_any_element(),
                         ),
                     )),
+                ),
             );
             if let Some(extra) = plans::extra_line(p) {
                 card = card.child(setting_row(false, "Pay as you go", extra, None));
@@ -992,42 +970,42 @@ pub fn billing<T: 'static>(
             let included = summary.included_provider_cost_micros.max(1);
             let fraction = summary.included_used_micros as f32 / included as f32;
             card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .px(px(14.))
-                    .py(px(14.))
-                    .border_t_1()
-                    .border_color(palette::rgb(BORDER))
-                    .child(
-                        div()
-                            .flex()
-                            .items_baseline()
-                            .gap(px(8.))
-                            .child(amount(usd(summary.included_remaining_micros), 28.))
-                            .child(caption(if summary.shared_credits {
-                                "credits left"
-                            } else {
-                                "included left"
-                            })),
-                    )
-                    .child(plans::meter(
-                        "cloud-included-meter",
-                        fraction,
-                        12.,
-                        format!(
-                            "{} of {} used",
+                s::row(false).child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_baseline()
+                                .gap(px(8.))
+                                .child(amount(usd(summary.included_remaining_micros), 28.))
+                                .child(caption(if summary.shared_credits {
+                                    "credits left"
+                                } else {
+                                    "included left"
+                                })),
+                        )
+                        .child(plans::meter(
+                            "cloud-included-meter",
+                            fraction,
+                            12.,
+                            format!(
+                                "{} of {} used",
+                                usd(summary.included_used_micros),
+                                usd(summary.included_provider_cost_micros)
+                            ),
+                        ))
+                        .child(caption(format!(
+                            "{} of {} used · invoice so far {} before tax",
                             usd(summary.included_used_micros),
-                            usd(summary.included_provider_cost_micros)
-                        ),
-                    ))
-                    .child(caption(format!(
-                        "{} of {} used · invoice so far {} before tax",
-                        usd(summary.included_used_micros),
-                        usd(summary.included_provider_cost_micros),
-                        usd(summary.current_invoice_estimate_micros)
-                    ))),
+                            usd(summary.included_provider_cost_micros),
+                            usd(summary.current_invoice_estimate_micros)
+                        ))),
+                ),
             );
         }
         _ => {}
@@ -1035,7 +1013,7 @@ pub fn billing<T: 'static>(
     if pay_as_you_go {
         card = card.child(cap_row(data, cap, cx, act));
     }
-    root = root.child(s::frame().child(s::card().child(card)));
+    root = root.child(s::section(header, card));
     if data.subscribed.is_some() {
         root = root.child(plans::plans_group(data, cx, act));
     }

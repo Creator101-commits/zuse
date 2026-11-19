@@ -68,14 +68,53 @@ pub fn card_border() -> Hsla {
 pub fn destructive_text() -> Hsla {
     tone(hsla(0., 0.921, 0.604, 1.), hsla(0., 0.742, 0.529, 1.))
 }
+/// Padding between a [`frame`]'s edge and its inner [`card`].
+pub const FRAME_PAD: f32 = 4.;
+/// Padding around the title in a [`frame`]'s header.
+pub const HEADER_PAD_X: f32 = 10.;
+pub const HEADER_PAD_Y: f32 = 8.;
+
+/// The settings section, one double card: the outer [`frame`] with its
+/// header (title on the left, an optional control on the right) and the
+/// inner [`card`] holding `body`'s rows. Every settings page, local or
+/// Cloud, draws its sections through this frame, header and card.
+pub fn section(header: impl IntoElement, body: impl IntoElement) -> Div {
+    frame().child(header).child(card().child(body))
+}
+
+/// The outer, slightly lighter frame of a settings section.
 pub fn frame() -> Div {
     div()
         .flex()
         .flex_col()
         .rounded(px(FRAME_RADIUS))
         .bg(frame_bg())
-        .p(px(4.))
+        .p(px(FRAME_PAD))
 }
+
+/// A [`frame`]'s header row: `title` fills the left, `action` (a 28px
+/// control) sits on the right.
+pub fn header_bar(title: impl IntoElement, action: Option<AnyElement>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .px(px(HEADER_PAD_X))
+        .py(px(HEADER_PAD_Y))
+        .child(div().flex_1().min_w_0().child(title))
+        .when_some(action, |header, action| {
+            header.child(
+                div()
+                    .h(px(CONTROL_HEIGHT))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(action),
+            )
+        })
+}
+
 pub fn header(title: impl Into<SharedString>, description: impl Into<SharedString>) -> Div {
     header_with_action(title, description, None)
 }
@@ -85,35 +124,20 @@ pub fn header_with_action(
     action: Option<AnyElement>,
 ) -> Div {
     let description = description.into();
-    div()
-        .flex()
-        .items_start()
-        .gap_3()
-        .px(px(10.))
-        .py(px(8.))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(title_text(title))
-                .when(!description.is_empty(), |view| {
-                    view.child(description_text(description))
-                }),
-        )
-        .when_some(action, |header, action| {
-            header.child(
-                div()
-                    .h(px(CONTROL_HEIGHT))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .child(action),
-            )
-        })
+    let described = !description.is_empty();
+    header_bar(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(title_text(title))
+            .when(described, |view| view.child(description_text(description))),
+        action,
+    )
+    .when(described, |header| header.items_start())
 }
+
+/// The inner card of a settings section: hairline border, card fill.
 pub fn card() -> Div {
     div()
         .flex()
@@ -124,6 +148,23 @@ pub fn card() -> Div {
         .bg(card_bg())
         .overflow_hidden()
 }
+
+/// One row of a [`card`]: content on the left, a control on the right,
+/// split from the previous row by a hairline. Rows with or without a 28px
+/// control share one height.
+pub fn row(first: bool) -> Div {
+    div()
+        .px(px(ROW_PAD_X))
+        .py(px(ROW_PAD_Y))
+        .when(!first, |row| row.border_t_1().border_color(rgb(BORDER)))
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap(px(ROW_GAP))
+        .min_h(px(CONTROL_HEIGHT + 2.0 * ROW_PAD_Y))
+}
+
 pub fn setting_row(first: bool) -> Div {
     div()
         .flex()
