@@ -98,20 +98,30 @@ pub trait AllocationProvider: Send + Sync {
     fn guest_start(&self) -> bool {
         false
     }
-    /// Verify the source, then deliver the credential and ONE command that
-    /// starts the runtime inside the computer as soon as it is safe.
-    /// Idempotent for one operation.
-    async fn start_in_guest(
+    /// Verify the source and artifact and build ONE command that starts the
+    /// runtime inside the computer as soon as it is safe. No credential yet.
+    async fn prepare_guest_start(
         &self,
         _start: &guest_start::GuestStart<'_>,
+    ) -> Result<guest_start::PreparedGuestStart, ProviderError> {
+        Err(ProviderError::Rejected)
+    }
+    /// Deliver the credential and the prepared command. The caller rechecks
+    /// its fences right before this. Idempotent for one operation.
+    async fn dispatch_guest_start(
+        &self,
+        _start: &guest_start::GuestStart<'_>,
+        _prepared: &guest_start::PreparedGuestStart,
     ) -> Result<(), ProviderError> {
         Err(ProviderError::Rejected)
     }
-    /// The in-computer start's status record; empty when there is none.
+    /// The in-computer start's status record; empty when there is none. With
+    /// `stop`, the waiting unit is stopped and its credential removed first.
     async fn guest_start_status(
         &self,
         _machine: &str,
         _operation: &str,
+        _stop: bool,
     ) -> Result<Value, ProviderError> {
         Err(ProviderError::Rejected)
     }

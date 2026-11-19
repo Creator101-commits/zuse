@@ -9,10 +9,18 @@
 //! for the loader's path rule, runs the unchanged loader and helper, accepts
 //! only a ready receipt, and launches the runtime.
 //!
+//! The credential is uploaded only after the same checks as the server-side
+//! path: the machine runs, `runtime_ready` holds, and the lease, scope and
+//! allocation phase are rechecked right before the upload.
+//!
 //! The worker then waits for the runtime's own enrollment, which pulls this
-//! job forward (see `wake_guest_started_allocation`). One status read after
-//! the in-computer deadline is the fallback; a failure hands later attempts to
-//! the server-side path, whose helper call reconciles the same journal.
+//! job forward (see `wake_guest_started_allocation`). A status read after the
+//! in-computer deadline is the fallback. While the computer may still be
+//! launching, the worker waits until every in-computer bound has passed, then
+//! reads once more after stopping the waiting unit and removing its
+//! credential. Only then (or after a bounded number of unreadable records) do
+//! later attempts use the server-side path, whose helper call reconciles the
+//! same journal.
 use super::*;
 use crate::managed_bases::bootstrap::{LOADER, Purpose, Request};
 use crate::providers::contract::VerifiedCreateSource;
@@ -22,8 +30,17 @@ pub(crate) const STARTER: &str =
     include_str!("../../../../../infra/cloud/managed-base-fresh-start.py");
 /// How long the computer waits for a safe path before it reports a timeout.
 pub(crate) const GUEST_DEADLINE_SECONDS: i64 = 60;
-/// When the worker reads the status once if the runtime has not enrolled.
+/// How long the computer lets the launch lines run after a ready receipt.
+pub(crate) const GUEST_LAUNCH_SECONDS: i64 = 60;
+/// When the worker reads the status first if the runtime has not enrolled.
 const FALLBACK_AFTER_MS: i64 = (GUEST_DEADLINE_SECONDS + 15) * 1000;
+/// By then every in-computer bound has passed: the wait and helper end at the
+/// deadline, the launch lines `GUEST_LAUNCH_SECONDS` later. The read at this
+/// point also stops the unit, so nothing in the computer races the server path.
+const SETTLED_AFTER_MS: i64 = (GUEST_DEADLINE_SECONDS + GUEST_LAUNCH_SECONDS + 15) * 1000;
+/// Unreadable final status records before the server-side path takes over.
+const MAX_STATUS_READ_FAILURES: i64 = 3;
+const STATUS_RETRY_MS: i64 = 5000;
 /// Boat answers create with a provisioned machine that runs ~2 s later.
 const RUNNING_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 const RUNNING_POLL: std::time::Duration = std::time::Duration::from_millis(300);
@@ -43,9 +60,25 @@ pub struct GuestStart<'a> {
     pub launch: &'a RuntimeLaunch,
 }
 
+/// The verified command, ready to deliver with the credential.
+pub struct PreparedGuestStart {
+    pub(crate) machine: String,
+    pub(crate) operation: String,
+    pub(crate) staged: String,
+    pub(crate) command: String,
+}
+
 /// Where the computer keeps the credential while it waits (root-only tmpfs).
 pub(crate) fn credential_path(operation: &str) -> String {
     format!("{STATUS_ROOT}/{operation}/boot")
+}
+
+/// The waiting unit's name; the same as `unit_name` in the starter.
+pub(crate) fn unit_name(operation: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(operation.as_bytes());
+    let short: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("zuse-fresh-start-{short}")
 }
 
 /// The single provider command. `launch` runs only after a ready receipt.
@@ -56,7 +89,8 @@ pub(crate) fn command(
 ) -> Result<String, ProviderError> {
     let args = json!({"version":1,"operationId":request.operation_id,"staged":staged,
         "starter":STARTER,"loader":LOADER,"helperSha256":request.image_pins.helper_sha256,
-        "request":request.encoded()?,"launch":launch,"deadlineSeconds":GUEST_DEADLINE_SECONDS});
+        "request":request.encoded()?,"launch":launch,"deadlineSeconds":GUEST_DEADLINE_SECONDS,
+        "launchSeconds":GUEST_LAUNCH_SECONDS});
     let encoded = base64::engine::general_purpose::STANDARD
         .encode(serde_json::to_vec(&args).map_err(|_| ProviderError::Rejected)?);
     Ok(format!(
@@ -66,10 +100,18 @@ pub(crate) fn command(
     ))
 }
 
-pub(crate) fn status_command(operation: &str) -> String {
+/// Reads the status record. With `stop`, first stops the waiting unit (and
+/// everything it started), confirms it is no longer active (exit 75 if it
+/// is), and removes the credential it held.
+pub(crate) fn status_command(operation: &str, stop: bool) -> String {
+    let status = quote(&format!("{STATUS_ROOT}/{operation}/status.json"));
+    if !stop {
+        return format!("sudo -n sh -c 'if test -f \"$1\"; then cat -- \"$1\"; fi' sh {status}");
+    }
     format!(
-        "sudo -n sh -c 'if test -f \"$1\"; then cat -- \"$1\"; fi' sh {}",
-        quote(&format!("{STATUS_ROOT}/{operation}/status.json"))
+        "sudo -n sh -c 'systemctl stop -- \"$3\" >/dev/null 2>&1; case \"$(systemctl show --property=ActiveState --value -- \"$3\")\" in inactive|failed) ;; *) exit 75 ;; esac; rm -f -- \"$2\"; if test -f \"$1\"; then cat -- \"$1\"; fi' sh {status} {} {}",
+        quote(&credential_path(operation)),
+        quote(&unit_name(operation))
     )
 }
 
@@ -83,10 +125,13 @@ pub(crate) fn dispatch_reply(exit_code: i32, stdout: &[u8]) -> Result<(), Provid
             let code = value["code"].as_str().unwrap_or("");
             tracing::warn!(code = %safe_code(code), "Boat in-computer start refused");
             // The upload may not have landed or systemd may be briefly busy;
-            // only these are worth another attempt.
+            // only these are worth another attempt. After an uncertain unit
+            // start, a repeat finds the record and the fallback resolves it.
             if matches!(
                 code,
-                "fresh_start_credential_missing" | "fresh_start_unit_failed"
+                "fresh_start_credential_missing"
+                    | "fresh_start_unit_failed"
+                    | "fresh_start_unit_uncertain"
             ) {
                 Err(ProviderError::Unavailable)
             } else {
@@ -138,6 +183,13 @@ pub(crate) fn outcome(status: &Value, request: &Request) -> Outcome {
     }
 }
 
+/// The record says the computer may still be waiting or launching.
+fn still_running(status: &Value, request: &Request) -> bool {
+    status["version"] == 1
+        && status["operationId"] == request.operation_id.as_str()
+        && matches!(status["status"].as_str(), Some("waiting" | "launching"))
+}
+
 impl RuntimeControl {
     /// `true` when this attempt was handled by the in-computer start.
     pub(super) async fn guest_start_allocation(
@@ -184,10 +236,74 @@ impl RuntimeControl {
                     .await?;
                 return Ok(true);
             }
-            let status = provider
-                .guest_start_status(machine, &request.operation_id)
-                .await
-                .map_err(provider_error)?;
+            let dispatched = marker["dispatchedAt"].as_i64().unwrap_or(0);
+            let settled = dispatched.saturating_add(SETTLED_AFTER_MS);
+            // The last read stops the unit first, so nothing it started can
+            // still run when the server path takes over.
+            let mut last = clock_ms() >= settled;
+            let mut read = provider
+                .guest_start_status(machine, &request.operation_id, last)
+                .await;
+            if !last
+                && read
+                    .as_ref()
+                    .is_ok_and(|status| !still_running(status, &request))
+            {
+                // Finished early. Stop what a timed-out launch may have left.
+                last = true;
+                read = provider
+                    .guest_start_status(machine, &request.operation_id, true)
+                    .await;
+            }
+            let status = match read {
+                Ok(status) => status,
+                Err(error) => {
+                    let failures =
+                        marker["statusReadFailures"].as_i64().unwrap_or(0) + i64::from(last);
+                    tracing::warn!(workspace = %job.resource_id, ?error, failures,
+                        "Boat in-computer start status unreadable");
+                    if last && failures >= MAX_STATUS_READ_FAILURES {
+                        // Every in-computer bound has passed; the server path
+                        // rechecks all fences and reconciles the helper journal.
+                        let code = "cloud_guest_start_status_unreadable";
+                        self.hand_to_server_path(provider, job, &request, marker, code)
+                            .await?;
+                        return Err(ApiError::unavailable(code));
+                    }
+                    let due = if last {
+                        clock_ms() + STATUS_RETRY_MS
+                    } else {
+                        settled
+                    };
+                    let mut next = marker.clone();
+                    next["statusReadFailures"] = json!(failures);
+                    next["fallbackAt"] = json!(due);
+                    self.save_guest_start(
+                        job,
+                        &request,
+                        Some(next),
+                        Some(due),
+                        &provider.startup_observations(),
+                    )
+                    .await?;
+                    return Ok(true);
+                }
+            };
+            if !last && still_running(&status, &request) {
+                // The computer may still be waiting or launching. Read again
+                // once its own bounds have passed, stopping the unit first.
+                let mut next = marker.clone();
+                next["fallbackAt"] = json!(settled);
+                self.save_guest_start(
+                    job,
+                    &request,
+                    Some(next),
+                    Some(settled),
+                    &provider.startup_observations(),
+                )
+                .await?;
+                return Ok(true);
+            }
             let outcome = outcome(&status, &request);
             let code = match outcome {
                 Outcome::Rejected => {
@@ -200,19 +316,8 @@ impl RuntimeControl {
                 Outcome::Launched => "cloud_guest_start_not_enrolled",
                 Outcome::Failed(code) => code,
             };
-            // Later attempts use the server-side path; its helper call
-            // reconciles the same journal (and applies its own refusals).
-            let mut next = marker.clone();
-            next["serverPath"] = json!(true);
-            next["code"] = json!(code);
-            self.save_guest_start(
-                job,
-                &request,
-                Some(next),
-                None,
-                &provider.startup_observations(),
-            )
-            .await?;
+            self.hand_to_server_path(provider, job, &request, marker, code)
+                .await?;
             if outcome == Outcome::Rejected {
                 return Err(provider_error(ProviderError::Rejected));
             }
@@ -227,7 +332,9 @@ impl RuntimeControl {
         if !unbound {
             return Ok(false);
         }
-        // Source verification requires the original machine to be running.
+        // Source verification requires the original machine to be running,
+        // and, as on the server-side path, no boot credential is uploaded
+        // before `runtime_ready` holds.
         let until = tokio::time::Instant::now() + RUNNING_WAIT;
         loop {
             let observed = provider
@@ -238,23 +345,28 @@ impl RuntimeControl {
             if observed.id != machine || observed.name != name {
                 return Err(ApiError::conflict("cloud_allocation_identity_conflict"));
             }
-            match observed.state {
-                MachineState::Running => break,
-                MachineState::Starting if tokio::time::Instant::now() < until => {
-                    tokio::time::sleep(RUNNING_POLL).await
-                }
-                MachineState::Starting => {
-                    self.defer_starting_allocation(
-                        job,
-                        operation,
-                        machine,
-                        &provider.startup_observations(),
-                    )
-                    .await?;
-                    return Ok(true);
-                }
+            let ready = match observed.state {
+                MachineState::Running => provider
+                    .runtime_ready(machine)
+                    .await
+                    .map_err(provider_error)?,
+                MachineState::Starting => false,
                 _ => return Err(ApiError::unavailable("cloud_allocation_machine_starting")),
+            };
+            if ready {
+                break;
             }
+            if tokio::time::Instant::now() >= until {
+                self.defer_starting_allocation(
+                    job,
+                    operation,
+                    machine,
+                    &provider.startup_observations(),
+                )
+                .await?;
+                return Ok(true);
+            }
+            tokio::time::sleep(RUNNING_POLL).await;
         }
         // The same scope check and fresh fence as the server-side path; the
         // fence also moves the allocation to launching before any credential.
@@ -272,15 +384,26 @@ impl RuntimeControl {
             api_url: self.signer.issuer(),
             boot_token: self.open_boot_token(job, operation)?,
         };
+        let start = GuestStart {
+            machine,
+            artifact: source,
+            name,
+            request: &request,
+            receipt: authority.as_ref(),
+            launch: &launch,
+        };
+        let prepared = provider
+            .prepare_guest_start(&start)
+            .await
+            .map_err(provider_error)?;
+        // Verification was unlocked provider work: recheck scope, lease and
+        // allocation phase right before the credential leaves this worker.
+        self.allocation_scope_access(&current, operation, clock_ms())
+            .await?;
+        self.initial_boot_allocation_fence(job, &request, source, name, None)
+            .await?;
         provider
-            .start_in_guest(&GuestStart {
-                machine,
-                artifact: source,
-                name,
-                request: &request,
-                receipt: authority.as_ref(),
-                launch: &launch,
-            })
+            .dispatch_guest_start(&start, &prepared)
             .await
             .map_err(provider_error)?;
         let now = clock_ms();
@@ -297,6 +420,29 @@ impl RuntimeControl {
         )
         .await?;
         Ok(true)
+    }
+
+    /// Later attempts use the server-side path; its helper call reconciles the
+    /// same journal (and applies its own refusals).
+    async fn hand_to_server_path(
+        &self,
+        provider: &dyn AllocationProvider,
+        job: &jobs::Job,
+        request: &Request,
+        marker: &Value,
+        code: &'static str,
+    ) -> Result<(), ApiError> {
+        let mut next = marker.clone();
+        next["serverPath"] = json!(true);
+        next["code"] = json!(code);
+        self.save_guest_start(
+            job,
+            request,
+            Some(next),
+            None,
+            &provider.startup_observations(),
+        )
+        .await
     }
 
     /// Records the marker and/or defers this lease until `due`, under the

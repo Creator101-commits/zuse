@@ -10,13 +10,20 @@ use std::sync::{
 /// A Boat computer whose first start waits inside the guest.
 struct Guest {
     machine: Mutex<Option<Machine>>,
-    status: Mutex<Value>,
+    /// Status reads answer in order; the last answer repeats.
+    status: Mutex<Vec<Result<Value, ProviderError>>>,
+    prepares: AtomicUsize,
     dispatches: AtomicUsize,
     status_reads: AtomicUsize,
+    stops: AtomicUsize,
     inspections: AtomicUsize,
+    readiness_checks: AtomicUsize,
     helper_calls: AtomicUsize,
     launches: AtomicUsize,
     starting_inspections: usize,
+    not_ready_checks: usize,
+    /// Fences the workspace during verification, before any upload.
+    fence_during_prepare: Option<(sqlx::PgPool, String)>,
 }
 #[async_trait]
 impl AllocationProvider for Guest {
@@ -38,6 +45,9 @@ impl AllocationProvider for Guest {
             m.state = MachineState::Starting;
         }
         Ok(machine)
+    }
+    async fn runtime_ready(&self, _: &str) -> Result<bool, ProviderError> {
+        Ok(self.readiness_checks.fetch_add(1, Ordering::SeqCst) >= self.not_ready_checks)
     }
     async fn create(&self, _: &str, name: &str) -> Result<Machine, ProviderError> {
         let m = Machine {
@@ -66,19 +76,60 @@ impl AllocationProvider for Guest {
         self.launches.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn start_in_guest(&self, start: &GuestStart<'_>) -> Result<(), ProviderError> {
+    async fn prepare_guest_start(
+        &self,
+        start: &GuestStart<'_>,
+    ) -> Result<PreparedGuestStart, ProviderError> {
         assert_eq!(start.machine, "original-machine");
         assert_eq!(start.artifact, "managed-artifact");
         assert!(start.request.valid());
         assert_eq!(start.launch.operation_id, start.request.operation_id);
+        // Never before the runtime is ready.
+        assert!(self.readiness_checks.load(Ordering::SeqCst) > self.not_ready_checks);
+        self.prepares.fetch_add(1, Ordering::SeqCst);
+        if let Some((pool, workspace)) = &self.fence_during_prepare {
+            sqlx::query(
+                "UPDATE api_cloud_workspaces SET desired_state='stopped' WHERE workspace_id=$1",
+            )
+            .bind(workspace)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        Ok(PreparedGuestStart {
+            machine: start.machine.into(),
+            operation: start.request.operation_id.clone(),
+            staged: "/tmp/staged".into(),
+            command: "start".into(),
+        })
+    }
+    async fn dispatch_guest_start(
+        &self,
+        start: &GuestStart<'_>,
+        prepared: &PreparedGuestStart,
+    ) -> Result<(), ProviderError> {
+        assert_eq!(prepared.machine, start.machine);
         assert!(!start.launch.boot_token.is_empty());
         self.dispatches.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn guest_start_status(&self, machine: &str, _: &str) -> Result<Value, ProviderError> {
+    async fn guest_start_status(
+        &self,
+        machine: &str,
+        _: &str,
+        stop: bool,
+    ) -> Result<Value, ProviderError> {
         assert_eq!(machine, "original-machine");
         self.status_reads.fetch_add(1, Ordering::SeqCst);
-        Ok(self.status.lock().unwrap().clone())
+        if stop {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+        }
+        let mut answers = self.status.lock().unwrap();
+        if answers.len() > 1 {
+            answers.remove(0)
+        } else {
+            answers[0].clone()
+        }
     }
 }
 
@@ -88,6 +139,15 @@ async fn job(pool: &sqlx::PgPool, workspace: &str) -> (String, i64, Value) {
         .fetch_one(pool)
         .await
         .unwrap()
+}
+/// As if every in-computer bound had passed since dispatch.
+async fn settle(pool: &sqlx::PgPool, workspace: &str) {
+    sqlx::query("UPDATE api_cloud_workspaces SET request_config=jsonb_set(jsonb_set(request_config,'{rustGuestStart,fallbackAt}','0'),'{rustGuestStart,dispatchedAt}','0') WHERE workspace_id=$1").bind(workspace).execute(pool).await.unwrap();
+    due_now(pool, workspace).await;
+}
+async fn marker(pool: &sqlx::PgPool, workspace: &str) -> (Option<String>, Value) {
+    let (code, marker): (Option<String>, Option<Value>) = sqlx::query_as("SELECT j.last_error_code,w.request_config->'rustGuestStart' FROM zuse_rust_jobs j JOIN api_cloud_workspaces w ON w.workspace_id=j.resource_id WHERE j.resource_id=$1").bind(workspace).fetch_one(pool).await.unwrap();
+    (code, marker.unwrap_or(Value::Null))
 }
 async fn due_now(pool: &sqlx::PgPool, workspace: &str) {
     sqlx::query("UPDATE zuse_rust_jobs SET due_at=0 WHERE resource_id=$1")
@@ -112,6 +172,9 @@ async fn one_dispatch_then_enrollment_wakes_the_job_and_failures_fall_back_once(
         "timeout",
         "launched-not-enrolled",
         "rejected",
+        "still-launching",
+        "unreadable",
+        "fenced-before-upload",
     ] {
         let schema = format!("guest_start_{}", uuid::Uuid::new_v4().simple());
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
@@ -169,14 +232,40 @@ async fn one_dispatch_then_enrollment_wakes_the_job_and_failures_fall_back_once(
             .unwrap();
         let guest = Guest {
             machine: Mutex::new(None),
-            status: Mutex::new(json!({})),
+            status: Mutex::new(vec![Ok(json!({}))]),
+            prepares: AtomicUsize::new(0),
             dispatches: AtomicUsize::new(0),
             status_reads: AtomicUsize::new(0),
+            stops: AtomicUsize::new(0),
             inspections: AtomicUsize::new(0),
+            readiness_checks: AtomicUsize::new(0),
             helper_calls: AtomicUsize::new(0),
             launches: AtomicUsize::new(0),
             starting_inspections: 2,
+            not_ready_checks: 1,
+            fence_during_prepare: (case == "fenced-before-upload")
+                .then(|| (pool.clone(), workspace.clone())),
         };
+
+        if case == "fenced-before-upload" {
+            // The workspace changes while the source is verified: the fence
+            // right before the upload refuses, and no credential leaves.
+            let _ = control.allocate_once(&guest, clock_ms()).await;
+            assert_eq!(guest.prepares.load(Ordering::SeqCst), 1);
+            assert_eq!(guest.dispatches.load(Ordering::SeqCst), 0);
+            let (code, marker) = marker(&pool, &workspace).await;
+            assert_eq!(
+                code.as_deref(),
+                Some("cloud_initial_runtime_bootstrap_fenced")
+            );
+            assert!(marker.is_null());
+            pool.close().await;
+            sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+                .execute(&admin)
+                .await
+                .unwrap();
+            continue;
+        }
 
         // Create, wait for running, one dispatch. No helper, no server launch.
         control.allocate_once(&guest, clock_ms()).await.unwrap();
@@ -184,6 +273,7 @@ async fn one_dispatch_then_enrollment_wakes_the_job_and_failures_fall_back_once(
         assert_eq!(guest.helper_calls.load(Ordering::SeqCst), 0);
         assert_eq!(guest.launches.load(Ordering::SeqCst), 0);
         assert!(guest.inspections.load(Ordering::SeqCst) >= 3);
+        assert_eq!(guest.readiness_checks.load(Ordering::SeqCst), 2);
         let phase: String =
             sqlx::query_scalar("SELECT phase FROM zuse_rust_allocations WHERE operation_id=$1")
                 .bind(&operation)
@@ -238,6 +328,63 @@ async fn one_dispatch_then_enrollment_wakes_the_job_and_failures_fall_back_once(
                 assert_eq!(guest.status_reads.load(Ordering::SeqCst), 0);
                 assert_eq!(guest.dispatches.load(Ordering::SeqCst), 1);
             }
+            "still-launching" | "unreadable" => {
+                let r: Request = serde_json::from_value(json!({"version":1,"provider":"boat","purpose":"initial-allocation","operationId":operation,"workspaceId":workspace,"generation":1,"storageIncarnationId":row["request_config"]["rustRuntimeStorage"]["storageIncarnationId"],"sourceMachineId":"original-machine","imagePins":{"runtimeSha256":"a".repeat(64),"supervisorSha256":"b".repeat(64),"serviceSha256":"c".repeat(64),"manifestSha256":"d".repeat(64),"helperSha256":"e".repeat(64)}})).unwrap();
+                let launching = json!({"version":1,"operationId":operation,"status":"launching","receipt":ready(&r)});
+                *guest.status.lock().unwrap() = if case == "unreadable" {
+                    vec![Err(ProviderError::Unavailable)]
+                } else {
+                    vec![Ok(launching)]
+                };
+                // The first read finds the computer possibly still busy: wait
+                // for its bounds, never hand off yet, never stop it yet.
+                sqlx::query("UPDATE api_cloud_workspaces SET request_config=jsonb_set(request_config,'{rustGuestStart,fallbackAt}','0') WHERE workspace_id=$1").bind(&workspace).execute(&pool).await.unwrap();
+                due_now(&pool, &workspace).await;
+                control.allocate_once(&guest, clock_ms()).await.unwrap();
+                assert_eq!(guest.status_reads.load(Ordering::SeqCst), 1);
+                assert_eq!(guest.stops.load(Ordering::SeqCst), 0);
+                let (state, due, _) = job(&pool, &workspace).await;
+                assert_eq!(state, "pending");
+                assert!(due >= clock_ms() + 100_000, "waits for the bounds: {due}");
+                let (_, mark) = marker(&pool, &workspace).await;
+                assert!(mark["serverPath"].is_null());
+                assert_eq!(mark["fallbackAt"], due);
+                // Unreadable final records are retried a bounded number of
+                // times, each stopping the unit first, then handed back.
+                let reads = if case == "unreadable" {
+                    MAX_STATUS_READ_FAILURES as usize
+                } else {
+                    1
+                };
+                for read in 1..=reads {
+                    settle(&pool, &workspace).await;
+                    let _ = control.allocate_once(&guest, clock_ms()).await;
+                    assert_eq!(guest.stops.load(Ordering::SeqCst), read);
+                    let (_, mark) = marker(&pool, &workspace).await;
+                    if read < reads {
+                        assert!(mark["serverPath"].is_null());
+                        assert_eq!(mark["statusReadFailures"], read);
+                        let (state, due, _) = job(&pool, &workspace).await;
+                        assert_eq!(state, "pending");
+                        assert!(due <= clock_ms() + STATUS_RETRY_MS);
+                    }
+                }
+                let (code, mark) = marker(&pool, &workspace).await;
+                let expected = if case == "unreadable" {
+                    "cloud_guest_start_status_unreadable"
+                } else {
+                    "cloud_guest_start_launch_unfinished"
+                };
+                assert_eq!(code.as_deref(), Some(expected));
+                assert_eq!(mark["serverPath"], true);
+                assert_eq!(mark["code"], expected);
+                due_now(&pool, &workspace).await;
+                control.allocate_once(&guest, clock_ms()).await.unwrap();
+                assert_eq!(guest.helper_calls.load(Ordering::SeqCst), 1);
+                assert_eq!(guest.launches.load(Ordering::SeqCst), 1);
+                assert_eq!(guest.dispatches.load(Ordering::SeqCst), 1);
+                assert_eq!(guest.status_reads.load(Ordering::SeqCst), 1 + reads);
+            }
             _ => {
                 let status = match case {
                     "timeout" => {
@@ -251,12 +398,15 @@ async fn one_dispatch_then_enrollment_wakes_the_job_and_failures_fall_back_once(
                         json!({"version":1,"operationId":operation,"status":"launched","receipt":ready(&r)})
                     }
                 };
-                *guest.status.lock().unwrap() = status;
+                *guest.status.lock().unwrap() = vec![Ok(status)];
                 sqlx::query("UPDATE api_cloud_workspaces SET request_config=jsonb_set(request_config,'{rustGuestStart,fallbackAt}','0') WHERE workspace_id=$1").bind(&workspace).execute(&pool).await.unwrap();
                 due_now(&pool, &workspace).await;
                 let _ = control.allocate_once(&guest, clock_ms()).await;
-                assert_eq!(guest.status_reads.load(Ordering::SeqCst), 1);
-                let (code, marker): (Option<String>, Value) = sqlx::query_as("SELECT j.last_error_code,w.request_config->'rustGuestStart' FROM zuse_rust_jobs j JOIN api_cloud_workspaces w ON w.workspace_id=j.resource_id WHERE j.resource_id=$1").bind(&workspace).fetch_one(&pool).await.unwrap();
+                // A finished record hands off at once, after one stopping
+                // read (a timed-out launch may have left a process behind).
+                assert_eq!(guest.status_reads.load(Ordering::SeqCst), 2);
+                assert_eq!(guest.stops.load(Ordering::SeqCst), 1);
+                let (code, marker) = marker(&pool, &workspace).await;
                 let (expected, marked) = match case {
                     "timeout" => ("cloud_guest_start_timeout", "cloud_guest_start_timeout"),
                     "rejected" => ("cloud_provider_rejected", "cloud_guest_start_rejected"),
@@ -275,7 +425,7 @@ async fn one_dispatch_then_enrollment_wakes_the_job_and_failures_fall_back_once(
                 assert_eq!(guest.helper_calls.load(Ordering::SeqCst), 1);
                 assert_eq!(guest.launches.load(Ordering::SeqCst), 1);
                 assert_eq!(guest.dispatches.load(Ordering::SeqCst), 1);
-                assert_eq!(guest.status_reads.load(Ordering::SeqCst), 1);
+                assert_eq!(guest.status_reads.load(Ordering::SeqCst), 2);
             }
         }
         pool.close().await;

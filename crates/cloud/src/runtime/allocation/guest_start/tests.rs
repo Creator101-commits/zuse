@@ -47,10 +47,33 @@ fn one_command_carries_the_unchanged_loader_and_request_but_never_the_credential
     assert_eq!(args["staged"], "/tmp/zuse-rust-boot-op-one");
     assert_eq!(args["launch"], "launch-lines");
     assert_eq!(args["deadlineSeconds"], GUEST_DEADLINE_SECONDS);
+    assert_eq!(args["launchSeconds"], GUEST_LAUNCH_SECONDS);
     assert_eq!(
         credential_path("op-one"),
         "/run/zuse-fresh-start/op-one/boot"
     );
+}
+
+#[test]
+fn the_last_status_read_stops_the_waiting_unit_and_removes_its_credential() {
+    // The same name the starter gives the unit (sha256("op-one")[:16]).
+    assert_eq!(unit_name("op-one"), "zuse-fresh-start-6c2c7720771a4535");
+    let read = status_command("op-one", false);
+    assert!(!read.contains("systemctl"));
+    assert!(read.contains("'/run/zuse-fresh-start/op-one/status.json'"));
+    let last = status_command("op-one", true);
+    let stop = last.find("systemctl stop").unwrap();
+    let confirm = last.find("ActiveState").unwrap();
+    let remove = last.find("rm -f").unwrap();
+    let cat = last.find("cat --").unwrap();
+    assert!(stop < confirm && confirm < remove && remove < cat, "{last}");
+    assert!(last.contains("exit 75"));
+    assert!(last.ends_with(
+        " sh '/run/zuse-fresh-start/op-one/status.json' '/run/zuse-fresh-start/op-one/boot' 'zuse-fresh-start-6c2c7720771a4535'"
+    ));
+    // The bounds the worker waits out cover every in-computer timer.
+    assert!(SETTLED_AFTER_MS > (GUEST_DEADLINE_SECONDS + GUEST_LAUNCH_SECONDS) * 1000);
+    assert!(SETTLED_AFTER_MS > FALLBACK_AFTER_MS);
 }
 
 #[test]
@@ -63,6 +86,7 @@ fn dispatch_reply_retries_only_transient_refusals() {
     for (code, expected) in [
         ("fresh_start_credential_missing", ProviderError::Unavailable),
         ("fresh_start_unit_failed", ProviderError::Unavailable),
+        ("fresh_start_unit_uncertain", ProviderError::Unavailable),
         ("fresh_start_run_unsafe", ProviderError::Rejected),
         ("fresh_start_request_invalid", ProviderError::Rejected),
     ] {
