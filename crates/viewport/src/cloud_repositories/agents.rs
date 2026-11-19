@@ -751,7 +751,7 @@ impl RepositoryPanel {
                     ConnectionState::Revoked => "Disconnected".into(),
                     ConnectionState::Error => "Connection failed. Reconnect to try again.".into(),
                 })
-                .unwrap_or_else(|| "Connect your account or API key".into());
+                .unwrap_or_default();
             let expected_owner = self.owner.clone();
             // Unconnected agents say so in their description; a pill only
             // marks a connection that exists.

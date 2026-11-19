@@ -134,78 +134,80 @@ impl RepositoryPanel {
             });
         }));
     }
-    pub(super) fn github_disconnect_row(&self, cx: &mut Context<Self>) -> Option<Div> {
-        if !self.github_native {
+    /// The low-key GitHub actions behind "…": disconnecting your own
+    /// authorization (members never change another member's account).
+    pub(super) fn github_menu_items(&self) -> Vec<super::presentation::MenuItem> {
+        if !self.github_native || self.github_connection_state != "connected" {
+            return vec![];
+        }
+        vec![super::presentation::MenuItem {
+            id: "ask-github-disconnect".into(),
+            glyph: "logout-2",
+            label: "Disconnect GitHub…".into(),
+            danger: true,
+            run: std::rc::Rc::new(|this: &mut Self, _: &mut Window, _: &mut Context<Self>| {
+                this.github_disconnect_confirm = true;
+            }),
+        }]
+    }
+
+    /// Confirms a disconnect chosen from the menu.
+    pub(super) fn github_disconnect_confirm_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.github_native
+            || self.github_connection_state != "connected"
+            || !self.github_disconnect_confirm
+        {
             return None;
         }
         let busy = self.repository_busy();
-        if self.github_connection_state == "revoking" {
-            return Some(cs::setting_row(
-                false,
-                "Finish disconnecting GitHub",
-                "GitHub has not confirmed revocation yet. Retry to finish safely.",
-                Some(
-                    cs::button(
-                        "retry-github-disconnect",
-                        "Retry disconnect",
-                        false,
-                        busy,
-                        busy,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.disconnect_github(cx)))
-                    .into_any_element(),
+        Some(
+            row()
+                .items_center()
+                .gap(px(8.))
+                .px(px(12.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(palette::rgb(BORDER).opacity(0.7))
+                .child(div().flex_1().min_w_0().child(crate::cloud_settings::kit::title_with_tip(
+                    "Disconnect GitHub?",
+                    "This revokes your GitHub authorization and scoped Git credentials. Reconnect to use private repositories.",
+                )))
+                .child(
+                    cs::button("keep-github-connected", "Keep connected", false, busy, false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.github_disconnect_confirm = false;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    cs::button("confirm-github-disconnect", "Disconnect", false, busy, busy)
+                        .text_color(s::destructive_text())
+                        .on_click(cx.listener(|this, _, _, cx| this.disconnect_github(cx))),
                 ),
-            ));
-        }
-        if self.github_connection_state != "connected" {
+        )
+    }
+
+    /// A disconnect GitHub hasn't confirmed yet can be retried.
+    pub(super) fn github_revoking_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if !self.github_native || self.github_connection_state != "revoking" {
             return None;
         }
-        let controls = if self.github_disconnect_confirm {
-            row()
-                .gap(px(8.))
-                .child(
-                    cs::button(
-                        "confirm-github-disconnect",
-                        "Disconnect GitHub",
-                        false,
-                        busy,
-                        busy,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.disconnect_github(cx))),
-                )
-                .child(
-                    cs::button(
-                        "keep-github-connected",
-                        "Keep connected",
-                        false,
-                        busy,
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.github_disconnect_confirm = false;
-                        cx.notify();
-                    })),
-                )
-        } else {
-            row().child(
-                cs::button("ask-github-disconnect", "Disconnect…", false, busy, false).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.github_disconnect_confirm = true;
-                        cx.notify();
-                    }),
-                ),
-            )
-        };
-        Some(cs::setting_row_content(
+        let busy = self.repository_busy();
+        Some(cs::setting_row(
             false,
-            "GitHub connection",
-            if self.github_disconnect_confirm {
-                "This revokes your GitHub authorization and scoped Git credentials. Reconnect to use private repositories."
-            } else {
-                "Manage your own authorization without changing another member’s account."
-            },
-            None,
-            controls,
+            "Finish disconnecting GitHub",
+            "GitHub has not confirmed revocation yet. Retry to finish safely.",
+            Some(
+                cs::button(
+                    "retry-github-disconnect",
+                    "Retry disconnect",
+                    false,
+                    busy,
+                    busy,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.disconnect_github(cx)))
+                .into_any_element(),
+            ),
         ))
     }
     fn disconnect_github(&mut self, cx: &mut Context<Self>) {

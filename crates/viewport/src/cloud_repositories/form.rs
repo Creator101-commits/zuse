@@ -20,13 +20,7 @@ pub(super) fn script_field(
 ) -> Div {
     column()
         .gap(px(6.))
-        .child(
-            row()
-                .items_baseline()
-                .gap(px(8.))
-                .child(s::title_text(label))
-                .child(s::description_text(hint)),
-        )
+        .child(crate::cloud_settings::kit::title_with_tip(label, hint))
         .child(script_box(input))
 }
 

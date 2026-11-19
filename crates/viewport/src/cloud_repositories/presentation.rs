@@ -2,6 +2,7 @@
 use super::*;
 use crate::cloud_settings::kit;
 use crate::localization::message as tr;
+use crate::tooltip::TooltipExt as _;
 use zuse_i18n::messages as msg;
 pub(super) fn avatar(name: &str, url: Option<&str>, size: f32) -> AnyElement {
     let owner = name.split('/').next().unwrap_or(name);
@@ -43,6 +44,39 @@ pub(super) fn ago(iso: &str) -> Option<String> {
         s => format!("{}y ago", s / (365 * 86_400)),
     })
 }
+/// One entry of an overflow menu.
+pub(super) struct MenuItem {
+    pub id: SharedString,
+    pub glyph: &'static str,
+    pub label: SharedString,
+    pub danger: bool,
+    pub run: std::rc::Rc<dyn Fn(&mut RepositoryPanel, &mut Window, &mut Context<RepositoryPanel>)>,
+}
+/// GitHub's settings page for one installation: where its owner changes
+/// which repositories the app can access.
+pub(super) fn installation_url(
+    install: &zuse_protocol::cloud_projects::GithubInstallation,
+) -> String {
+    if install.account_type.eq_ignore_ascii_case("organization") {
+        format!(
+            "https://github.com/organizations/{}/settings/installations/{}",
+            install.account_login, install.installation_id
+        )
+    } else {
+        format!(
+            "https://github.com/settings/installations/{}",
+            install.installation_id
+        )
+    }
+}
+/// "All repositories", or how many the installation was given.
+pub(super) fn access_summary(selection: &str, selected: usize) -> String {
+    if selection == "selected" {
+        format!("{selected} selected")
+    } else {
+        "All repositories".into()
+    }
+}
 fn owner_of(name: &str) -> &str {
     name.split('/').next().unwrap_or(name)
 }
@@ -60,19 +94,67 @@ impl RepositoryPanel {
             .installations
             .iter()
             .find(|i| !i.suspended)?;
-        Some(
-            if install.account_type.eq_ignore_ascii_case("organization") {
-                format!(
-                    "https://github.com/organizations/{}/settings/installations/{}",
-                    install.account_login, install.installation_id
-                )
-            } else {
-                format!(
-                    "https://github.com/settings/installations/{}",
-                    install.installation_id
-                )
-            },
-        )
+        Some(installation_url(install))
+    }
+    /// A "…" button that opens a small menu of `items` below it. One menu is
+    /// open at a time; clicking elsewhere closes it.
+    pub(super) fn overflow_menu(
+        &self,
+        id: SharedString,
+        label: SharedString,
+        disabled: bool,
+        items: Vec<MenuItem>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.overflow.as_ref() == Some(&id);
+        let toggle = id.clone();
+        let mut trigger = div().relative().child(
+            cs::icon_button(id.clone(), "more-horizontal", label, disabled, false).on_click(
+                cx.listener(move |this, _, _, cx| {
+                    this.overflow = if this.overflow.as_ref() == Some(&toggle) {
+                        None
+                    } else {
+                        Some(toggle.clone())
+                    };
+                    cx.notify();
+                }),
+            ),
+        );
+        if open && !disabled {
+            let mut menu = kit::menu_surface()
+                .id(SharedString::from(format!("{id}-menu")))
+                .role(Role::Menu)
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    this.overflow = None;
+                    cx.notify();
+                }));
+            for item in items {
+                let run = item.run.clone();
+                menu = menu.child(
+                    kit::menu_item(item.id, item.glyph, item.label, item.danger).on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.overflow = None;
+                            run(this, window, cx);
+                            cx.notify();
+                        }),
+                    ),
+                );
+            }
+            trigger = trigger.child(
+                div()
+                    .absolute()
+                    .right(px(0.))
+                    .top(relative(1.))
+                    .child(deferred(
+                        anchored()
+                            .anchor(Anchor::TopRight)
+                            .offset(point(px(0.), px(4.)))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(menu),
+                    )),
+            );
+        }
+        trigger.into_any_element()
     }
     fn picker_link(
         id: &'static str,
@@ -194,18 +276,19 @@ impl RepositoryPanel {
         let disabled = busy || !self.github_connected() || !self.can_manage();
         let empty = self.projects.is_empty();
         let mut trigger = div().relative().child(
-            cs::icon_label_button(
+            kit::primary_button(
                 "add-cloud-repositories",
-                "plus",
-                if empty { "Repository" } else { "" },
-                false,
-                disabled,
-                false,
+                if empty {
+                    "Add your first repository"
+                } else {
+                    "Add repository"
+                },
+                !disabled,
             )
-            .when(!empty, |v| v.w(px(28.)).px(px(0.)).gap(px(0.)))
-            .aria_label(tr(cx, msg::connections::cloud_workspace_menu_repository))
             .track_focus(&self.picker_trigger.clone().tab_stop(!disabled))
-            .on_click(cx.listener(|this, _, window, cx| this.picker_action(window, cx))),
+            .when(!disabled, |b| {
+                b.on_click(cx.listener(|this, _, window, cx| this.picker_action(window, cx)))
+            }),
         );
         if self.picker {
             let (available, repos) = self.available_repositories(cx);
@@ -547,21 +630,16 @@ impl RepositoryPanel {
                         "projects-project_setup_dialog_loading_repositories",
                         cx,
                     ),
-                    "This takes a moment the first time.",
+                    "",
                     None,
                 )
             } else if !self.github_connected() {
-                kit::empty_state(
-                    "dither-branch",
-                    "Connect GitHub first",
-                    "Once the Zuse app is installed, pick the repositories agents can check out, commit to and open pull requests on.",
-                    None,
-                )
+                kit::empty_state("dither-branch", "Connect GitHub first", "", None)
             } else {
                 kit::empty_state(
                     "dither-branch",
                     "No repositories yet",
-                    "Add the repositories cloud chats can work on. You can change this any time.",
+                    "",
                     Some(self.add_action(window, cx)),
                 )
             });
@@ -577,6 +655,38 @@ impl RepositoryPanel {
                     .find(|r| r.name_with_owner.eq_ignore_ascii_case(identity))
             });
             let removing = self.pending.values().any(|p| p.kind == "remove");
+            let name = project.display_name.clone();
+            let remove = MenuItem {
+                id: SharedString::from(format!("remove-cloud-repository-{id}")),
+                glyph: "trash-bin-minimalistic",
+                label: "Remove repository".into(),
+                danger: true,
+                run: std::rc::Rc::new({
+                    let id = id.clone();
+                    move |this: &mut RepositoryPanel,
+                          _: &mut Window,
+                          cx: &mut Context<RepositoryPanel>| {
+                        if this.repository_busy() || !this.can_manage() {
+                            return;
+                        }
+                        this.error = None;
+                        this.notice = None;
+                        this.call(
+                            "remove",
+                            methods::CLOUD_PROJECT_REMOVE,
+                            json!({"projectId":id}),
+                            cx,
+                        );
+                    }
+                }),
+            };
+            let overflow = self.overflow_menu(
+                SharedString::from(format!("cloud-repository-more-{id}")),
+                format!("More for {name}").into(),
+                busy || !can_manage || removing,
+                vec![remove],
+                cx,
+            );
             body = body.child(
                 row()
                     .h(px(48.))
@@ -595,22 +705,19 @@ impl RepositoryPanel {
                         column()
                             .flex_1()
                             .min_w_0()
-                            .child(s::title_text(project.display_name.clone()).truncate())
+                            .child(s::title_text(name).truncate())
                             .child(
                                 div()
                                     .text_size(px(10.))
                                     .line_height(px(13.5))
                                     .text_color(palette::rgb(MUTED))
                                     .child(format!(
-                                        "{} · {}{}",
+                                        "{} · {}",
                                         project.default_branch,
                                         match project.visibility {
                                             zuse_protocol::cloud_projects::ProjectVisibility::Private => "Private",
                                             zuse_protocol::cloud_projects::ProjectVisibility::Public => "Public",
                                         },
-                                        repo.and_then(|r| ago(&r.updated_at))
-                                            .map(|t| format!(" · pushed {t}"))
-                                            .unwrap_or_default(),
                                     )),
                             ),
                     )
@@ -630,29 +737,7 @@ impl RepositoryPanel {
                             })),
                         )
                     })
-                    .child(
-                        cs::icon_button(
-                            SharedString::from(format!("remove-cloud-repository-{id}")),
-                            "close",
-                            format!("Remove {}", project.display_name),
-                            busy || !can_manage,
-                            removing,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.repository_busy() || !this.can_manage() {
-                                return;
-                            }
-                            this.error = None;
-                            this.notice = None;
-                            this.call(
-                                "remove",
-                                methods::CLOUD_PROJECT_REMOVE,
-                                json!({"projectId":id}),
-                                cx,
-                            );
-                            cx.notify();
-                        })),
-                    ),
+                    .child(overflow),
             );
         }
         if let Some(error) = &self.error {
@@ -682,27 +767,35 @@ impl RepositoryPanel {
         )
     }
     pub(super) fn github_group(&self, _window: &Window, cx: &mut Context<Self>) -> Div {
+        const HELP: &str = "Cloud agents commit, push and open pull requests as you. Repository access changes made on GitHub refresh here when you come back; existing cloud chats aren't affected.";
         if let Some(body) = self.github_operation_rows(cx) {
-            return kit::section(
-                "GitHub",
-                "Connect your own GitHub account, then choose the installation to use.",
-                None,
-                body,
-            );
+            return kit::section("GitHub", HELP, None, body);
         }
-
         let loading = self
             .pending
             .values()
             .any(|p| matches!(p.kind, "github" | "github-install"));
+        let busy = self.repository_busy();
+        let can_manage = self.can_manage();
         let configured = self.github.as_ref().is_none_or(|g| g.configured);
-        let connected = self.github_connected();
+        let install = |this: &mut Self, cx: &mut Context<Self>| {
+            if !this.repository_busy() && this.can_manage() {
+                this.call(
+                    "github-install",
+                    methods::CLOUD_GITHUB_INSTALL,
+                    json!({}),
+                    cx,
+                );
+            }
+        };
         let mut body = column();
+        let mut action = None;
         if !configured {
-            body = body.child(cs::setting_row(
+            body = body.child(kit::row_item(
                 true,
+                None,
                 "GitHub App is not configured",
-                "Add the GitHub App credentials to the API, deploy it, then retry.",
+                "",
                 Some(cs::error_badge("Unavailable").into_any_element()),
             ));
         } else if self
@@ -713,78 +806,139 @@ impl RepositoryPanel {
             body = body.child(kit::empty_state(
                 "site-github",
                 "Connect GitHub",
-                "Install the Zuse app on GitHub, then choose which repositories cloud agents can work on.",
+                "",
                 Some(
-                    cs::icon_label_button(
-                        "connect-cloud-github",
-                        "github",
-                        "Connect GitHub",
-                        true,
-                        loading,
-                        loading,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if !this.repository_busy() {
-                            this.call(
-                                "github-install",
-                                zuse_protocol::methods::CLOUD_GITHUB_INSTALL,
-                                serde_json::json!({}),
-                                cx,
-                            );
-                        }
-                    }))
-                    .into_any_element(),
+                    kit::primary_button("connect-cloud-github", "Connect GitHub", !loading)
+                        .when(!loading, |b| {
+                            b.on_click(cx.listener(move |this, _, _, cx| install(this, cx)))
+                        })
+                        .into_any_element(),
                 ),
             ));
         } else if let Some(github) = &self.github {
-            for (i, install) in github.installations.iter().enumerate() {
-                let badge = if install.suspended {
-                    kit::pill("Suspended", kit::Tone::Attention)
-                } else if github.user.is_none() {
-                    kit::pill("Install GitHub App", kit::Tone::Attention)
-                } else {
-                    kit::pill("Connected", kit::Tone::Ready)
-                };
-                body = body.child(cs::setting_row_content(
+            for (i, installation) in github.installations.iter().enumerate() {
+                let organization = installation
+                    .account_type
+                    .eq_ignore_ascii_case("organization");
+                let selected = github
+                    .repositories
+                    .iter()
+                    .filter(|r| {
+                        owner_of(&r.name_with_owner)
+                            .eq_ignore_ascii_case(&installation.account_login)
+                    })
+                    .count();
+                let url = installation_url(installation);
+                let trailing = row()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette::rgb(MUTED))
+                            .child(access_summary(&installation.repository_selection, selected)),
+                    )
+                    .child(
+                        cs::button(
+                            SharedString::from(format!(
+                                "manage-github-access-{}",
+                                installation.installation_id
+                            )),
+                            "Manage access",
+                            false,
+                            false,
+                            false,
+                        )
+                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                    );
+                body = body.child(kit::row_item(
                     i == 0,
-                    install.account_login.clone(),
-                    format!(
-                        "{} · {}",
-                        install.account_type,
-                        if install.repository_selection == "selected" {
-                            "selected repositories"
-                        } else {
-                            "all repositories"
-                        }
+                    Some(avatar(
+                        &installation.account_login,
+                        installation.avatar_url.as_deref(),
+                        24.,
+                    )),
+                    installation.account_login.clone(),
+                    "",
+                    Some(
+                        row()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(kit::pill(
+                                if organization { "Organization" } else { "User" },
+                                kit::Tone::Neutral,
+                            ))
+                            .when(installation.suspended, |v| {
+                                v.child(kit::pill("Suspended", kit::Tone::Attention))
+                            })
+                            .child(trailing)
+                            .into_any_element(),
                     ),
-                    Some(badge.into_any_element()),
-                    row()
-                        .w_full()
-                        .gap(px(8.))
-                        .child(avatar(
-                            &install.account_login,
-                            install.avatar_url.as_deref(),
-                            20.,
-                        ))
-                        .child(s::description_text(format!(
-                            "{} repositories available across connected installations.",
-                            github.repositories.len()
-                        ))),
                 ));
             }
-            if connected {
-                body=body.child(cs::setting_row(false,github.user.as_ref().map(|u|format!("Connected as {}",u.login)).unwrap_or_else(||"Connection status".into()),"Repository changes refresh automatically when you return from GitHub. Existing cloud chats are not affected.",Some(cs::icon_label_button("refresh-cloud-github","refresh","Refresh",false,loading,loading).on_click(cx.listener(|this,_,_,cx|this.refresh(cx))).into_any_element())));
+            body = body.child(
+                row()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .border_t_1()
+                    .border_color(palette::rgb(BORDER).opacity(0.7))
+                    .child(
+                        cs::icon_label_button(
+                            "connect-another-github",
+                            "plus",
+                            "Connect another account or organization",
+                            false,
+                            busy || !can_manage,
+                            loading,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| install(this, cx))),
+                    ),
+            );
+            if let Some(confirm) = self.github_disconnect_confirm_row(cx) {
+                body = body.child(confirm);
             }
+            let login = github.user.as_ref().map(|u| u.login.clone());
+            let mut controls = row().items_center().gap(px(4.));
+            if let Some(login) = login {
+                controls = controls.child(
+                    div()
+                        .mr(px(4.))
+                        .text_size(px(11.))
+                        .text_color(palette::rgb(MUTED))
+                        .child(format!("Connected as {login}")),
+                );
+            }
+            controls = controls.child(
+                div()
+                    .id("refresh-cloud-github-tip")
+                    .child(
+                        cs::icon_button(
+                            "refresh-cloud-github",
+                            "refresh",
+                            "Refresh",
+                            loading,
+                            loading,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    )
+                    .tip("Refresh repositories and access"),
+            );
+            let items = self.github_menu_items();
+            if !items.is_empty() {
+                controls = controls.child(self.overflow_menu(
+                    "cloud-github-more".into(),
+                    "More GitHub actions".into(),
+                    busy,
+                    items,
+                    cx,
+                ));
+            }
+            action = Some(controls.into_any_element());
         }
-        if let Some(disconnect) = self.github_disconnect_row(cx) {
-            body = body.child(disconnect);
+        if let Some(retry) = self.github_revoking_row(cx) {
+            body = body.child(retry);
         }
-        kit::section(
-            "GitHub",
-            "Connect once so cloud agents can commit, push and open pull requests as you.",
-            None,
-            body,
-        )
+        kit::section("GitHub", HELP, action, body)
     }
 }
 impl Render for RepositoryPanel {
@@ -852,5 +1006,41 @@ impl Render for RepositoryPanel {
             root = root.child(github).child(repos);
         }
         root.child(agents).child(machine).child(environment)
+    }
+}
+
+#[cfg(test)]
+mod git_ux_tests {
+    use super::{access_summary, installation_url};
+    use zuse_protocol::cloud_projects::GithubInstallation;
+
+    fn install(login: &str, kind: &str) -> GithubInstallation {
+        GithubInstallation {
+            installation_id: 42,
+            account_login: login.into(),
+            account_type: kind.into(),
+            avatar_url: None,
+            repository_selection: "all".into(),
+            suspended: false,
+        }
+    }
+
+    #[test]
+    fn manage_access_opens_each_installations_own_settings() {
+        assert_eq!(
+            installation_url(&install("opcodehq", "Organization")),
+            "https://github.com/organizations/opcodehq/settings/installations/42"
+        );
+        assert_eq!(
+            installation_url(&install("swarajbachu", "User")),
+            "https://github.com/settings/installations/42"
+        );
+    }
+
+    #[test]
+    fn access_reads_as_all_or_a_count() {
+        assert_eq!(access_summary("all", 10), "All repositories");
+        assert_eq!(access_summary("selected", 3), "3 selected");
+        assert_eq!(access_summary("selected", 0), "0 selected");
     }
 }

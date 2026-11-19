@@ -146,9 +146,7 @@ impl RepositoryPanel {
     fn environment_services(&self, busy: bool, cx: &mut Context<Self>) -> Div {
         let mut body = column();
         if self.environment.startup.is_empty() && !self.environment.adding_service {
-            body = body.child(form::empty(
-                "None yet. Add one if the agent needs a dev server or database running.",
-            ));
+            body = body.child(form::empty("No services"));
         }
         for (index, service) in self.environment.startup.iter().enumerate() {
             body = body.child(
@@ -280,7 +278,7 @@ impl RepositoryPanel {
                 kit::empty_state(
                     "dither-sliders",
                     "No repositories yet",
-                    "Add a repository first. Then give it setup commands, services and secrets here.",
+                    "",
                     Some(
                         cs::button(
                             "environment-add-repository",
@@ -344,10 +342,7 @@ impl RepositoryPanel {
                 }
                 return root.child(form::save_bar(
                     "cloud-environment",
-                    format!(
-                        "Version {} · Changes apply to new computers, not running ones.",
-                        version.revision
-                    ),
+                    format!("Version {}", version.revision),
                     dirty,
                     busy,
                     |this, cx| this.discard_environment(cx),

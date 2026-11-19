@@ -3,10 +3,11 @@
 //! Run under Xvfb with `ZUSE_OPEN_ROUTE=settings/<section>`, then capture.
 //! `FIXTURE_PLAN` picks the plan state (cloud, trial, overage, max, hold,
 //! trial-hold, none) and `FIXTURE_THEME=light` the light theme.
-//! `FIXTURE_THEME=light` renders the light theme. `FIXTURE_FRESH=1` answers
+//! `FIXTURE_FRESH=1` answers
 //! as a just-subscribed account: no GitHub, repositories or agent accounts,
 //! and the standard machine. `FIXTURE_ONBOARDING=<step>` opens first-run
 //! onboarding at `welcome`, `repositories`, `setup`, `agents` or `start`.
+//! `FIXTURE_NO_REPOS=1` keeps GitHub connected but adds no repositories.
 use chrono::{Duration, Utc};
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, point, px, size};
 use serde_json::{Value, json};
@@ -342,10 +343,15 @@ struct Controller {
     plan: PlanState,
     /// A just-subscribed account with nothing set up yet.
     fresh: bool,
+    /// GitHub connected, no repositories added yet.
+    no_repos: bool,
 }
 #[async_trait::async_trait]
 impl RpcService for Controller {
     async fn handle(&self, method: &str, _params: Value) -> Result<RpcReply, RpcError> {
+        if self.no_repos && method == methods::CLOUD_PROJECTS {
+            return bound(json!({"projects": []}));
+        }
         if self.fresh {
             match method {
                 methods::CLOUD_PROJECTS => return bound(json!({"projects": []})),
@@ -435,7 +441,12 @@ fn main() {
     let plan = PlanState::from_env();
     let start = now() - if plan.trial() { 3 } else { 5 } * DAY - 3 * 3_600_000;
     let fresh = std::env::var("FIXTURE_FRESH").is_ok();
-    let client = zuse_rpc::memory_client(Arc::new(Controller { start, plan, fresh }));
+    let client = zuse_rpc::memory_client(Arc::new(Controller {
+        start,
+        plan,
+        fresh,
+        no_repos: std::env::var("FIXTURE_NO_REPOS").is_ok(),
+    }));
     let temp = tempfile::tempdir().unwrap();
     let data = temp.path().to_path_buf();
     gpui_platform::application().with_assets(icons::Assets).run(move |cx| {

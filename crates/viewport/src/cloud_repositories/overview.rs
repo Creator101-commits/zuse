@@ -72,16 +72,10 @@ impl RepositoryPanel {
                 kit::pill("Connected", Tone::Ready),
             )
         } else {
-            (
-                "Install the Zuse app on the GitHub accounts agents should work on.".into(),
-                kit::pill("Needed", Tone::Attention),
-            )
+            (String::new(), kit::pill("Needed", Tone::Attention))
         };
         let repositories = match self.projects.len() {
-            0 => (
-                "Choose the repositories cloud computers can check out.".to_owned(),
-                kit::pill("Needed", Tone::Attention),
-            ),
+            0 => (String::new(), kit::pill("Needed", Tone::Attention)),
             n => (
                 self.projects
                     .iter()
@@ -99,11 +93,7 @@ impl RepositoryPanel {
         };
         let agents = self.agents.connected_summary();
         let agents = if agents.is_empty() {
-            (
-                "Sign in with Codex, Claude or Grok so cloud chats run on your own plan."
-                    .to_owned(),
-                kit::pill("Needed", Tone::Attention),
-            )
+            (String::new(), kit::pill("Needed", Tone::Attention))
         } else {
             (agents.join(", "), kit::pill("Connected", Tone::Ready))
         };
@@ -111,14 +101,16 @@ impl RepositoryPanel {
             Some(state) => {
                 let (label, detail, _) = machine::image_copy(state);
                 (
-                    detail.to_owned(),
+                    // A ready or standard machine needs no sentence.
+                    if matches!(state, "ready" | "none") {
+                        String::new()
+                    } else {
+                        detail.to_owned()
+                    },
                     kit::pill(label, machine::image_tone(state)),
                 )
             }
-            None => (
-                "Tools, packages and instructions every repository gets.".to_owned(),
-                kit::pill("Optional", Tone::Neutral),
-            ),
+            None => (String::new(), kit::pill("Optional", Tone::Neutral)),
         };
         vec![
             SetupRow {
@@ -157,7 +149,7 @@ impl RepositoryPanel {
                 id: "overview-environments",
                 glyph: "dither-sliders",
                 title: "Environments",
-                detail: "Per-repository setup commands, services and secrets.".into(),
+                detail: String::new(),
                 status: kit::pill("Optional", Tone::Neutral),
                 page: CloudPage::Environments,
             },
@@ -166,81 +158,62 @@ impl RepositoryPanel {
 
     /// The computer, its readiness and the plan's minutes.
     fn overview_hero(&self, ready: bool, cx: &mut Context<Self>) -> Div {
+        let action = if ready {
+            cs::button(
+                "cloud-guide-open",
+                "Review setup",
+                false,
+                !self.can_manage(),
+                false,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.onboarding_reopen(cx)))
+        } else {
+            kit::primary_button("cloud-guide-open", "Continue setup", self.can_manage())
+                .when(self.can_manage(), |b| {
+                    b.on_click(cx.listener(|this, _, _, cx| this.onboarding_reopen(cx)))
+                })
+        };
         let mut card = column().child(
             row()
-                .items_start()
-                .gap(px(14.))
+                .items_center()
+                .gap(px(12.))
                 .p(px(16.))
-                .child(kit::icon_tile("dither-cloud", 40.))
+                .child(kit::icon_tile("dither-cloud", 36.))
                 .child(
-                    column()
+                    row()
                         .flex_1()
                         .min_w_0()
-                        .gap(px(4.))
+                        .items_center()
+                        .gap(px(8.))
                         .child(
-                            row()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(
-                                    div()
-                                        .text_size(px(15.))
-                                        .line_height(px(20.))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(palette::rgb(TEXT))
-                                        .child("Your cloud computer"),
-                                )
-                                .child(if ready {
-                                    kit::pill("Ready for cloud chats", Tone::Ready)
-                                } else {
-                                    kit::pill("Setup isn't finished", Tone::Attention)
-                                }),
+                            div()
+                                .text_size(px(15.))
+                                .line_height(px(20.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(palette::rgb(TEXT))
+                                .child("Your cloud computer"),
                         )
-                        .child(s::description_text(if ready {
-                            "Every chat gets a fresh computer with your repository and agent ready. It sleeps when quiet and wakes when you reply."
+                        .child(kit::info_tip(
+                            "How a cloud chat starts",
+                            "Every chat gets a fresh computer from your machine image, checks out only its repository and starts your agent on your own account. It sleeps when quiet and keeps working after you close Zuse.",
+                        ))
+                        .child(if ready {
+                            kit::pill("Ready", Tone::Ready)
                         } else {
-                            "Connect a repository and an agent account, then start chats that keep working after you close Zuse."
-                        })),
+                            kit::pill("Setup isn't finished", Tone::Attention)
+                        }),
                 )
-                .child(kit::spec_chip(DEFAULT_MACHINE)),
+                .child(kit::spec_chip(DEFAULT_MACHINE))
+                .child(action),
         );
         if let Some(plan) = self.plan_glance() {
             card = card.child(div().px(px(16.)).pb(px(16.)).child(kit::quantity(
                 format!("{} · machine minutes", plan.label()),
                 plan.minutes_line(),
                 plan.fraction_left(),
-                plan.hours_line(),
+                "",
             )));
         }
-        card = card.child(
-            row()
-                .items_center()
-                .justify_between()
-                .gap(px(12.))
-                .px(px(16.))
-                .py(px(10.))
-                .border_t_1()
-                .border_color(palette::rgb(BORDER).opacity(0.7))
-                .child(s::description_text(if ready {
-                    "Walk through setup again any time."
-                } else {
-                    "A few quick steps. Each one can be skipped."
-                }))
-                .child(if ready {
-                    cs::button(
-                        "cloud-guide-open",
-                        "Review setup",
-                        false,
-                        !self.can_manage(),
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.onboarding_reopen(cx)))
-                } else {
-                    kit::primary_button("cloud-guide-open", "Continue setup", self.can_manage())
-                        .when(self.can_manage(), |b| {
-                            b.on_click(cx.listener(|this, _, _, cx| this.onboarding_reopen(cx)))
-                        })
-                }),
-        );
         s::frame().child(s::card().child(card))
     }
 
@@ -256,58 +229,10 @@ impl RepositoryPanel {
             None,
             rows,
         );
-        let step = |n: &'static str, title: &'static str, detail: &'static str, first: bool| {
-            kit::row_item(
-                first,
-                Some(
-                    div()
-                        .flex_none()
-                        .size(px(22.))
-                        .rounded_full()
-                        .bg(kit::accent().opacity(0.12))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(kit::accent())
-                        .child(n)
-                        .into_any_element(),
-                ),
-                title,
-                detail,
-                None,
-            )
-        };
-        let flow = kit::section(
-            "How a cloud chat starts",
-            "",
-            None,
-            column()
-                .child(step(
-                    "1",
-                    "A fresh computer boots from your machine",
-                    "Every chat gets its own computer. Your machine's tools and instructions are already there.",
-                    true,
-                ))
-                .child(step(
-                    "2",
-                    "Only the chat's repository is checked out",
-                    "A shallow fetch of the branch you picked, with the repository's environment applied.",
-                    false,
-                ))
-                .child(step(
-                    "3",
-                    "Your agent starts on your own account",
-                    "It keeps working after you close Zuse. Follow along or reply from any device.",
-                    false,
-                )),
-        );
         let mut root = column()
             .gap(px(kit::SECTION_GAP))
             .child(self.overview_hero(ready, cx))
-            .child(setup)
-            .child(flow);
+            .child(setup);
         if let Some(error) = &self.error {
             root = root.child(cs::note(error, true));
         }
