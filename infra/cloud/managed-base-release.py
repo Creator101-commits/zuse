@@ -26,6 +26,11 @@ CASES = ('prepared-create', 'cache-miss-create', 'stream-tools-edit-test',
          'process-loss-renewal', 'terminal-files-preview', 'git-push-pr', 'recreate-delete')
 KEYS = {'boxd': 'BOXD_API_KEY', 'boat': 'BOAT_API_KEY', 'e2b': 'E2B_API_KEY', 'daytona': 'DAYTONA_API_KEY'}
 DIGEST = re.compile(r'[0-9a-f]{64}\Z')
+# The desktop's curated Claude Code catalogue (crates/cloud/src/model_catalog.rs keeps
+# this file equal to it). Claude Code cannot list models without an account, so a base
+# never discovers its own; every base carries this catalogue instead.
+CLAUDE_CATALOG = Path(__file__).with_name('managed-base-claude-catalog.json')
+SCHEMA = re.compile(r'[a-z_][a-z0-9_]{0,62}\Z')
 
 
 def canonical(value):
@@ -448,6 +453,51 @@ def candidate_derivation(build, proof, bundle, directory):
     return True
 
 
+def claude_catalog():
+    catalog = load(CLAUDE_CATALOG)
+    if catalog.get('id') != 'claude-code' or len(catalog.get('models', [])) < 2 or not any(m['id'] == catalog['defaultModel'] for m in catalog['models']):
+        raise ValueError('curated_claude_catalog_required')
+    return catalog
+
+
+def with_curated_claude(catalogs):
+    """Claude rows always use the curated catalogue; reviewed Codex/Grok rows pass through."""
+    if 'claude' not in catalogs:
+        return catalogs
+    return {**catalogs, 'claude': claude_catalog()}
+
+
+def claude_catalog_sql(args):
+    """Idempotent SQL replacing the Claude catalogue of verified bases, backing rows up first.
+
+    Verified rows bind no digest over harness catalogues (the release ID is the build ID and
+    the certification report covers the artifact, not model metadata), so an in-place update
+    keeps every admission check valid. Staging candidate rows are digest-pinned and are not
+    touched: stage new candidate metadata against the same artifact instead.
+    """
+    if not SCHEMA.fullmatch(args.schema) or not SCHEMA.fullmatch(args.backup_table) or not args.backup_table.startswith('zz_backup_'):
+        raise ValueError('schema_and_zz_backup_table_required')
+    catalog = json.dumps(claude_catalog(), sort_keys=True, separators=(',', ':')).replace("'", "''")
+    stale = ("b.state='verified' AND b.runtime_manifest IS NOT NULL AND EXISTS (SELECT 1 FROM "
+             "jsonb_array_elements(b.runtime_manifest->'harnesses') h WHERE h->>'agent'='claude' "
+             "AND h->'catalog' IS DISTINCT FROM (SELECT c FROM curated_claude_catalog))")
+    return '\n'.join([
+        'BEGIN;',
+        f'SET LOCAL search_path TO "{args.schema}", pg_catalog;',
+        f'CREATE TEMP TABLE curated_claude_catalog ON COMMIT DROP AS SELECT \'{catalog}\'::jsonb AS c;',
+        f'CREATE TABLE IF NOT EXISTS {args.backup_table} AS SELECT now() AS backed_up_at, b.* FROM cloud_managed_bases b WITH NO DATA;',
+        f'INSERT INTO {args.backup_table} SELECT now(), b.* FROM cloud_managed_bases b WHERE {stale} '
+        f'AND NOT EXISTS (SELECT 1 FROM {args.backup_table} k WHERE k.provider=b.provider AND k.release_id=b.release_id);',
+        "UPDATE cloud_managed_bases b SET runtime_manifest=jsonb_set(b.runtime_manifest,'{harnesses}',"
+        "(SELECT jsonb_agg(CASE WHEN h->>'agent'='claude' THEN jsonb_set(h,'{catalog}',(SELECT c FROM curated_claude_catalog)) ELSE h END ORDER BY n) "
+        f"FROM jsonb_array_elements(b.runtime_manifest->'harnesses') WITH ORDINALITY AS x(h,n))) WHERE {stale};",
+        "SELECT provider, release_id, jsonb_array_length(h->'catalog'->'models') AS claude_models "
+        "FROM cloud_managed_bases b, jsonb_array_elements(b.runtime_manifest->'harnesses') h "
+        "WHERE b.state='verified' AND h->>'agent'='claude' ORDER BY provider, release_id;",
+        'COMMIT;',
+    ]) + '\n'
+
+
 def candidate(args):
     """Package retained staging evidence; never labels it certified or registers it."""
     if args.output.exists():
@@ -495,7 +545,7 @@ def candidate(args):
     if sha(canonical(harness))!=bundle['harnessRelease'] or harness.get('schema')!=2:
         raise ValueError('exact_harness_release_required')
     if bool(harness['harnesses']['codex'].get('assets'))!=('codex-assets.tar' in names):raise ValueError('codex_distribution_bundle_required')
-    capabilities,catalogs=load(args.capabilities),load(args.catalogs)
+    capabilities,catalogs=load(args.capabilities),with_curated_claude(load(args.catalogs))
     provider=build['provider']
     if provider=='daytona' and capabilities.get('preservesMemory') is not False:
         raise ValueError('container_memory_preservation_unverified')
@@ -598,7 +648,13 @@ def main():
     publish.add_argument('--release', required=True, type=Path)
     publish.add_argument('--report', required=True, type=Path)
     publish.add_argument('--output', required=True, type=Path)
+    sql = commands.add_parser('claude-catalog-sql', help='print SQL refreshing verified bases to the curated Claude catalogue')
+    sql.add_argument('--schema', required=True)
+    sql.add_argument('--backup-table', required=True)
     args = parser.parse_args()
+    if args.action == 'claude-catalog-sql':
+        print(claude_catalog_sql(args), end='')
+        return
     try:
         print(json.dumps({'context': context, 'bundle': bundle, 'certify': certify, 'publication': publication, 'candidate': candidate}[args.action](args)))
     except (ValueError, OSError, KeyError, TypeError):
