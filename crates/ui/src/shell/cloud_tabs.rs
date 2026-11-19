@@ -623,9 +623,11 @@ mod tests {
                     shell.state.read(cx).cloud_project.as_ref().unwrap()["projectId"],
                     "q"
                 );
+                // The server picks where new computers run, not the
+                // project, so both drafts use the default provider's model.
                 assert_eq!(
                     c.pickers().read(cx).resolved(cx).model.as_deref(),
-                    Some("e2b-model")
+                    Some("boxd-model")
                 );
                 assert_eq!(
                     c.pickers().read(cx).source_cloud_ref("main", cx).0,

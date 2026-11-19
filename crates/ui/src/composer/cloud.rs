@@ -1775,9 +1775,12 @@ mod cached_tests {
             let context=json!({"accountId":"fixture-user","ownerId":"fixture-user","organizationId":null,"commandAdmissionVersion":2,"computerCapabilities":{"providers":caps},"providerAgentCatalogs":catalogs,"agentConnections":[{"agent":"codex","state":"connected","connectionId":"same-codex-account"}]});
             for (provider,size) in [("boat","small"),("e2b","default"),("boat","small")] {
                 // Model a new draft on this same composer, retaining its account
-                // and provider catalogs while the computer choice changes.
+                // and provider catalogs while the server's default provider
+                // changes. The project's remembered provider is only a hint.
                 composer.cloud.task=None;
                 composer.cloud.request=None;
+                let mut context=context.clone();
+                context["computerCapabilities"]["defaultProvider"]=json!(provider);
                 composer.pickers.update(cx,|p,cx|{p.finish_cloud_launch(cx);p.seed_cloud_creation_for_test(context.clone(),json!({"projectId":"repository","accountId":"fixture-user","providerId":provider,"sizeId":"small","defaultBranch":"main","canCreate":true}),cx)});
                 assert!(composer.send_cloud("First task on selected computer".into(),cx));
                 let request=composer.cloud.request.as_ref().expect("actual Send must construct request");
