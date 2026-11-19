@@ -199,8 +199,10 @@ pub fn git_history_matches(query: &str, commit: &GitHistoryCommit) -> bool {
         return true;
     }
     let normalized = query.to_ascii_lowercase();
+    // SHAs match by prefix only: a fuzzy subsequence over 40 hex characters
+    // makes almost any short hex query hit unrelated commits.
     commit.sha.to_ascii_lowercase().starts_with(&normalized)
-        || fuzzy_score(query, &format!("{} {}", commit.sha, commit.subject)).is_some()
+        || fuzzy_score(query, &commit.subject).is_some()
 }
 
 /// Contract hidden commits to their nearest visible ancestors. Search results
@@ -325,6 +327,24 @@ pub fn compact_commits_to_visible(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sha_queries_match_by_prefix_not_by_scattered_hex() {
+        let commit = |sha: &str, subject: &str| GitHistoryCommit {
+            sha: sha.into(),
+            parent_shas: Vec::new(),
+            subject: subject.into(),
+            author_name: String::new(),
+            author_email: String::new(),
+            authored_at: String::new(),
+            refs: Vec::new(),
+        };
+        let target = commit("3f9a1c7e00000000000000000000000000000000", "fix login");
+        let other = commit("a3b0f1c9a01c7e5500000000000000000000dead", "unrelated");
+        assert!(git_history_matches("3f9a1c7e", &target));
+        assert!(!git_history_matches("3f9a1c7e", &other));
+        assert!(git_history_matches("fx lgn", &target));
+    }
+
     use super::*;
     fn commit(sha: &str, parents: &[&str]) -> GitHistoryCommit {
         GitHistoryCommit {
