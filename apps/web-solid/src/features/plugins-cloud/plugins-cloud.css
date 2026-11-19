@@ -303,6 +303,80 @@
 }
 .pc-cap-field:focus-within { border-color: color-mix(in srgb, var(--accent) 60%, var(--border-strong)); }
 .pc-cap-field input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; color: var(--text); font-size: var(--text-sm); }
+/* Dithered meters and columns (cloud/Dither.tsx): 2px cells painted on a canvas sized to the box. */
+.pc-dither { position: relative; width: 100%; flex: none; }
+.pc-dither > canvas { position: absolute; inset: 0; display: block; image-rendering: pixelated; }
+.pc-columns { display: flex; flex-direction: column; gap: 8px; }
+.pc-columns-readout { min-height: 16px; font-size: var(--text-xs); line-height: 16px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.pc-columns-plot { position: relative; width: 100%; }
+.pc-columns-plot > canvas { position: absolute; inset: 0; display: block; image-rendering: pixelated; }
+.pc-columns-hits { position: absolute; inset: 0; display: grid; }
+.pc-columns-hit { border-radius: 3px; cursor: default; }
+.pc-columns-hit[data-active="true"] { background: var(--wash); }
+.pc-columns-axis { display: flex; justify-content: space-between; gap: 8px; font-size: 10px; line-height: 13px; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+/* Current plan */
+.pc-plan-hero { display: flex; flex-direction: column; gap: 14px; padding: 14px 12px 12px; }
+.pc-plan-hero-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.pc-plan-hero-copy { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.pc-plan-hero-title { font-size: var(--text-md); line-height: 20px; font-weight: 500; color: var(--text-strong); }
+.pc-plan-renew { flex: none; }
+.pc-plan-trial {
+  display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.pc-plan-meter { display: flex; flex-direction: column; gap: 8px; }
+.pc-plan-meter-figures { display: flex; align-items: baseline; gap: 6px; color: var(--text-muted); font-size: var(--text-xs); }
+.pc-plan-meter-figures strong { font-size: 24px; line-height: 28px; font-weight: 500; color: var(--text-strong); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.pc-plan-meter-caption { display: flex; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; font-size: var(--text-xs); line-height: 16px; color: var(--text); font-variant-numeric: tabular-nums; }
+.pc-plan-extra { font-size: var(--text-xs); line-height: 16px; color: var(--warning); font-variant-numeric: tabular-nums; }
+.pc-card > .pc-plan-hero + .pc-row { border-top: 1px solid var(--border); }
+
+/* Usage this month */
+.pc-usage-chart { padding: 12px 12px 10px; }
+.pc-breakdown { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--border); }
+.pc-breakdown-list { display: flex; flex-direction: column; gap: 10px; padding: 12px; min-width: 0; }
+.pc-breakdown-list + .pc-breakdown-list { border-left: 1px solid var(--border); }
+.pc-breakdown-list h4 { margin: 0; font-size: 10px; line-height: 13px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-faint); }
+.pc-share { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.pc-share-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: var(--text-xs); line-height: 16px; }
+.pc-share-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text); }
+.pc-share-value { flex: none; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.pc-row-tail-split { justify-content: space-between; align-items: center; gap: 12px; }
+@container (max-width: 560px) {
+  .pc-breakdown { grid-template-columns: minmax(0, 1fr); }
+  .pc-breakdown-list + .pc-breakdown-list { border-left: 0; border-top: 1px solid var(--border); }
+}
+
+/* Plans */
+.pc-trial-offer {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent); border-bottom: 1px solid var(--border);
+}
+.pc-trial-copy { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 220px; }
+.pc-trial-text { font-size: var(--text-sm); line-height: 18px; color: var(--text); }
+.pc-plans { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.pc-plan-card { display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 12px; min-width: 0; }
+.pc-plan-card + .pc-plan-card { border-left: 1px solid var(--border); }
+.pc-plan-card[data-current="true"] { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.pc-plan-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 16px; }
+.pc-plan-kicker { font-size: var(--text-xs); line-height: 16px; font-weight: 500; color: var(--text); }
+.pc-plan-card[data-featured="true"] .pc-plan-kicker { color: var(--glyph-deep); }
+.pc-plan-price { display: flex; align-items: baseline; gap: 2px; color: var(--text-muted); font-size: var(--text-xs); }
+.pc-plan-price strong { font-size: 22px; line-height: 26px; font-weight: 500; color: var(--text-strong); letter-spacing: -0.01em; }
+.pc-plan-points { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.pc-plan-points li { position: relative; padding-left: 12px; font-size: var(--text-xs); line-height: 16px; color: var(--text-muted); }
+.pc-plan-points li::before {
+  content: ""; position: absolute; left: 0; top: 6px; width: 4px; height: 4px;
+  background: radial-gradient(var(--accent) 0.7px, transparent 0.8px) 0 0 / 2px 2px;
+}
+.pc-plan-card-action { display: flex; min-height: 28px; }
+.pc-plan-card-action > .pc-action { width: 100%; border-color: var(--border-strong); }
+.pc-plan-card-action > .pc-action[data-primary="true"] { border-color: var(--accent); }
+@container (max-width: 640px) {
+  .pc-plans { grid-template-columns: minmax(0, 1fr); }
+  .pc-plan-card + .pc-plan-card { border-left: 0; border-top: 1px solid var(--border); }
+}
 .pc-credits { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px; font-size: var(--text-xs); }
 .pc-credits p { margin: 0; }
 .pc-credits-head, .pc-credits-buy { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
