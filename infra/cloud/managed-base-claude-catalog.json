@@ -1,0 +1,229 @@
+{
+  "defaultModel": "claude-sonnet-5",
+  "id": "claude-code",
+  "models": [
+    {
+      "description": "Most intelligent model for building agents",
+      "id": "claude-fable-5-1",
+      "label": "Fable 5.1",
+      "options": [
+        {
+          "choices": [
+            {
+              "id": "200k",
+              "label": "200K"
+            },
+            {
+              "id": "1m",
+              "label": "1M"
+            }
+          ],
+          "defaultChoice": "200k",
+          "id": "contextWindow",
+          "label": "Context Window"
+        }
+      ],
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultracode",
+        "ultrathink"
+      ]
+    },
+    {
+      "description": "Previous generation Fable",
+      "id": "claude-fable-5",
+      "label": "Fable 5",
+      "options": [
+        {
+          "choices": [
+            {
+              "id": "200k",
+              "label": "200K"
+            },
+            {
+              "id": "1m",
+              "label": "1M"
+            }
+          ],
+          "defaultChoice": "200k",
+          "id": "contextWindow",
+          "label": "Context Window"
+        }
+      ],
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultracode",
+        "ultrathink"
+      ]
+    },
+    {
+      "description": "Best for everyday, complex tasks",
+      "id": "claude-opus-5-5",
+      "label": "Opus 5.5",
+      "options": [
+        {
+          "choices": [
+            {
+              "id": "200k",
+              "label": "200K"
+            },
+            {
+              "id": "1m",
+              "label": "1M"
+            }
+          ],
+          "defaultChoice": "200k",
+          "id": "contextWindow",
+          "label": "Context Window"
+        },
+        {
+          "choices": [
+            {
+              "id": "off",
+              "label": "Off"
+            },
+            {
+              "id": "on",
+              "label": "On"
+            }
+          ],
+          "defaultChoice": "off",
+          "id": "fastMode",
+          "label": "Fast Mode"
+        }
+      ],
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultracode",
+        "ultrathink"
+      ]
+    },
+    {
+      "description": "Previous generation Opus",
+      "id": "claude-opus-4-8",
+      "label": "Opus 4.8",
+      "options": [
+        {
+          "choices": [
+            {
+              "id": "off",
+              "label": "Off"
+            },
+            {
+              "id": "on",
+              "label": "On"
+            }
+          ],
+          "defaultChoice": "off",
+          "id": "fastMode",
+          "label": "Fast Mode"
+        }
+      ],
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultracode",
+        "ultrathink"
+      ]
+    },
+    {
+      "description": "Older generation Opus",
+      "id": "claude-opus-4-7",
+      "label": "Opus 4.7",
+      "options": [
+        {
+          "choices": [
+            {
+              "id": "off",
+              "label": "Off"
+            },
+            {
+              "id": "on",
+              "label": "On"
+            }
+          ],
+          "defaultChoice": "off",
+          "id": "fastMode",
+          "label": "Fast Mode"
+        }
+      ],
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultrathink"
+      ]
+    },
+    {
+      "description": "Balanced speed and intelligence",
+      "id": "claude-sonnet-5",
+      "label": "Sonnet 5",
+      "options": [
+        {
+          "choices": [
+            {
+              "id": "200k",
+              "label": "200K"
+            },
+            {
+              "id": "1m",
+              "label": "1M"
+            }
+          ],
+          "defaultChoice": "200k",
+          "id": "contextWindow",
+          "label": "Context Window"
+        }
+      ],
+      "reasoningLevels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultrathink"
+      ]
+    },
+    {
+      "description": "Fastest model for everyday tasks",
+      "id": "claude-haiku-4-5",
+      "label": "Haiku 4.5",
+      "options": [
+        {
+          "choices": [
+            {
+              "id": "off",
+              "label": "Off"
+            },
+            {
+              "id": "on",
+              "label": "On"
+            }
+          ],
+          "defaultChoice": "off",
+          "id": "thinking",
+          "label": "Thinking"
+        }
+      ],
+      "reasoningLevels": []
+    }
+  ],
+  "name": "Claude Code"
+}
