@@ -14,4 +14,6 @@ export ZUSE_WORKOS_CLIENT_ID="client_01KW6ZEZKVMZ0G429A89XZD83Q"
 export ZUSE_DATA_DIR="${ZUSE_STAGING_DATA_DIR:-$checkout/.context/staging-desktop}"
 export ZUSE_IPC_PORT="${ZUSE_STAGING_IPC_PORT:-28654}"
 cargo build -j 2 -p zuse
+# A bare `zuse` prints help; open the desktop window unless a command was given.
+if [[ $# -eq 0 ]]; then set -- app; fi
 exec "$checkout/target/debug/zuse" "$@"

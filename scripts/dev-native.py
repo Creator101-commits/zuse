@@ -117,7 +117,7 @@ def main():
             return 1
         binary = str(target / "debug/zuse")
         engine = start_engine(binary, env, args.ipc_port)
-        ui = subprocess.Popen([binary], cwd=ROOT, env=env, start_new_session=True)
+        ui = subprocess.Popen([binary, "app"], cwd=ROOT, env=env, start_new_session=True)
         print("Watching native sources and assets. UI-only changes keep the engine running; engine changes restart it. Ctrl+C stops both.", flush=True)
         while engine.poll() is None:
             time.sleep(0.5)
@@ -144,7 +144,7 @@ def main():
                 print("Restarting the development engine for engine changes…", flush=True)
                 stop(engine)
                 engine = start_engine(binary, env, args.ipc_port)
-            ui = subprocess.Popen([binary], cwd=ROOT, env=env, start_new_session=True)
+            ui = subprocess.Popen([binary, "app"], cwd=ROOT, env=env, start_new_session=True)
         raise RuntimeError("Development engine exited")
     except KeyboardInterrupt:
         return 0
