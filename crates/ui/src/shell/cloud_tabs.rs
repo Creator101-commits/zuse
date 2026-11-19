@@ -570,12 +570,8 @@ mod tests {
                 assert!(shell.composer.read(cx).input.read(cx).text().is_empty());
                 shell.composer.update(cx, |c, cx| {
                     c.pickers().update(cx, |p, cx| {
-                        // The server picks where new computers run; this
-                        // tab's context names a different default.
-                        let mut context = draft_context();
-                        context["computerCapabilities"]["defaultProvider"] = json!("e2b");
                         p.seed_cloud_creation_for_test(
-                            context,
+                            draft_context(),
                             json!({"projectId":"q","accountId":"owner","providerId":"e2b"}),
                             cx,
                         )
@@ -627,9 +623,11 @@ mod tests {
                     shell.state.read(cx).cloud_project.as_ref().unwrap()["projectId"],
                     "q"
                 );
+                // The server picks where new computers run, not the
+                // project, so both drafts use the default provider's model.
                 assert_eq!(
                     c.pickers().read(cx).resolved(cx).model.as_deref(),
-                    Some("e2b-model")
+                    Some("boxd-model")
                 );
                 assert_eq!(
                     c.pickers().read(cx).source_cloud_ref("main", cx).0,
