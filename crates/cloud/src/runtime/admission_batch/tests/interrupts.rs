@@ -68,6 +68,7 @@ pub(super) async fn exercise<F: Fn(&str) -> Value>(
     prepare: &F,
 ) {
     steer_inference_remains_active(control, pool, now, prepare).await;
+    a_message_queued_after_stop_sends_when_the_turn_ends(control, pool, now, prepare).await;
     guest_refusal_fails_without_holding_the_conversation(control, pool, now, prepare).await;
     // A persisted v2 task cannot become runnable through a v1-only guest.
     let gated = "missing-command-cap";
@@ -206,7 +207,8 @@ pub(super) async fn exercise<F: Fn(&str) -> Value>(
             .any(|v| v.command.command_id == "stop-before-ready")
     );
 
-    // A deliberate new Send is allowed without implicitly resuming the rest.
+    // A deliberate new Send resumes the queue, as on a local chat: no app
+    // offers another way to, so the rest would otherwise wait forever.
     control
         .task_command_submit(id, &access(), run(id, "explicit-send-after-stop"), now)
         .await
@@ -216,8 +218,13 @@ pub(super) async fn exercise<F: Fn(&str) -> Value>(
             .task_command_queue(id, &access(), &format!("session-{id}"))
             .await
             .unwrap()["paused"],
-        true
+        false
     );
+    let pause:w::Request=serde_json::from_value(json!({"commandId":"explicit-pause-queue","sessionId":format!("session-{id}"),"action":{"type":"pause-queue","paused":true}})).unwrap();
+    control
+        .task_command_submit(id, &access(), pause, now)
+        .await
+        .unwrap();
     let send_now: w::Request=serde_json::from_value(json!({"commandId":"selected-send-now","sessionId":format!("session-{id}"),"action":{"type":"send-now","queueId":"future-q","revision":1}})).unwrap();
     control
         .task_command_submit(id, &access(), send_now, now)
@@ -593,6 +600,90 @@ async fn guest_refusal_fails_without_holding_the_conversation<F: Fn(&str) -> Val
 
 // Native steering transfers inference ownership onto a control transport lane.
 // Exercise real encrypted admission, runtime lease and authenticated progress.
+/// Stop pauses the queue. Later the user sends again and, while that turn
+/// runs, queues a follow-up: it must be sent once the turn ends. Before, the
+/// pause outlived every later message and nothing could resume it.
+async fn a_message_queued_after_stop_sends_when_the_turn_ends<F: Fn(&str) -> Value>(
+    control: &Arc<RuntimeControl>,
+    pool: &PgPool,
+    now: i64,
+    prepare: &F,
+) {
+    let id = "queue-after-stop";
+    let session = format!("session-{id}");
+    sqlx::query_scalar::<_, Value>(WRITE_V2.as_str())
+        .bind(prepare(id))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    online(pool, id, now).await;
+    let paused = || async {
+        control
+            .task_command_queue(id, &access(), &session)
+            .await
+            .unwrap()["paused"]
+            .clone()
+    };
+    let queue = |cid: &str, qid: &str| -> w::Request {
+        serde_json::from_value(json!({"commandId":cid,"sessionId":session,"action":{"type":"queue","queueId":qid,"messageId":format!("mid:{qid}"),"input":{"text":"and also tell me how to make it better"},"holdForTurnEnd":true}})).unwrap()
+    };
+    let state = |qid: &'static str| async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT state FROM zuse_rust_task_command_queue WHERE workspace_id=$1 AND queue_id=$2",
+        )
+        .bind(id)
+        .bind(qid)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    };
+    control
+        .task_command_submit(id, &access(), stop(id, "stop-first-turn", None), now)
+        .await
+        .unwrap();
+    assert_eq!(paused().await, true);
+
+    // A new message resumes the queue; a follow-up queued during its turn waits.
+    control
+        .task_command_submit(id, &access(), run(id, "next-turn"), now)
+        .await
+        .unwrap();
+    assert_eq!(paused().await, false);
+    control
+        .task_command_submit(id, &access(), queue("follow-up", "follow-up-q"), now)
+        .await
+        .unwrap();
+    assert!(control.work_task_drain_for(id, now).await.unwrap());
+    assert_eq!(
+        state("follow-up-q").await,
+        "queued",
+        "held while the turn runs"
+    );
+
+    // The turn ends: the follow-up is sent.
+    sqlx::query("UPDATE zuse_rust_task_command_execution SET state='completed' WHERE workspace_id=$1 AND command_id='next-turn'").bind(id).execute(pool).await.unwrap();
+    sqlx::query("UPDATE zuse_rust_mailbox_commands SET state='applied' WHERE workspace_id=$1 AND command_id='next-turn'").bind(id).execute(pool).await.unwrap();
+    assert!(control.work_task_drain_for(id, now + 40_000).await.unwrap());
+    assert_eq!(state("follow-up-q").await, "claimed");
+
+    // Queuing alone resumes a paused queue too.
+    let pause: w::Request = serde_json::from_value(json!({"commandId":"pause-again","sessionId":session,"action":{"type":"pause-queue","paused":true}})).unwrap();
+    control
+        .task_command_submit(id, &access(), pause, now + 40_001)
+        .await
+        .unwrap();
+    assert_eq!(paused().await, true);
+    control
+        .task_command_submit(
+            id,
+            &access(),
+            queue("queued-alone", "queued-alone-q"),
+            now + 40_002,
+        )
+        .await
+        .unwrap();
+    assert_eq!(paused().await, false);
+}
 async fn steer_inference_remains_active<F: Fn(&str) -> Value>(
     control: &Arc<RuntimeControl>,
     pool: &PgPool,

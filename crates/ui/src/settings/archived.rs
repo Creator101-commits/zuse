@@ -1211,7 +1211,7 @@ mod tests {
         // A task archived from the sidebar (or a `workspace` account event
         // refreshing the list) reloads it on the next paint.
         state.update(cx, |state, cx| {
-            state.hide_cloud_sidebar_workspace("task");
+            state.acknowledge_cloud_sidebar_archive("task", cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -1223,7 +1223,7 @@ mod tests {
             page.cloud.busy = true;
         });
         state.update(cx, |state, cx| {
-            state.hide_cloud_sidebar_workspace("task");
+            state.acknowledge_cloud_sidebar_archive("task", cx);
             cx.notify();
         });
         cx.run_until_parked();
@@ -1239,7 +1239,7 @@ mod tests {
             page.cloud_action = Some(cloud_cards::Action::Open("task".into()));
         });
         state.update(cx, |state, cx| {
-            state.hide_cloud_sidebar_workspace("task");
+            state.acknowledge_cloud_sidebar_archive("task", cx);
             cx.notify();
         });
         cx.run_until_parked();

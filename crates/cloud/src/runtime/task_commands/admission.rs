@@ -421,6 +421,16 @@ impl RuntimeControl {
         }
         acceptance["commandId"] = json!(request.command_id);
         acceptance["durablyAdmitted"] = json!(true);
+        if thaws_queue(&request.action) {
+            // Stop pauses the queue so it cannot run on by itself. A new
+            // message from the user is the deliberate action that resumes it,
+            // as in a chat on this device; no app offers another way to
+            // resume, so without this a queue stays held after any Stop.
+            let changed=sqlx::query("UPDATE zuse_rust_task_command_sessions SET queue_paused=false WHERE workspace_id=$1 AND session_id=$2 AND queue_paused").bind(id).bind(&request.session_id).execute(&mut **tx).await?;
+            if changed.rows_affected() > 0 {
+                sqlx::query("INSERT INTO zuse_rust_account_event_outbox(owner_id,kind,resource_id,workspace_id,payload,created_at) VALUES($1,'task-command-queue',$2,$3,'{\"commandAdmissionVersion\":2,\"paused\":false}'::jsonb,$4)").bind(owner).bind(&request.session_id).bind(id).bind(now).execute(&mut **tx).await?;
+            }
+        }
         self.enqueue_task_drain_tx(tx, row, &request.session_id, now)
             .await?;
         if let Some(reason) = acceptance["waitingFor"].as_str() {
@@ -889,6 +899,20 @@ impl RuntimeControl {
 
 /// The task access mode a run request asks for; only the pairings the app
 /// sends are valid (full access always auto-approves, the others never do).
+/// A message the user just wrote: sent now, steered in, or queued behind the
+/// current turn. Queue edits, moves and Send now of an existing row don't
+/// resume a paused queue.
+fn thaws_queue(action: &wire::Action) -> bool {
+    matches!(
+        action,
+        wire::Action::Queue { .. }
+            | wire::Action::Submit {
+                payload: SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. },
+                ..
+            }
+    )
+}
+
 fn requested_runtime_mode(
     sandbox: zuse_protocol::SandboxLevel,
     auto_approve: bool,
