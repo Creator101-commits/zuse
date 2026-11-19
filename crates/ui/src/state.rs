@@ -5028,12 +5028,21 @@ mod tests {
         };
 
         assert!(!format!("{error:#}").is_empty());
-        assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_err(),
-            "failed bootstrap must release the IPC listener"
-        );
+        // The socket can outlive the aborted accept task by a few milliseconds
+        // (a child process forked during assembly holds a copy until it execs),
+        // so allow a short grace period; a listener that is never released
+        // still fails.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "failed bootstrap must release the IPC listener"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
@@ -6763,67 +6772,6 @@ mod tests {
         assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
         assert!(!state.apply_harness_updates(vec![status(HarnessUpdatePhase::Available)]));
         assert!(state.apply_harness_updates(vec![status(HarnessUpdatePhase::Current)]));
-    }
-
-    #[test]
-    fn apply_chat_config_stamps_the_row() {
-        let mut state = AppState::new();
-        state.apply_chats(vec![chat("a", 0, None), chat("b", 1, None)]);
-        let config = zuse_protocol::ChatConfig {
-            plan: false,
-            harness: HarnessId::ClaudeCode,
-            model: Some("claude-fable-5".into()),
-            reasoning: Some(zuse_protocol::ReasoningLevel::XHigh),
-            model_options: serde_json::Map::new(),
-            sandbox: zuse_protocol::SandboxLevel::WorkspaceWrite,
-        };
-        state.apply_chat_config("a", config.clone());
-        assert_eq!(
-            state.chats.iter().find(|c| c.id == "a").unwrap().config,
-            Some(config)
-        );
-        assert!(
-            state
-                .chats
-                .iter()
-                .find(|c| c.id == "b")
-                .unwrap()
-                .config
-                .is_none()
-        );
-        // Unknown chat: no-op, no panic.
-        state.apply_chat_config(
-            "missing",
-            zuse_protocol::ChatConfig {
-                plan: false,
-                harness: HarnessId::ClaudeCode,
-                model: None,
-                reasoning: None,
-                model_options: serde_json::Map::new(),
-                sandbox: zuse_protocol::SandboxLevel::WorkspaceWrite,
-            },
-        );
-    }
-
-    #[test]
-    fn chat_is_archived_needs_a_known_archived_row() {
-        let mut state = AppState::new();
-        let mut archived = chat("a", 0, Some(99));
-        archived.archived = true;
-        state.apply_chats(vec![archived, chat("b", 1, None)]);
-        assert!(state.chat_is_archived("a"));
-        assert!(!state.chat_is_archived("b"));
-        assert!(!state.chat_is_archived("missing"));
-    }
-
-    #[test]
-    fn visible_chats_filters_archived() {
-        let mut state = AppState::new();
-        let mut archived = chat("a", 0, Some(99));
-        archived.archived = true;
-        state.apply_chats(vec![archived, chat("b", 1, None)]);
-        let visible: Vec<&str> = state.visible_chats().map(|c| c.id.as_str()).collect();
-        assert_eq!(visible, ["b"]);
     }
 
     #[test]

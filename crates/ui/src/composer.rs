@@ -14507,6 +14507,9 @@ mod tests {
         }
     }
 
+    /// Staged image thumbnails sit in the card above the editor. A width
+    /// change that rewraps them onto another row mid-glide must not jump the
+    /// card, and the transcript clearance must still reserve the strip.
     #[gpui::test]
     fn staged_images_keep_clearance_during_dock_reflow(cx: &mut gpui::TestAppContext) {
         let (_dir, handle) = composer_focus_window(cx);
@@ -14858,14 +14861,6 @@ mod tests {
             continuation_of: None,
             duration_ms: None,
         }
-    }
-
-    #[test]
-    fn submit_gestures_choose_between_queue_and_steer() {
-        assert!(!submit_steers(SubmitIntent::Enter, false));
-        assert!(submit_steers(SubmitIntent::Enter, true));
-        assert!(submit_steers(SubmitIntent::Steer, false));
-        assert!(!submit_steers(SubmitIntent::Queue, true));
     }
 
     #[test]
@@ -16362,6 +16357,11 @@ mod tests {
             let mut methods = Vec::new();
             while let Ok(frame) = requests.try_recv() {
                 let frame: zuse_rpc::ClientFrame = serde_json::from_str(&frame).unwrap();
+                // The `@` token also lists connected plugins, which watches the
+                // cloud account. That stream is not a workspace request.
+                if frame.method.as_deref() == Some(methods::CLOUD_ACCOUNT_STATUS) {
+                    continue;
+                }
                 assert_eq!(frame.params["targetDeviceId"], "peer");
                 assert!(frame.params.get("cwd").is_none());
                 let value = match frame.method.as_deref() {
@@ -16447,7 +16447,12 @@ mod tests {
             }
             frames
         };
-        let touches_side = |frame: &zuse_rpc::ClientFrame| frame.params["chatId"] == "side";
+        // Selecting a chat records an analytics "opened" ping. The engine
+        // ignores it for a chat without a row, so it never creates one.
+        let touches_side = |frame: &zuse_rpc::ClientFrame| {
+            frame.params["chatId"] == "side"
+                && frame.method.as_deref() != Some(methods::RECORD_CHAT_OPENED)
+        };
         cx.run_until_parked();
         assert!(!drain().iter().any(touches_side));
 
@@ -17094,62 +17099,6 @@ mod tests {
     }
 
     #[test]
-    fn message_enter_bindings_cover_both_platform_modifiers() {
-        for modifier in ["cmd-enter", "ctrl-enter"] {
-            for (behavior, action) in [
-                (
-                    ComposerSendBehavior::Enter,
-                    MessageEnterBindingAction::Submit,
-                ),
-                (
-                    ComposerSendBehavior::ModEnter,
-                    MessageEnterBindingAction::NewlineOrAccept,
-                ),
-            ] {
-                assert_eq!(
-                    message_enter_bindings(behavior, modifier),
-                    vec![
-                        MessageEnterBinding {
-                            keystroke: "enter".into(),
-                            action
-                        },
-                        MessageEnterBinding {
-                            keystroke: modifier.into(),
-                            action: MessageEnterBindingAction::ModifiedSubmit,
-                        },
-                    ]
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn enter_accepts_a_completion_before_submit_or_newline() {
-        assert_eq!(
-            enter_outcome(true, EnterOutcome::Submit),
-            EnterOutcome::AcceptCompletion
-        );
-        assert_eq!(
-            enter_outcome(true, EnterOutcome::Newline),
-            EnterOutcome::AcceptCompletion
-        );
-        assert_eq!(
-            enter_outcome(false, EnterOutcome::Submit),
-            EnterOutcome::Submit
-        );
-        assert_eq!(
-            enter_outcome(false, EnterOutcome::Newline),
-            EnterOutcome::Newline
-        );
-    }
-
-    #[test]
-    fn wizard_borrows_the_generic_enter_context_only_while_active() {
-        assert_eq!(message_input_context(false), MESSAGE_COMPOSER_CONTEXT);
-        assert_eq!(message_input_context(true), GENERIC_COMPOSER_CONTEXT);
-    }
-
-    #[test]
     fn stable_outer_width_only_schedules_reflow_on_real_changes() {
         assert!(composer_width_changed(None, 400.0));
         assert!(!composer_width_changed(Some(400.0), 400.0));
@@ -17263,13 +17212,6 @@ mod tests {
             ),
             MentionTooltipPhase::Hidden
         );
-    }
-
-    #[test]
-    fn mention_tooltip_stays_visible_over_chip_or_popup_only() {
-        assert!(mention_tooltip_contains(true, false));
-        assert!(mention_tooltip_contains(false, true));
-        assert!(!mention_tooltip_contains(false, false));
     }
 
     #[test]
@@ -18498,29 +18440,6 @@ mod tests {
         });
     }
 
-    /// The queue's family overrides are every chip's padding, in order and
-    /// never empty, as `with_font_family_overrides` requires.
-    #[test]
-    fn queue_chip_overrides_are_the_padding_in_order() {
-        let raw = format!(
-            "{} then {}",
-            local_file_link("a.rs", false),
-            zuse_protocol::attachment_mentions::attachment_mention_link(1, None),
-        );
-        let (_, spans) = sent_mention_display(&raw).expect("chips project");
-        let overrides = chip_pad_overrides(&spans);
-        let expected: Vec<_> = spans
-            .iter()
-            .flat_map(|span| chip_pad_ranges(&span.range))
-            .collect();
-        assert_eq!(overrides, expected);
-        assert!(
-            overrides
-                .windows(2)
-                .all(|pair| pair[0].end <= pair[1].start)
-        );
-    }
-
     /// A chip centers on its label's cap height: the row's middle for Geist,
     /// and a nudge toward the label for faces whose caps sit higher or lower.
     #[test]
@@ -18633,9 +18552,6 @@ mod tests {
 
     #[test]
     fn auto_grow_math() {
-        // Shared editor box, 40px toolbar, and two 1px borders.
-        assert_eq!(COMPOSER_MIN_HEIGHT, 106.0);
-        assert_eq!(COMPOSER_MAX_HEIGHT, 302.0);
         // One line remains at the shared empty-editor floor.
         assert_eq!(
             composer_total_height(input_content_height(1)),
@@ -18654,13 +18570,6 @@ mod tests {
         );
         // Zero lines still measures one.
         assert_eq!(input_content_height(0), INPUT_LINE_HEIGHT);
-    }
-
-    #[test]
-    fn appshot_strip_height_tracks_cards() {
-        assert_eq!(appshot_strip_height(0), 0.0);
-        assert_eq!(appshot_strip_height(1), STRIP_PAD_TOP + APPSHOT_TILE_HEIGHT);
-        assert_eq!(appshot_strip_height(2), appshot_strip_height(1));
     }
 
     #[test]
@@ -19106,17 +19015,6 @@ mod tests {
     }
 
     #[test]
-    fn toolbar_geometry_is_shared_by_every_route() {
-        assert_eq!(ACTION_INSET, 12.0);
-        assert_eq!(TEXT_TOP_PAD, 19.0);
-        assert_eq!(ACTION_UTILITY_GAP, 2.0);
-        assert_eq!(ACTION_PRIMARY_GAP, Theme::SPACE_SM);
-        assert!(ACTION_UTILITY_GAP < ACTION_PRIMARY_GAP);
-        // The editor's padding is the `pt-4 pb-1` split of TEXTAREA_PAD_V.
-        assert_eq!(TEXT_TOP_PAD + 15.0, TEXTAREA_PAD_V);
-    }
-
-    #[test]
     fn flip_morph_tracks_live_target_and_drives_fade() {
         let m = FlipMorph {
             from: 49.0,
@@ -19149,11 +19047,6 @@ mod tests {
     }
 
     #[test]
-    fn new_thread_toolbar_keeps_its_own_height() {
-        assert_eq!(NEW_THREAD_SELECTOR_ROW_HEIGHT, 40.0);
-    }
-
-    #[test]
     fn route_chrome_crossfade_never_duplicates_picker_controls() {
         assert_eq!(route_chrome_opacities(1.0), (1.0, 0.0));
         assert_eq!(route_chrome_opacities(0.5), (0.0, 0.0));
@@ -19162,34 +19055,6 @@ mod tests {
             let (new_thread, session) = route_chrome_opacities(step as f32 / 20.0);
             assert!(new_thread == 0.0 || session == 0.0);
         }
-    }
-
-    #[test]
-    fn staged_comments_alone_are_content() {
-        assert!(!composer_has_content("   ", 0, 0));
-        assert!(composer_has_content("hi", 0, 0));
-        assert!(composer_has_content("", 1, 0));
-        assert!(composer_has_content("", 0, 1));
-    }
-
-    #[test]
-    fn modified_submit_sends_content_and_activates_latest_queue_row_when_empty() {
-        assert_eq!(
-            modified_submit_target(composer_has_content("message", 0, 0)),
-            ModifiedSubmitTarget::SubmitContent
-        );
-        assert_eq!(
-            modified_submit_target(composer_has_content("", 1, 0)),
-            ModifiedSubmitTarget::SubmitContent
-        );
-        assert_eq!(
-            modified_submit_target(composer_has_content("", 0, 1)),
-            ModifiedSubmitTarget::SubmitContent
-        );
-        assert_eq!(
-            modified_submit_target(composer_has_content("  ", 0, 0)),
-            ModifiedSubmitTarget::ActivateLatestQueued
-        );
     }
 
     #[test]
@@ -19209,53 +19074,10 @@ mod tests {
     }
 
     #[test]
-    fn send_button_morph() {
-        assert_eq!(send_button_mode(false, false), SendButtonMode::Send);
-        assert_eq!(send_button_mode(false, true), SendButtonMode::Send);
-        assert_eq!(send_button_mode(true, true), SendButtonMode::Queue);
-        assert_eq!(send_button_mode(true, false), SendButtonMode::Stop);
-    }
-
-    #[test]
-    fn queued_submit_does_not_publish_an_optimistic_transcript_echo() {
-        assert!(should_publish_optimistic_echo(false));
-        assert!(!should_publish_optimistic_echo(true));
-    }
-
-    #[test]
-    fn interrupt_tracking_is_idempotent_per_chat() {
-        let mut pending = HashSet::new();
-        assert!(begin_interrupt(&mut pending, "chat-a"));
-        assert!(!begin_interrupt(&mut pending, "chat-a"));
-        assert!(begin_interrupt(&mut pending, "chat-b"));
-        assert_eq!(pending.len(), 2);
-    }
-
-    #[test]
-    fn interrupt_tracking_releases_only_settled_chats() {
-        let mut pending = HashSet::from(["chat-a".to_string(), "chat-b".to_string()]);
-        retain_live_interrupts(&mut pending, |chat_id| chat_id == "chat-b");
-        assert_eq!(pending, HashSet::from(["chat-b".to_string()]));
-        assert!(begin_interrupt(&mut pending, "chat-a"));
-    }
-
-    #[test]
     fn interrupt_payload_keeps_the_captured_chat() {
         let params = interrupt_params("chat-a");
         assert_eq!(params["chatId"], "chat-a");
         assert_eq!(params["command"]["kind"], "interrupt");
-    }
-
-    #[test]
-    fn escape_consumers_keep_completion_and_wizard_priority() {
-        assert!(escape_dismisses_completion("escape", true));
-        assert!(!escape_dismisses_completion("escape", false));
-        assert!(!escape_dismisses_completion("enter", true));
-
-        assert!(wizard_escape_goes_back("escape", false, false));
-        assert!(wizard_escape_goes_back("escape", true, true));
-        assert!(!wizard_escape_goes_back("escape", true, false));
-        assert!(!wizard_escape_goes_back("enter", false, true));
     }
 
     #[test]

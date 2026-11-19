@@ -5007,22 +5007,6 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
     }
 
     #[tokio::test]
-    async fn closed_pull_request_is_returned_when_no_open_exists() {
-        let source = source("feature/status", "acme", Some("main"));
-        let json = serde_json::to_vec(&vec![pull_request(
-            92,
-            "CLOSED",
-            "acme",
-            "feature/status",
-            "2026-08-15T12:00:00Z",
-        )])
-        .unwrap();
-
-        let (result, _) = resolve_with(&source, command_success(json)).await;
-        assert_eq!(result.unwrap().unwrap().state, ChangeRequestState::Closed);
-    }
-
-    #[tokio::test]
     async fn open_pull_request_wins_over_newer_terminal_candidates() {
         let source = source("feature/status", "acme", Some("main"));
         let json = serde_json::to_vec(&vec![

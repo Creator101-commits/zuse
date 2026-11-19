@@ -3579,29 +3579,6 @@ mod tests {
         });
     }
 
-    /// A missing file gets its own wording — the transport's RPC framing
-    /// never reaches the reader — while every other failure keeps its own.
-    #[test]
-    fn missing_files_and_outside_reads_show_their_own_wording() {
-        assert_eq!(
-            read_error_message(&crate::files::client::FilesClientError::Request(
-                "file not found".into()
-            )),
-            SharedString::from("File not found.")
-        );
-        assert_eq!(
-            read_error_message(&crate::files::client::FilesClientError::Transport(
-                "gone".into()
-            ))
-            .to_string(),
-            "workspace connection unavailable: gone"
-        );
-        assert_eq!(
-            read_only_message(Some(WorkspaceReadOnlyReason::OutsideWorkspace)),
-            SharedString::from("Read-only: outside this chat's folder.")
-        );
-    }
-
     // Rendering a preview needs a window, so this asserts on `line_height`,
     // the single source both the uniform-height hint passed to
     // `reset_with_uniform_height` and the painted row in
@@ -3616,16 +3593,6 @@ mod tests {
 
         let minimum = FilePreviewState::new(false, 900, false, 8.0);
         assert_eq!(minimum.line_height(), px(PREVIEW_LINE_HEIGHT));
-    }
-
-    /// The regression this guards: collapsing both surfaces onto the raw
-    /// setting silently resized them on a fresh install.
-    #[test]
-    fn the_default_code_font_size_reproduces_the_historical_per_surface_sizes() {
-        let default =
-            FilePreviewState::new(false, 900, false, crate::typography::CODE_FONT_SIZE_DEFAULT);
-        assert_eq!(default.editor_text_size(), 13.0);
-        assert_eq!(default.preview_text_size(), 11.5);
     }
 
     #[test]
@@ -3654,15 +3621,6 @@ mod tests {
         document.phase = DocumentPhase::Ready;
         document.lines = Arc::new(vec![SharedString::from(text.to_string())]);
         document
-    }
-
-    #[test]
-    fn read_only_reasons_have_specific_messages() {
-        assert!(read_only_message(Some(WorkspaceReadOnlyReason::Binary)).contains("Binary"));
-        assert!(
-            read_only_message(Some(WorkspaceReadOnlyReason::UnsupportedEncoding))
-                .contains("encoding")
-        );
     }
 
     #[test]

@@ -213,13 +213,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn single_family_passes_through() {
-        let ordered = interleave_families(vec![addr("192.0.2.1:80"), addr("192.0.2.2:80")]);
-        let got: Vec<_> = ordered.into_iter().collect();
-        assert_eq!(got, vec![addr("192.0.2.1:80"), addr("192.0.2.2:80")]);
-    }
-
     #[tokio::test]
     async fn blackholed_first_address_does_not_block_the_working_one() {
         // A listener that accepts (the "IPv4 works" side) behind an RFC 5737

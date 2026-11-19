@@ -431,7 +431,6 @@ fn external_drop_on_sidebar_attaches_once_to_the_main_chat(cx: &mut TestAppConte
 /// composer's error notice. Composers not yet dropped on stay untouched.
 #[gpui::test]
 fn external_file_drops_stage_files_and_refuse_folders_and_oversize_files(cx: &mut TestAppContext) {
-    use zuse_protocol::attachment_mentions::attachment_mention_link;
     let (shell, cx) = setup_with_shell(cx, true);
     let (_files, paths) = external_files();
     let targets = [None, Some(2), Some(1)];
@@ -466,15 +465,9 @@ fn external_file_drops_stage_files_and_refuse_folders_and_oversize_files(cx: &mu
                 ["notes.zip", "Image 2.png"],
                 "target={target:?}"
             );
-            assert_eq!(
-                text(&dropped, cx),
-                format!(
-                    "{} {} ",
-                    attachment_mention_link(1, Some("notes.zip")),
-                    attachment_mention_link(2, None)
-                ),
-                "target={target:?}"
-            );
+            // Staged files sit in the tray; the draft text is left alone and
+            // the user mentions them with `@` if they want to.
+            assert_eq!(text(&dropped, cx), "", "target={target:?}");
             assert_eq!(
                 dropped.read(cx).visible_failure().as_deref(),
                 Some("folder is not a file. huge.bin is too large (24 MB max)."),

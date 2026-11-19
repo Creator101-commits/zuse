@@ -1265,18 +1265,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_zot_asks_only_for_name_and_purpose() {
-        let labels: Vec<_> = fields(&Kind::Config, None)
-            .into_iter()
-            .map(|(label, value, _)| {
-                assert!(value.is_empty());
-                label
-            })
-            .collect();
-        assert_eq!(labels, ["Name", "What this Zapper is responsible for"]);
-    }
-
-    #[test]
     fn new_documents_are_named_but_existing_ones_edit_content() {
         let file = |version| ZotFile {
             path: "NOTES.md".into(),

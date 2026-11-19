@@ -144,6 +144,17 @@ async fn workspace_file_rpcs_list_search_read_write_and_watch() {
         .expect("watch alive");
     let baseline: WorkspaceFileChanges = serde_json::from_value(baseline).expect("baseline shape");
     assert!(baseline.resync_required);
+    // The shared watcher installs OS watches on a background pass and then
+    // asks every new subscriber to resync, because anything before that was
+    // unobserved. Only after that frame are external edits guaranteed to
+    // arrive as changes.
+    let live = tokio::time::timeout(Duration::from_secs(5), watch.recv())
+        .await
+        .expect("watch went live before timeout")
+        .expect("watch alive");
+    let live: WorkspaceFileChanges = serde_json::from_value(live).expect("live shape");
+    assert!(live.resync_required, "{live:?}");
+    assert!(live.sequence > baseline.sequence, "{live:?}");
 
     let written = client
         .call(

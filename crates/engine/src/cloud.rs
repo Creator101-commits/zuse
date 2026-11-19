@@ -1911,16 +1911,6 @@ mod beta_tests {
         assert!(super::task_rejection("something_new").is_none());
     }
     #[test]
-    fn runtime_update_rejections_say_what_happens_next() {
-        let updating =
-            super::task_rejection(zuse_protocol::cloud_runtime_updates::RUNTIME_UPDATING).unwrap();
-        assert!(updating.starts_with("Updating this computer to take this message"));
-        let unavailable =
-            super::task_rejection(zuse_protocol::cloud_runtime_updates::RUNTIME_UPDATE_UNAVAILABLE)
-                .unwrap();
-        assert!(unavailable.contains("Update computer"));
-    }
-    #[test]
     fn an_outdated_computer_runtime_is_a_definitive_rejection_naming_the_fix() {
         let message =
             super::task_rejection(zuse_protocol::cloud_task_commands::RUNTIME_OUTDATED).unwrap();

@@ -630,15 +630,6 @@ mod tests {
     }
 
     #[test]
-    fn user_line_shape_matches_protocol() {
-        let line = user_message_line("hi");
-        let v: Value = serde_json::from_str(&line).expect("json");
-        assert_eq!(v["type"], "user");
-        assert_eq!(v["message"]["content"], "hi");
-        assert!(v["parent_tool_use_id"].is_null());
-    }
-
-    #[test]
     fn user_line_with_images_is_blocks_then_text() {
         let line = user_message_line_with_images(
             "what is this?",

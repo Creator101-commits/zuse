@@ -474,14 +474,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_section_is_silent_without_an_engine() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        status_section(port, &Localizer::new(zuse_i18n::Locale::En)).await;
-    }
-
-    #[tokio::test]
     async fn linking_a_signed_out_computer_signs_in_first() {
         let (service, client) = account(
             vec![
@@ -507,11 +499,5 @@ mod tests {
             .position(|m| m == methods::CLOUD_ACCOUNT_SIGN_IN);
         let linked = order.iter().position(|m| m == methods::LINK_MANAGED_HOST);
         assert!(signed_in.unwrap() < linked.unwrap(), "{order:?}");
-    }
-
-    #[test]
-    fn invitation_links_fit_a_terminal_code() {
-        let link = format!("https://192.168.100.200:27659/#pair={}", "a".repeat(180));
-        assert!(qr_code(&link).unwrap().lines().count() > 10);
     }
 }

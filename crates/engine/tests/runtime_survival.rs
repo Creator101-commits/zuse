@@ -259,7 +259,9 @@ fn status(core: &EngineCore) -> Option<SessionStatus> {
 }
 
 async fn wait_for(mut predicate: impl FnMut() -> bool, what: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    // Generous: CI runs many test processes per core. A real hang still fails
+    // here, well before nextest's 60 s kill.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     while !predicate() {
         assert!(
             tokio::time::Instant::now() < deadline,

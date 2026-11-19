@@ -3,7 +3,6 @@ pub mod redaction;
 use crate::{HarnessError, process::Command};
 use async_trait::async_trait;
 use zeroize::Zeroizing;
-use zuse_protocol::RunRequest;
 
 /// Environment a host injects into one agent process: a brokered credential,
 /// or a whole endpoint (base URL plus access key).

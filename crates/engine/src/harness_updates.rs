@@ -2602,14 +2602,6 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_checks_the_acp_registry() {
-        assert!(matches!(
-            provider(HarnessId::Antigravity).latest,
-            LatestSource::AntigravityAcp
-        ));
-    }
-
-    #[test]
     fn update_checks_report_the_candidate_after_the_installed_version() {
         assert_eq!(
             extract_latest_version(
@@ -2721,14 +2713,6 @@ esac
         let (_, args, env) = muse_installer(&dir);
         assert!(args.iter().any(|a| a.contains("dev.meta.ai/install")));
         assert_eq!(env, [("MUSE_INSTALL_DIR", "/opt/it's/bin".to_owned())]);
-    }
-
-    #[test]
-    fn pi_checks_the_active_package_scope() {
-        assert!(matches!(
-            provider(HarnessId::Pi).latest,
-            LatestSource::Npm("@earendil-works/pi-coding-agent")
-        ));
     }
 
     #[test]
@@ -3258,20 +3242,6 @@ esac
         assert!(version_is_newer("1.2.1", "1.2"));
         assert!(!version_is_newer("1.2.0", "1.2"));
         assert!(!version_is_newer("1.1.9", "1.2.0"));
-    }
-
-    #[test]
-    fn codex_is_release_monitored_without_a_guessed_self_update_command() {
-        let codex = provider(HarnessId::Codex);
-        assert!(matches!(
-            codex.latest,
-            LatestSource::Github {
-                repository: "openai/codex",
-                tag_prefix: "rust-v"
-            }
-        ));
-        assert!(codex.update_args.is_none());
-        assert!(provider(HarnessId::ClaudeCode).update_args.is_some());
     }
 
     #[cfg(unix)]

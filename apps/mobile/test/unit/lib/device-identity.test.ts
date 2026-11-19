@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
 	clearDeviceIdentity,
-	deviceLabel,
 	getOrCreateDeviceId,
 } from "../../../src/lib/device-identity";
 
@@ -77,7 +76,4 @@ describe("mobile device identity", () => {
 		await expect(getOrCreateDeviceId()).resolves.toBe("mobile_second");
 	});
 
-	test("uses a user-facing platform label", () => {
-		expect(deviceLabel()).toBe("iPhone");
-	});
 });

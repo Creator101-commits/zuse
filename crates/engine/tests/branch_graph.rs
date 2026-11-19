@@ -5,8 +5,19 @@ use std::{path::Path, sync::Arc};
 use zuse_engine::{EngineCore, HarnessRegistry};
 use zuse_protocol::HarnessId;
 use zuse_rpc::{RpcClient, methods};
+/// Every git call gets a later, explicit timestamp. Git dates have one-second
+/// resolution, so with wall-clock dates the commits a fixture makes usually
+/// share a second and `--topo-order` falls back to tie-breaking; under load
+/// they straddle a second and the order flips. Pinned dates make "newest
+/// first" mean the order the fixture wrote them in.
+fn next_git_date() -> String {
+    static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1_700_000_000);
+    let seconds = CLOCK.fetch_add(60, std::sync::atomic::Ordering::SeqCst);
+    format!("@{seconds} +0000")
+}
 fn git_as(root: &Path, author: &str, args: &[&str]) -> String {
     let email = format!("{}@localhost", author.to_lowercase().replace(' ', "."));
+    let date = next_git_date();
     let out = std::process::Command::new("git")
         .args(args)
         .current_dir(root)
@@ -14,6 +25,8 @@ fn git_as(root: &Path, author: &str, args: &[&str]) -> String {
         .env("GIT_AUTHOR_EMAIL", &email)
         .env("GIT_COMMITTER_NAME", author)
         .env("GIT_COMMITTER_EMAIL", &email)
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
         .output()
         .unwrap();
     assert!(
@@ -138,8 +151,11 @@ async fn diverged_branch_reports_counts_fork_and_conflict() {
         main_row["refs"],
         json!([{"kind":"branch","label":"main"},{"kind":"remote","label":"origin/main"}])
     );
+    // Newest first: main's commits were made after feat's.
+    assert_eq!(commits[0]["sha"], main_tip);
+    let feat_row = commits.iter().find(|c| c["sha"] == feat_b).unwrap();
     assert_eq!(
-        commits[0]["refs"],
+        feat_row["refs"],
         json!([{"kind":"branch","label":"feat"},{"kind":"remote","label":"origin/feat"}])
     );
     if merge_tree_supported(&repo) {

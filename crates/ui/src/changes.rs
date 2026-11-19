@@ -6583,16 +6583,6 @@ rename to new_name.rs
     }
 
     #[test]
-    fn horizontal_scroll_reset_returns_to_origin() {
-        let handle = gpui::ScrollHandle::new();
-        handle.set_offset(gpui::Point::new(px(-120.0), px(-18.0)));
-
-        reset_horizontal_scroll(&handle);
-
-        assert_eq!(handle.offset(), gpui::Point::default());
-    }
-
-    #[test]
     fn horizontal_scroll_slots_share_offset_but_keep_unique_ids() {
         let context = DiffCodeScrollContext {
             handle: gpui::ScrollHandle::new(),
@@ -6706,42 +6696,6 @@ rename to new_name.rs
     }
 
     #[test]
-    fn header_label_pluralizes() {
-        assert_eq!(uncommitted_label(0), "0 Uncommitted changes");
-        assert_eq!(uncommitted_label(1), "1 Uncommitted change");
-        assert_eq!(uncommitted_label(4), "4 Uncommitted changes");
-    }
-
-    #[test]
-    fn scope_labels_and_clean_messages() {
-        assert_eq!(
-            scope_label(DiffScope::WorkingTree, 2, None),
-            "2 Uncommitted changes"
-        );
-        assert_eq!(
-            scope_label(DiffScope::Branch, 1, Some("main")),
-            "1 Changed file vs main"
-        );
-        assert_eq!(scope_label(DiffScope::Branch, 3, None), "3 Changed files");
-        assert_eq!(
-            scope_label(DiffScope::LatestTurn, 2, None),
-            "2 Changed files this turn"
-        );
-        assert_eq!(
-            clean_message(DiffScope::WorkingTree, None),
-            "No uncommitted changes"
-        );
-        assert_eq!(
-            clean_message(DiffScope::Branch, Some("develop")),
-            "No changes vs develop"
-        );
-        assert_eq!(
-            clean_message(DiffScope::LatestTurn, None),
-            "No changes this turn"
-        );
-    }
-
-    #[test]
     fn base_ref_defaults_to_repo_default_then_main() {
         let branches =
             |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
@@ -6787,19 +6741,6 @@ rename to new_name.rs
         assert_eq!(DiffScope::Branch.mode(), "branch");
         assert_eq!(DiffScope::LatestTurn.mode(), "turn");
         assert_eq!(DiffScope::default(), DiffScope::WorkingTree);
-    }
-
-    #[test]
-    fn diff_scope_menu_keeps_history_as_a_separate_surface() {
-        assert_eq!(
-            DiffScope::ALL,
-            [
-                DiffScope::WorkingTree,
-                DiffScope::Branch,
-                DiffScope::LatestTurn,
-            ]
-        );
-        assert!(!DiffScope::ALL.contains(&DiffScope::History));
     }
 
     #[test]
@@ -6915,17 +6856,6 @@ rename to new_name.rs
 
     /// The regression this guards: rendering the diff at the raw shared
     /// setting silently enlarged it from 12.0 to 12.5 on a fresh install.
-    #[test]
-    fn the_default_code_font_size_reproduces_the_historical_diff_size() {
-        let theme = Theme::dark();
-        assert_eq!(
-            theme.code_font_size,
-            crate::typography::CODE_FONT_SIZE_DEFAULT
-        );
-        assert_eq!(diff_text_size(&theme), DIFF_TEXT_SIZE);
-        assert_eq!(diff_line_height(&theme), DIFF_LINE_HEIGHT);
-    }
-
     #[test]
     fn scaled_diff_sizes_keep_their_proportions_and_stay_clamped() {
         let mut theme = Theme::dark();

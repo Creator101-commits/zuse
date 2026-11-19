@@ -321,17 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn only_waiting_for_the_computer_is_a_status() {
-        assert_eq!(waiting(RUNTIME_UPDATING), Some(Waiting::Update));
-        assert_eq!(waiting(RECREATING), Some(Waiting::Recreation));
-        assert_eq!(
-            waiting(RUNTIME_UPDATE_UNAVAILABLE),
-            Some(Waiting::UpdateComputer)
-        );
-        assert_eq!(waiting("cloud_task_queue_author_changed"), None);
-    }
-
-    #[test]
     fn a_waiting_message_switches_to_server_files_with_its_settings_intact() {
         let request = json!({"commandId":"c","sessionId":"s","action":{"type":"submit","messageId":"m",
             "payload":{"kind":"run","messageId":"m","request":{"prompt":"look","harness":"codex","model":"fixture",

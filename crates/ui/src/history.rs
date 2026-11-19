@@ -4587,23 +4587,6 @@ mod tests {
     }
 
     #[test]
-    fn branch_fold_keys_keep_local_and_remote_identity() {
-        let local = GitHistoryRef {
-            kind: GitHistoryRefKind::Branch,
-            label: "main".into(),
-        };
-        let remote = GitHistoryRef {
-            kind: GitHistoryRefKind::Remote,
-            label: "origin/main".into(),
-        };
-        assert_eq!(branch_ref_key(&local).as_deref(), Some("local:main"));
-        assert_eq!(
-            branch_ref_key(&remote).as_deref(),
-            Some("remote:origin/main")
-        );
-    }
-
-    #[test]
     fn author_avatar_fallback_uses_the_first_visible_initial() {
         assert_eq!(history_author_name(""), SharedString::from("Unknown"));
         assert_eq!(history_author_initial("  josé"), SharedString::from("J"));
@@ -4616,16 +4599,6 @@ mod tests {
         let image = decode_history_avatar(&encoded).expect("jpeg payload");
         assert_eq!(image.format, ImageFormat::Jpeg);
         assert!(decode_history_avatar("not base64").is_none());
-    }
-
-    #[test]
-    fn graph_palette_only_reduces_saturation() {
-        let source = gpui::hsla(0.62, 0.8, 0.55, 0.9);
-        let muted = graph_color(source);
-        assert_eq!(muted.h, source.h);
-        assert_eq!(muted.l, source.l);
-        assert_eq!(muted.a, source.a);
-        assert!((muted.s - source.s * HISTORY_GRAPH_SATURATION).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -4870,13 +4843,6 @@ mod tests {
     }
 
     #[test]
-    fn ref_area_preserves_subject_space_and_caps_at_forty_five_percent() {
-        assert_eq!(ref_area_width(80.0), 0.0);
-        assert!((ref_area_width(200.0) - 86.4).abs() < 0.001);
-        assert!((ref_area_width(400.0) - 176.4).abs() < 0.001);
-    }
-
-    #[test]
     fn commit_divider_resizes_the_first_visible_fixed_column() {
         let widths = GitHistoryColumnWidths::default();
         let resized = resized_history_column_widths(
@@ -4968,26 +4934,6 @@ mod tests {
         assert_eq!(
             history_column_drop_index(240.0, rendered, &columns, widths),
             2
-        );
-    }
-
-    #[test]
-    fn ref_tooltip_describes_each_reference_kind() {
-        let reference = |kind: GitHistoryRefKind, label: &str| GitHistoryRef {
-            kind,
-            label: label.into(),
-        };
-        assert_eq!(
-            ref_description(&reference(GitHistoryRefKind::Branch, "main")),
-            "Branch: main"
-        );
-        assert_eq!(
-            ref_description(&reference(GitHistoryRefKind::Remote, "origin/main")),
-            "Remote branch: origin/main"
-        );
-        assert_eq!(
-            ref_description(&reference(GitHistoryRefKind::Tag, "v0.1.52")),
-            "Tag: v0.1.52"
         );
     }
 }

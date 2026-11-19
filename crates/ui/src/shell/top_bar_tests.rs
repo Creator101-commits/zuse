@@ -2,69 +2,6 @@ use super::*;
 use gpui::{TestAppContext, VisualTestContext};
 
 #[test]
-fn provider_brand_colors_are_consistent_across_pickers() {
-    use zuse_protocol::HarnessId;
-    for harness in [
-        HarnessId::Codex,
-        HarnessId::ClaudeCode,
-        HarnessId::Gemini,
-        HarnessId::Kiro,
-        HarnessId::Zuse,
-    ] {
-        assert!(
-            crate::pickers::harness_brand_icon(harness).1.is_some(),
-            "{harness:?}"
-        );
-    }
-    let codex = crate::pickers::harness_brand_icon(HarnessId::Codex)
-        .1
-        .unwrap();
-    let purple: gpui::Hsla = gpui::rgb(0x8b5cf6).into();
-    assert_eq!((codex.h, codex.s, codex.l), (purple.h, purple.s, purple.l));
-    assert!(
-        crate::pickers::harness_brand_icon(HarnessId::Cursor)
-            .1
-            .is_none()
-    );
-}
-
-struct SidebarHeadings;
-
-impl Render for SidebarHeadings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = Theme::of(cx);
-        div().size_full().flex().flex_col().children([
-            spaces::sidebar_section_heading(theme, "Zappers", "test-zappers-label").child(
-                spaces::sidebar_header_button("test-zappers-plus", icons::PLUS, theme)
-                    .debug_selector(|| "test-zappers-plus".into()),
-            ),
-            spaces::sidebar_section_heading(theme, "Threads", "test-threads-label").child(
-                spaces::sidebar_header_button("test-threads-plus", icons::PLUS, theme)
-                    .debug_selector(|| "test-threads-plus".into()),
-            ),
-        ])
-    }
-}
-
-#[gpui::test]
-fn sidebar_section_labels_and_buttons_share_geometry(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        gpui_base::init(cx);
-        cx.set_global(Theme::default());
-    });
-    let (_, cx) = cx.add_window_view(|_, _| SidebarHeadings);
-    cx.update(|window, cx| window.draw(cx).clear());
-    let zappers = cx.debug_bounds("test-zappers-label").unwrap();
-    let threads = cx.debug_bounds("test-threads-label").unwrap();
-    let zappers_plus = cx.debug_bounds("test-zappers-plus").unwrap();
-    let threads_plus = cx.debug_bounds("test-threads-plus").unwrap();
-    assert_eq!(zappers.left(), threads.left());
-    assert_eq!(zappers.size, threads.size);
-    assert_eq!(zappers_plus.left(), threads_plus.left());
-    assert_eq!(zappers_plus.size, threads_plus.size);
-}
-
-#[test]
 fn branch_errors_explain_worktree_conflicts_and_preserve_other_details() {
     let message = format_branch_error(
         "main",

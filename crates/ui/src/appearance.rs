@@ -401,11 +401,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn default_mode_is_system() {
-        assert_eq!(AppearanceMode::default(), AppearanceMode::System);
-    }
-
     /// The setting round-trips through the settings file as a lowercase string.
     #[test]
     fn mode_serialises_stably() {

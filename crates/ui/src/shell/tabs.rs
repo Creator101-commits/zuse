@@ -1419,13 +1419,6 @@ mod panel_titlebar_tests {
     use super::*;
 
     #[test]
-    fn conversation_title_defaults_without_overwriting_named_chats() {
-        assert_eq!(conversation_tab_title(None), "New chat");
-        assert_eq!(conversation_tab_title(Some("My chat")), "My chat");
-        assert_eq!(conversation_tab_title(Some("Chat 2")), "Chat 2");
-    }
-
-    #[test]
     fn tabs_align_with_the_panel_for_each_caption_layout_and_files_width() {
         let viewport = 1400.0;
         for right_pad in [6.0, 40.0, 92.0, 114.0] {

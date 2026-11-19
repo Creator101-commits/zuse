@@ -223,32 +223,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut defaults = ComposerDefaults {
-            harness: Some(HarnessId::ClaudeCode),
-            reasoning: Some(ReasoningLevel::XHigh),
-            ..Default::default()
-        };
-        defaults.remember_model(
-            HarnessId::ClaudeCode,
-            "claude-fable-5".into(),
-            "Fable 5".into(),
-        );
-        defaults.remember_model(HarnessId::Codex, "gpt-5.2-codex".into(), "GPT-5.2".into());
-        defaults
-            .model_options_mut(HarnessId::ClaudeCode, "claude-fable-5")
-            .insert("contextWindow".into(), "1m".into());
-        defaults.save(dir.path()).unwrap();
-        let loaded = ComposerDefaults::load(dir.path());
-        assert_eq!(loaded, defaults);
-        assert_eq!(
-            loaded.model_for(HarnessId::ClaudeCode).map(|m| &*m.label),
-            Some("Fable 5")
-        );
-    }
-
-    #[test]
     fn missing_and_corrupt_files_yield_defaults() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(

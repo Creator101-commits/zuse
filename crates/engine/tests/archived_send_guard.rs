@@ -1,6 +1,7 @@
-//! Sending a message to an archived chat revives it: `queue_command` flips the
-//! workspace row's `archived` flag back off for message-bearing commands (Run,
-//! Steer) — and only those; an Interrupt leaves the archive state alone.
+//! An archived chat is read-only for messages: `queue_command` refuses
+//! message-bearing commands (Run, Steer) until the chat is unarchived, so a
+//! stale composer or another device cannot silently start a turn in a chat
+//! the user put away. Non-message commands such as Interrupt still go through.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,7 +128,7 @@ fn archived(core: &EngineCore) -> bool {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sending_a_message_unarchives_the_chat() {
+async fn archived_chat_refuses_messages_until_unarchived() {
     let tmp = tempfile::tempdir().unwrap();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(AckHarness));
@@ -161,27 +162,40 @@ async fn sending_a_message_unarchives_the_chat() {
         .expect("archive chat");
     assert!(archived(&core), "precondition: chat is archived");
 
-    // A Run command (the composer's send) revives the row synchronously.
-    core.doc_host
+    // The composer's send is refused, leaves the chat archived, and queues
+    // nothing a host could later pick up.
+    let refused = core
+        .doc_host
         .queue_command(CHAT, run_payload("msg-ua-1"))
-        .expect("queue run command");
+        .expect_err("a message to an archived chat must be refused");
     assert!(
-        !archived(&core),
-        "sending a message must unarchive the chat"
+        refused.to_string().contains("Unarchive this thread"),
+        "refusal tells the user what to do: {refused}"
     );
-    wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
+    assert!(archived(&core), "a refused send must not unarchive");
+    let commands = core
+        .doc_host
+        .open(CHAT)
+        .unwrap()
+        .doc()
+        .read_commands()
+        .unwrap();
+    assert!(commands.is_empty(), "nothing queued: {commands:?}");
 
-    // A non-message command must NOT revive it.
-    core.workspace
-        .set_chat_archived(CHAT, true)
-        .expect("re-archive chat");
+    // A non-message command is not gated and does not change archive state.
     core.doc_host
         .queue_command(CHAT, SessionCommandPayload::Interrupt {})
         .expect("queue interrupt");
-    assert!(
-        archived(&core),
-        "an interrupt is not a message and must not unarchive"
-    );
+    assert!(archived(&core), "an interrupt must not unarchive");
+
+    // Once unarchived, the same send goes through and the turn runs.
+    core.workspace
+        .set_chat_archived(CHAT, false)
+        .expect("unarchive chat");
+    core.doc_host
+        .queue_command(CHAT, run_payload("msg-ua-1"))
+        .expect("queue run command after unarchive");
+    wait_for(|| complete_assistant_count(&core) == 1, "turn to complete").await;
 
     core.shutdown().await;
 }

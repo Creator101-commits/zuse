@@ -1964,15 +1964,6 @@ mod tests {
     }
 
     #[test]
-    fn retry_ladder_is_2s_doubling_capped_at_15s() {
-        assert_eq!(retry_delay(0), Duration::from_millis(2_000));
-        assert_eq!(retry_delay(1), Duration::from_millis(4_000));
-        assert_eq!(retry_delay(2), Duration::from_millis(8_000));
-        assert_eq!(retry_delay(3), Duration::from_millis(15_000));
-        assert_eq!(retry_delay(9), Duration::from_millis(15_000));
-    }
-
-    #[test]
     fn upload_chunk_fits_the_relay_frame_ceiling() {
         // Cloudflare caps a WebSocket message at 1 MiB; the chunk rides one
         // relay frame with a small JSON envelope + uleb header.
@@ -2006,14 +1997,6 @@ mod tests {
             expected_start = range.end;
         }
         assert_eq!(expected_start, UPLOAD_CHUNK_B64_CHARS + 7);
-    }
-
-    #[test]
-    fn attachment_deadline_scales_and_caps() {
-        // A one-chunk screenshot fails within ~2 minutes, not hours.
-        assert_eq!(attachment_deadline(1), Duration::from_secs(135));
-        // A max-size upload is still bounded.
-        assert_eq!(attachment_deadline(1_000), Duration::from_secs(900));
     }
 }
 

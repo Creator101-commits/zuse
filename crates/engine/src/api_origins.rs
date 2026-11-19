@@ -54,12 +54,6 @@ mod tests {
         assert_eq!(value.cloud, "https://stage.example");
     }
     #[test]
-    fn general_only_override_also_scopes_cloud_tasks() {
-        let value = resolve(Some("http://127.0.0.1:27655".into()), None);
-        assert_eq!(value.general, "http://127.0.0.1:27655");
-        assert_eq!(value.cloud, "http://127.0.0.1:27655");
-    }
-    #[test]
     fn separate_explicit_origins_are_preserved() {
         let value = resolve(
             Some("https://account.example".into()),

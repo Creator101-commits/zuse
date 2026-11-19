@@ -7,20 +7,39 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # The macOS test suite is too slow for per-change runs on a free runner;
+  # it runs nightly (and on demand) instead.
+  schedule:
+    - cron: '30 21 * * *'
 
 concurrency:
   group: validate-${{ github.ref }}
   # Main always finishes, so its caches get saved for every branch.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# Budget: every pull request and main job finishes in under ten minutes on
+# GitHub's free 4-core runners once main has saved its caches.
+#
+# - apt packages come from a cache, not `apt-get update` against a mirror
+#   (that alone took 10-27 minutes on a slow-mirror day).
+# - Tests run with more threads than cores: many wait on timers, not CPU.
+#
+# Where the time used to go: ~30 separate `cargo test` invocations, each with a
+# different package set, so Cargo re-unified features and rebuilt the engine
+# several times, and the browser job built two optimized wasm bundles nothing
+# downloaded. Now each job builds once (nextest runs every test binary from
+# that one build in parallel) and the optimized web bundle is built on main
+# only. sccache's GitHub cache backend was tried and dropped: the repository's
+# 10 GB Actions cache is already filled by rust-cache, so its per-crate entries
+# were evicted as fast as they were written.
 env:
+  CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
-  CARGO_INCREMENTAL: 0
 
 jobs:
-  # macOS is the slowest job, so a pull request runs it only when it touches
-  # desktop code or a file with macOS-specific paths; main always runs it.
+  # A pull request runs the macOS check only when it touches desktop code or a
+  # file with macOS-specific paths; main and nightly always run it.
   platforms:
     runs-on: ubuntu-24.04
     permissions:
@@ -46,19 +65,8 @@ jobs:
           fi
           echo "native=$native" >> "$GITHUB_OUTPUT"
 
-  localization:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: python3 scripts/check-localization.py
-      - run: python3 -m unittest discover -s scripts -p test_localization.py
-      - run: cargo test -p zuse-i18n
-
-  packaging:
+  # Everything that needs no Rust build: formatting, scripts, JS tests.
+  checks:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -67,76 +75,88 @@ jobs:
           repository: opcodehq/zkit
           ref: 14d9b82fb65d86f63b6332cb3d616f1ab0ada103
           path: vendor/zkit
-      - run: python3 -m unittest discover -s scripts -p test_package.py -v
-      - run: python3 -m unittest discover -s scripts -p test_release_prebuild.py -v
-      - run: python3 -m unittest discover -s scripts -p test_distribution.py -v
-      - run: python3 -m unittest discover -s scripts -p test_install_cli.py -v
-      - run: python3 -m unittest discover -s scripts -p test_release_notes.py -v
-      - run: python3 -m unittest discover -s scripts -p test_cargo_dev.py -v
-
-  control-sdk:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo run --locked -p zuse-protocol --example control_types -- --check
-      - run: cargo test --locked -p zuse-control
-      - run: npm ci && npm test
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+      - run: python3 scripts/check-localization.py
+      - name: Script tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: JS tests
+        run: node --test scripts/analytics-dashboards.test.mjs apps/web/tests/*.mjs
+      - name: SDK tests
         working-directory: packages/sdk
-  engine:
+        run: npm ci && npm test
+
+  rust:
     runs-on: ubuntu-24.04
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - run: bash scripts/ci-ubuntu-dependencies.sh cmake libclang-dev libasound2-dev ripgrep
-      - run: cargo fmt --all --check
-      - run: cargo check -p zuse-cli -p zuse-commands -p zuse-relay
-      - run: cargo test --locked -p zuse-analytics
-      - run: node --test scripts/analytics-dashboards.test.mjs
-      - run: cargo test -p zuse-cli --test startup
-      - run: cargo test --locked -p zuse-engine --test desktop_shutdown
-      - run: cargo test -p zuse-commands
-      - run: cargo test -p zuse-relay --test startup
-      - run: cargo test -p zuse-remote
-      - run: cargo test -p zuse-plugins
-      - run: "cargo test --no-fail-fast -p zuse-engine --lib -- plugins::tests managed_access source_control::tests::pr_ visuals diff_sync::turn_snapshot registry::custom_acp::tests doc_host::tool_result_tests doc_host::source_context_tests account::tests harness_models harness_local model_connections::tests native_harness::tests native_recovery::tests sessions::tests archives::tests terminals::restore_tests"
-      - run: cargo test --locked -p zuse-engine --lib analytics_counts_structured_refusal_without_recording_the_reason
-      - run: cargo test --no-fail-fast -p zuse-engine --test pairing --test browser_access --test git_workspace --test external_chats --test voice_runtime --test relay_access --test durable_turn_review --test thread_sessions --test custom_acp --test auth
-      - run: cargo test -p zuse-doc --lib session_owner_tests
-      - run: cargo test -p zuse-client --test live
-      - run: "cargo test --no-fail-fast -p zuse-protocol --lib -- custom_acp::tests methods::retry_tests rpc_probe browser_link notifications completion_sound presentation access_posture_tests input_answers message_attachments"
-      - run: cargo test -p zuse-harness -p zuse-model-accounts
-      - run: cargo test -p zuse-model -p zuse-serve
-      - run: "cargo test --no-fail-fast -p zuse-providers --lib -- tool_output command_execution_maps_exit_code_to_error acp:: opencode:: skills::tests"
-      - run: cargo test --no-fail-fast -p zuse-providers --test claude --test codex --test acp access_
-      - run: cargo test -p zuse-providers --test opencode
-      - run: cargo test -p zuse-providers --features native-fixture --test pi_access --test pi_mcp --test pi_rpc
-      - run: cargo test -p zuse-sync --lib tool_blobs
-      - run: cargo test -p zuse-voice-session -p zuse-orb
-      - run: cargo test -p zuse-rpc --lib
-      - run: cargo test -p zuse-engine -p zuse-mcp --lib plugin
-      - run: cargo test -p zuse-engine --lib zots
-      - run: cargo test --locked -p zuse-update --lib
-      - run: cargo build -p zuse-cli -p zuse-control
-      - run: npm ci && npm run test:engine
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - uses: actions/cache@v4
+        with:
+          path: ~/apt-debs
+          key: apt-debs-${{ runner.os }}-${{ hashFiles('scripts/ci-ubuntu-dependencies.sh') }}-cmake-libclang-dev-libasound2-dev-ripgrep
+      - run: bash scripts/ci-apt-install.sh ~/apt-debs cmake libclang-dev libasound2-dev ripgrep
+      # One build for every package: a single feature set, so nothing is
+      # compiled twice.
+      - name: Tests
+        run: >-
+          cargo nextest run --locked --profile ci --test-threads 12
+          -p zuse-analytics -p zuse-cli -p zuse-client -p zuse-commands
+          -p zuse-control -p zuse-doc -p zuse-engine -p zuse-harness
+          -p zuse-harness-extensions -p zuse-i18n -p zuse-mcp -p zuse-model
+          -p zuse-model-accounts -p zuse-orb -p zuse-plugins -p zuse-protocol
+          -p zuse-providers -p zuse-relay -p zuse-remote -p zuse-rpc
+          -p zuse-serve -p zuse-sync -p zuse-update -p zuse-voice-session
+          --features zuse-providers/native-fixture,zuse-sync/mock-server
+      - run: cargo run --locked -p zuse-protocol --example control_types -- --check
+      # Same package set and features as the test build, so the two binaries
+      # the SDK smoke test drives reuse its artifacts instead of a fresh
+      # feature resolution rebuilding the engine.
+      - name: Engine binaries for the SDK
+        run: >-
+          cargo build --locked --bin zuse-cli --bin zuse-control
+          -p zuse-analytics -p zuse-cli -p zuse-client -p zuse-commands
+          -p zuse-control -p zuse-doc -p zuse-engine -p zuse-harness
+          -p zuse-harness-extensions -p zuse-i18n -p zuse-mcp -p zuse-model
+          -p zuse-model-accounts -p zuse-orb -p zuse-plugins -p zuse-protocol
+          -p zuse-providers -p zuse-relay -p zuse-remote -p zuse-rpc
+          -p zuse-serve -p zuse-sync -p zuse-update -p zuse-voice-session
+          --features zuse-providers/native-fixture,zuse-sync/mock-server
+      - name: SDK against the engine
         working-directory: packages/sdk
+        run: npm ci && npm run test:engine
+
+  harness-evaluation:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - uses: actions/cache@v4
+        with:
+          path: ~/apt-debs
+          key: apt-debs-${{ runner.os }}-${{ hashFiles('scripts/ci-ubuntu-dependencies.sh') }}-ripgrep
+      - run: bash scripts/ci-apt-install.sh ~/apt-debs ripgrep
+      - run: cargo build --locked --release -p zuse-harness --example harness-evaluate
+      - run: python3 scripts/test-harness-evaluation.py --binary target/release/examples/harness-evaluate --output .context/native-transport-fixtures
 
   native:
     needs: platforms
@@ -148,55 +168,54 @@ jobs:
     env:
       HUGEICONS_LICENSE_KEY: ${{ secrets.HUGEICONS_LICENSE_KEY }}
       HUGEICONS_SOLID_VERSION: ${{ vars.HUGEICONS_SOLID_VERSION }}
-      # The UI test binaries outgrow the hosted runner's disk with debug info.
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      CARGO_INCREMENTAL: 0
+      # Read by the update footer tests at run time.
+      ZUSE_CLOUD: '1'
     steps:
       - if: runner.os == 'Linux'
         name: Free runner disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-          df -h /
+        # In the background: deleting these takes a minute or two and the
+        # build only needs the space once it starts writing test binaries.
+        run: sudo nohup rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL > /dev/null 2>&1 &
       - uses: actions/checkout@v4
       - run: python3 scripts/cargo_dev.py --github-env
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-      - if: runner.os == 'macOS'
-        name: Check microphone helper cross-compilation
-        run: python3 -m unittest discover -s scripts -p test_macos_permission.py -v
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
           env-vars: "CARGO CC CFLAGS CXX CMAKE RUST HUGEICONS_BUILD_KEY"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - if: runner.os == 'Linux'
-        run: >-
-          bash scripts/ci-ubuntu-dependencies.sh
-          build-essential cmake clang libclang-dev pkg-config libssl-dev
-          libfontconfig-dev libfreetype-dev libxcb1-dev libxcb-shape0-dev
-          libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev
-          libvulkan-dev libasound2-dev libwebkit2gtk-4.1-dev libjson-glib-dev
-      - run: cargo check -p zuse -p zuse-cli -p zuse-relay -p zuse-remote
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-debs
+          key: apt-debs-${{ runner.os }}-${{ hashFiles('scripts/ci-ubuntu-dependencies.sh') }}-build-essential-cmake-clang-libclang-dev-pkg-config-libssl-dev-libfontconfig-dev-libfreetype-dev-libxcb1-dev-libxcb-shape0-dev-libxcb-xfixes0-dev-libxkbcommon-dev-libxkbcommon-x11-dev-libwayland-dev-libvulkan-dev-libasound2-dev-libwebkit2gtk-4.1-dev-libjson-glib-dev
+      - if: runner.os == 'Linux'
+        run: bash scripts/ci-apt-install.sh ~/apt-debs build-essential cmake clang libclang-dev pkg-config libssl-dev libfontconfig-dev libfreetype-dev libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev libasound2-dev libwebkit2gtk-4.1-dev libjson-glib-dev
+      - run: cargo check --locked -p zuse -p zuse-cli -p zuse-relay -p zuse-remote
       - if: runner.os == 'macOS'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # After `cargo check`: the bundle-identity test reads the pinned
+      # toolkit's legal files out of the fetched crate sources.
       - if: runner.os == 'macOS'
-        name: Seal release metadata inside the macOS bundle
-        run: python scripts/test_package.py PackagingTests.test_macos_package_identity_allows_bundle_signing
+        name: Microphone helper cross-compilation and bundle identity
+        run: |
+          python -m unittest discover -s scripts -p test_macos_permission.py
+          python scripts/test_package.py PackagingTests.test_macos_package_identity_allows_bundle_signing
       - if: runner.os == 'Linux'
-        run: |
-          cargo test -p zuse-viewport --lib history::tests
-          cargo test -p zuse-viewport --lib transcript::tests
-      - name: Native remote connection recovery
-        run: |
-          cargo test -p zuse-ui --lib state::account_connection::tests
-          cargo test -p zuse-ui --lib native_paired_reconnect_uses_fresh_encryption
+        name: Tests
+        run: cargo nextest run --locked --profile ci --test-threads 12 -p zuse-ui -p zuse-viewport -p zuse-text --lib
+      # Per change, macOS only proves the desktop app compiles (above); its
+      # test build alone takes over ten minutes on the free runner.
+      - if: runner.os == 'macOS' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        name: Tests
+        run: cargo nextest run --locked --profile ci -p zuse-ui --lib
       - name: macOS AppKit quit drains the engine before termination
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         run: |
           cargo build --locked -p zuse-ui --example desktop-quit-fixture
           python3 - <<'PY'
@@ -211,53 +230,13 @@ jobs:
               with (profile / 'engine.lock').open('a') as lock:
                   fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
           PY
-      - name: Native bounded history, paging and resume
-        run: |
-          cargo test -p zuse-ui --lib state::history_window::tests
-          cargo test -p zuse-ui --lib native_model_discovery_defers_other_agents_until_picker_open
-      - name: Instant session archive and rollback
-        run: cargo test -p zuse-ui --lib archive_
-      - name: Native analytics transitions and preferences
-        run: cargo test --locked -p zuse-ui --lib -- desktop_analytics::tests native_analytics
-      - name: Update footer, restart and agent notifications
-        env:
-          ZUSE_CLOUD: '1'
-        run: cargo test --locked -p zuse-ui --lib -- sidebar_footer sidebar_settings_trigger shell::update_restart::tests shell::harness_updates::tests toast::tests
-      - name: Language persistence, drafts and offline font coverage
-        run: |
-          cargo test -p zuse-ui --lib localization::tests
-          cargo test -p zuse-viewport --lib localization::tests
-          cargo test -p zuse-viewport --lib language_fonts::tests
-      - name: Browser motion settings
-        if: runner.os == 'Linux'
-        run: cargo test -p zuse-viewport --lib environment::tests
-      - name: Browser preview lifecycle
-        if: runner.os == 'Linux'
-        run: cargo test -p zuse-viewport --lib browser::tests
-      - name: Browser visual controls
-        if: runner.os == 'Linux'
-        run: cargo test -p zuse-viewport --lib visuals::tests
-      - name: Browser voice lifecycle
-        if: runner.os == 'Linux'
-        run: cargo test -p zuse-viewport --lib voice::tests
-      - name: Relay settings recovery
-        if: runner.os == 'Linux'
-        run: cargo test -p zuse-viewport --lib pairing::tests
-      - name: Account remote settings recovery
-        if: runner.os == 'Linux'
-        run: cargo test -p zuse-viewport --lib managed_access::tests
-      - name: Browser PR workflows
-        if: runner.os == 'Linux'
-        run: cargo test -p zuse-viewport --lib pull_requests::tests
-      - name: Shared Git panel state
-        if: runner.os == 'Linux'
-        run: cargo test -p zuse-viewport --lib git_controls::tests
 
   browser:
     runs-on: ubuntu-24.04
     env:
       HUGEICONS_LICENSE_KEY: ${{ secrets.HUGEICONS_LICENSE_KEY }}
       HUGEICONS_SOLID_VERSION: ${{ vars.HUGEICONS_SOLID_VERSION }}
+      CARGO_TARGET_DIR: target/browser
     steps:
       - uses: actions/checkout@v4
       - run: python3 scripts/cargo_dev.py --github-env
@@ -278,33 +257,16 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: trunk@0.21.14
-      - run: node --test apps/web/tests/voice_media.mjs apps/web/tests/browser_frame.mjs apps/web/tests/environment.mjs apps/web/tests/initializer.mjs apps/web/tests/rpc-compression.mjs
-      - run: bash scripts/build-web.sh --release
-      - run: bash scripts/build-web.sh --features browser-input-fixture --dist ../../.context/browser-input-fixture-dist
-      - run: cargo +nightly check -p zuse-remote --target wasm32-unknown-unknown
-        env:
-          CARGO_TARGET_DIR: target/browser
-      - uses: actions/upload-artifact@v4
+      # Pull requests only need to know the app compiles and bundles; the
+      # size-optimized build (codegen-units=1 plus wasm-opt) is what releases
+      # ship, so main keeps exercising it.
+      - if: github.ref != 'refs/heads/main'
+        run: bash scripts/build-web.sh
+      - if: github.ref == 'refs/heads/main'
+        run: bash scripts/build-web.sh --release
+      - run: cargo +nightly check --locked -p zuse-remote --target wasm32-unknown-unknown
+      - if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
         with:
           name: zuse-browser
           path: dist/web
-
-  model-transport:
-    runs-on: ubuntu-24.04
-    env:
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      CARGO_INCREMENTAL: 0
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          key: native-model-transport
-          cache-on-failure: true
-      - run: bash scripts/ci-ubuntu-dependencies.sh ripgrep
-      - run: cargo test --locked -p zuse-harness -p zuse-harness-extensions --all-targets
-      - run: python3 -m unittest discover -s scripts -p test_computer_use_config.py -v
-      - run: cargo build --locked --release -p zuse-harness --example harness-evaluate
-      - run: python3 scripts/test-harness-evaluation.py --binary target/release/examples/harness-evaluate --output .context/native-transport-fixtures

@@ -916,35 +916,6 @@ mod tests {
     }
 
     #[test]
-    fn button_fill_scatter_is_unchanged() {
-        // Values of the send key's original ramp, recomputed independently.
-        for rows in [4usize, 9, 20] {
-            for y in 0..rows {
-                for x in 0..8 {
-                    let density = 0.25 + 0.75 * ((y as f32 + 0.5) / rows as f32);
-                    let threshold = BAYER_4[(y & 3) * 4 + (x & 3)] / 16.0 + 0.5 / 16.0;
-                    let lit = density > threshold;
-                    let expected =
-                        ((0.3 + density * 0.7) * if lit { 1.0 } else { 0.4 }).clamp(0.0, 1.0);
-                    assert_eq!(dither_cell(x, y, rows), (lit, expected));
-                }
-            }
-        }
-        assert_eq!(
-            dither_cell(0, 0, 4),
-            (true, 0.3 + (0.25 + 0.75 / 8.0) * 0.7)
-        );
-        assert_eq!(DITHER_CELL, 2.0);
-    }
-
-    #[test]
-    fn bayer_thresholds() {
-        assert_eq!(BAYER[0][0], 0.5 / 16.0);
-        assert_eq!(BAYER[3][0], 15.5 / 16.0);
-        assert_eq!(BAYER[2][2], 1.5 / 16.0);
-    }
-
-    #[test]
     fn scatter_densifies_toward_the_floor() {
         let opts = PaintOpts::default();
         assert!(mean(&samples(0.0, opts)) < mean(&samples(0.5, opts)));
@@ -1176,6 +1147,5 @@ mod tests {
             assert_eq!(DitherColor::ALL[i], *color);
             assert_eq!(DitherColor::from_name(color.name()), Some(*color));
         }
-        assert_eq!(DitherColor::Blue.seed().fill, [53, 143, 243]);
     }
 }

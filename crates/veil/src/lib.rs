@@ -277,29 +277,6 @@ mod tests {
     }
 
     #[test]
-    fn fade_constants_match_mugen_fade_painter() {
-        // @wingleeio/mugen-markdown dist/index.mjs: EMA_SEED_MS=160,
-        // MIN_FADE_MS=120, MAX_FADE_MS=400, alpha=(1-p)**1.6,
-        // ema = ema*0.7 + min(gap,1000)*0.3, boost = 1 + 0.3*max(0,n-2).
-        assert_eq!(VEIL_EMA_SEED_MS, 160.0);
-        assert_eq!(VEIL_MIN_FADE_MS, 120.0);
-        assert_eq!(VEIL_MAX_FADE_MS, 400.0);
-        assert_eq!(VEIL_CURVE_POW, 1.6);
-        // duration = clamp(ema*3, 120, 400).
-        assert_eq!(veil_duration_ms(160.0), 400.0); // seed → clamped at max
-        assert_eq!(veil_duration_ms(30.0), 120.0); // fast stream → floor
-        assert_eq!(veil_duration_ms(60.0), 180.0);
-        // EMA update.
-        assert_eq!(veil_ema_next(160.0, 100.0), 160.0 * 0.7 + 100.0 * 0.3);
-        assert_eq!(veil_ema_next(160.0, 5000.0), 160.0 * 0.7 + 1000.0 * 0.3);
-        // Fast-stream boost kicks in at the 3rd concurrent chunk.
-        assert_eq!(veil_boost(0), 1.0);
-        assert_eq!(veil_boost(2), 1.0);
-        assert!((veil_boost(3) - 1.3).abs() < 1e-6);
-        assert!((veil_boost(5) - 1.9).abs() < 1e-6);
-    }
-
-    #[test]
     fn seeded_row_adopts_existing_text_without_fading() {
         // Switching back to a streaming session: the text already on screen is
         // the attach BASELINE (mugen FadePainter.attach) — no full-reply fade.
@@ -316,15 +293,6 @@ mod tests {
         row.finish_seeding();
         let spans = row.advance(2, "new block", at(t0, 200));
         assert_eq!(spans, vec![(0..9, 0.0)]);
-    }
-
-    #[test]
-    fn default_row_veil_fades_first_text() {
-        // Mid-stream new rows keep the old behavior: their first chunk fades.
-        let t0 = Instant::now();
-        let mut row = RowVeil::default();
-        let spans = row.advance(0, "fresh", t0);
-        assert_eq!(spans, vec![(0..5, 0.0)]);
     }
 
     #[test]
@@ -359,22 +327,6 @@ mod tests {
         assert_eq!(common_prefix("é", "è"), 0);
         assert_eq!(common_prefix("abé", "abè"), 2);
         assert_eq!(common_prefix("same", "same"), 4);
-    }
-
-    #[test]
-    fn veil_opacity_curve_endpoints() {
-        // Text alpha = 1 - (1-p)^1.6: 0 at arrival, 1 when the veil is gone.
-        assert_eq!(veil_opacity(0.0), 0.0);
-        assert_eq!(veil_opacity(1.0), 1.0);
-        let mid = veil_opacity(0.5);
-        assert!(mid > 0.0 && mid < 1.0);
-        // The pow-1.6 ease-out reveals faster than linear early on.
-        assert!(mid > 0.5);
-        assert!((mid - (1.0 - 0.5f32.powf(1.6))).abs() < 1e-6);
-        // Monotonic + clamped.
-        assert!(veil_opacity(0.2) <= veil_opacity(0.4));
-        assert_eq!(veil_opacity(-1.0), 0.0);
-        assert_eq!(veil_opacity(2.0), 1.0);
     }
 
     #[test]

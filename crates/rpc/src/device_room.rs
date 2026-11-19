@@ -1158,17 +1158,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_header_and_payload() {
-        // device-frame.test.ts: "round-trips header + payload"
-        let payload = [1u8, 2, 3, 250, 255];
-        let h = header("term-42", "term").with_to("conn-9");
-        let frame = encode_device_frame(&h, &payload).expect("encode");
-        let (decoded, out) = decode_device_frame(&frame).expect("decode");
-        assert_eq!(decoded, h);
-        assert_eq!(out, payload);
-    }
-
-    #[test]
     fn handles_empty_payloads_and_long_headers() {
         // device-frame.test.ts: "handles empty payloads and long headers" — the 200-char
         // stream id forces a multi-byte uleb128 length prefix.

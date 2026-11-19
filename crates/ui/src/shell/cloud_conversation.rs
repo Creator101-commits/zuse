@@ -1198,7 +1198,9 @@ mod tests {
         let _entered = runtime.enter();
         cx.update(|cx| {
             initialize(cx);
-            gpui_tokio::init(cx);
+            // The test's own current-thread runtime: an owned multi-thread
+            // runtime adds worker threads the deterministic scheduler rejects.
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
         });
         let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
             std::sync::Arc::new(PendingController),
@@ -1293,7 +1295,7 @@ mod tests {
         let _entered = runtime.enter();
         cx.update(|cx| {
             initialize(cx);
-            gpui_tokio::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
         });
         let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
             std::sync::Arc::new(PendingController),
@@ -1586,10 +1588,7 @@ mod tests {
     fn paused_history_and_retired_transport_send_reopens_passively_without_losing_native_canvas(
         cx: &mut TestAppContext,
     ) {
-        use std::sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
-        };
+        use std::sync::{Arc, Mutex, atomic::AtomicBool};
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1936,7 +1935,7 @@ mod tests {
             1,
             "loaded range is retained and never refetched"
         );
-        cx.update_window(window.into(), |_, window, cx| window.remove_window())
+        cx.update_window(window.into(), |_, window, _| window.remove_window())
             .unwrap();
     }
     #[gpui::test]
@@ -3241,7 +3240,7 @@ mod tests {
                 cx,
             )
         });
-        let mut pump = |cx: &mut TestAppContext| {
+        let pump = |cx: &mut TestAppContext| {
             for _ in 0..12 {
                 cx.run_until_parked();
                 runtime.block_on(tokio::task::yield_now());

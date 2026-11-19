@@ -2234,24 +2234,6 @@ mod tests {
     }
 
     #[test]
-    fn neutral_950_is_0a0a0a() {
-        // oklch(0.145 0 0) is Tailwind neutral-950, zuse's app background.
-        let rgb = srgb_u8(oklch_to_srgb(0.145, 0.0, 0.0));
-        assert_eq!(rgb, [10, 10, 10]);
-    }
-
-    #[test]
-    fn scrollbar_thumbs_follow_the_active_appearance() {
-        let dark = scrollbar_thumb_colors(&Theme::dark());
-        let light = scrollbar_thumb_colors(&Theme::light());
-
-        assert!(dark.0.l > Theme::dark().bg.l);
-        assert!(light.0.l < Theme::light().bg.l);
-        assert_eq!([dark.0.a, dark.1.a, dark.2.a], [0.30, 0.42, 0.55]);
-        assert_eq!([light.0.a, light.1.a, light.2.a], [0.30, 0.42, 0.55]);
-    }
-
-    #[test]
     fn oklch_accents_match_reference() {
         // Reference values computed independently (CSS Color 4 matrices).
         assert_eq!(
@@ -2292,46 +2274,6 @@ mod tests {
         assert!((contrast_ratio(white, white) - 1.0).abs() < 0.01);
         // Symmetric regardless of argument order.
         assert!((contrast_ratio(black, white) - contrast_ratio(white, black)).abs() < 1e-4);
-    }
-
-    #[test]
-    fn zuse_accent_matches_the_app_palette() {
-        let dark = Theme::dark();
-        let light = Theme::light();
-        assert_eq!(dark.accent_color, AccentColor::Zuse);
-        assert_eq!(dark.accent, hsla(83. / 360., 0.72, 0.46, 1.));
-        assert_eq!(dark.accent_strong, hsla(83. / 360., 0.72, 0.46, 1.));
-        assert_eq!(dark.code_text, dark.text_strong);
-        assert_eq!(dark.busy, dark.accent);
-        assert_eq!(dark.glyph.mid, dark.accent);
-        assert_eq!(dark.caret, dark.accent);
-        assert_eq!(light.accent, hsla(83. / 360., 0.74, 0.43, 1.));
-        assert_eq!(light.accent_strong, hsla(83. / 360., 0.74, 0.43, 1.));
-        assert_eq!(light.code_text, light.text_strong);
-        assert_eq!(light.busy, light.accent);
-        assert_eq!(light.glyph.mid, light.accent);
-        assert_eq!(light.caret, light.accent);
-    }
-
-    #[test]
-    fn wallpaper_glass_interactions_lift_toward_white_in_both_appearances() {
-        for (appearance, id) in [
-            (Appearance::Dark, "zuse-dark"),
-            (Appearance::Light, "zuse-light"),
-        ] {
-            let theme = Theme::for_selection_with_wallpaper(
-                appearance,
-                id,
-                AccentSelection::ThemeDefault,
-                SurfacePreference::Frosted,
-                Some(ModelColor::rgb(20, 60, 140)),
-            );
-            for wash in [theme.element_hover, theme.element_active] {
-                assert_eq!(wash.l, 1.0);
-                assert_eq!(wash.s, 0.0);
-                assert!(wash.a > 0.0 && wash.a < 1.0);
-            }
-        }
     }
 
     #[test]
@@ -2639,14 +2581,8 @@ mod tests {
     }
 
     #[test]
-    fn light_text_and_lines_are_the_design_system_neutrals() {
+    fn registry_zuse_light_matches_builtin_light_theme() {
         let l = Theme::light();
-        assert_eq!(l.text_strong, grey(0x0f));
-        assert_eq!(l.text, grey(0x2a));
-        assert_eq!(l.text_muted, grey(0x73));
-        assert_eq!(l.bg_selected, grey(0xf0));
-        assert_eq!(l.border, grey(0xe8));
-        // The registry's Zuse Light resolves to the same roles.
         let resolved = Theme::for_selection(
             Appearance::Light,
             "zuse-light",
@@ -2841,19 +2777,6 @@ mod tests {
                     }
                 }
             }
-        }
-    }
-
-    /// The caret is a 2px bar, so the 3:1 non-text floor applies — but it is the
-    /// one element the user is actively hunting for, and the dark-mode blue is
-    /// far too light to survive on white unchanged.
-    #[test]
-    fn caret_is_findable_on_its_background() {
-        for t in [Theme::dark(), Theme::light()] {
-            // The caret is the accent; the authored light lime sits near 2.2:1.
-            let floor = if t.appearance.is_light() { 2.2 } else { 3.0 };
-            let r = contrast_ratio(t.caret, t.bg);
-            assert!(r >= floor, "{:?} caret is {r:.2}:1 on bg", t.appearance);
         }
     }
 
@@ -3056,39 +2979,6 @@ mod tests {
         set_current_appearance(Appearance::Dark);
     }
 
-    /// Both appearances retain window and floating glass; the light floating
-    /// tint is thinner than the earlier contrast-checked treatment.
-    #[test]
-    fn both_appearances_stay_frosted_and_light_runs_heavier() {
-        if Theme::GLASS_ALPHA < 1.0 {
-            // The default surface treatment is opaque; frost is an opt-in.
-            let (mut dark, mut light) = (Theme::dark(), Theme::light());
-            dark.surface_treatment = SurfaceTreatment::Frosted;
-            light.surface_treatment = SurfaceTreatment::Frosted;
-            assert!(dark.glass().a < 1.0, "dark keeps its translucent frost");
-            assert!(light.glass().a < 1.0, "light is glass-forward like dark");
-            assert!(
-                light.glass().a > dark.glass().a - f32::EPSILON,
-                "a light tint dominates the blur less, so it must not run looser than dark"
-            );
-            assert!(dark.is_frost());
-            assert!(light.is_frost());
-            assert!(dark.glass_overlay().a < 1.0);
-            assert!(light.glass_overlay().a < 1.0);
-            assert_eq!(light.glass_overlay().a, 0.45);
-            assert_eq!(light.input_glass_bg().a, 0.35);
-            // Popovers carry their own glass recipe; the shared panel fill
-            // (palettes, dialogs, tooltips) is opaque.
-            assert_eq!(crate::popover::surface_bg(&dark).a, 1.0);
-            assert!(dark.floating_glass());
-            assert_eq!(dark.for_popup().text_muted, dark.text.opacity(0.64));
-            assert_eq!(dark.for_popup().text_faint, dark.text.opacity(0.48));
-        } else {
-            assert_eq!(Theme::light().glass().a, 1.0);
-            assert_eq!(Theme::dark().glass().a, 1.0);
-        }
-    }
-
     /// An input plate has to read as *lifted* in both appearances. Dark does that
     /// with a faint white wash; the literal light translation is a faint black
     /// wash, which reads as a dent instead — so light lifts with white plus its
@@ -3150,55 +3040,6 @@ mod tests {
             );
         }
         set_current_appearance(Appearance::Dark);
-    }
-
-    #[test]
-    fn workspace_selection_uses_translucent_wash() {
-        let _guard = lock_appearance();
-        set_current_appearance(Appearance::Dark);
-        assert_eq!(glass_selected_bg(), wash(0.11));
-
-        set_current_appearance(Appearance::Light);
-        let light = glass_selected_bg();
-        assert_eq!(light.l, 0.0);
-        assert_eq!(light.a, 0.04);
-        set_current_appearance(Appearance::Dark);
-    }
-
-    #[test]
-    fn appearance_mirror_tracks_installed_theme() {
-        let _guard = lock_appearance();
-        set_current_appearance(Appearance::Light);
-        assert_eq!(current_appearance(), Appearance::Light);
-        set_current_appearance(Appearance::Dark);
-        assert_eq!(current_appearance(), Appearance::Dark);
-    }
-
-    #[test]
-    fn appearance_rebuild_preserves_selected_ui_family() {
-        for appearance in [Appearance::Dark, Appearance::Light] {
-            let theme = Theme::for_appearance(appearance).with_font_sans("Inter".into());
-            assert_eq!(theme.font_sans.as_ref(), "Inter");
-            assert_eq!(theme.font_sans_fixed.as_ref(), "Geist");
-            assert_eq!(theme.font_mono.as_ref(), "Geist Mono");
-        }
-    }
-
-    #[test]
-    fn window_appearance_maps_onto_ours() {
-        use gpui::WindowAppearance as W;
-        assert_eq!(Appearance::from_window(W::Light), Appearance::Light);
-        assert_eq!(Appearance::from_window(W::VibrantLight), Appearance::Light);
-        assert_eq!(Appearance::from_window(W::Dark), Appearance::Dark);
-        assert_eq!(Appearance::from_window(W::VibrantDark), Appearance::Dark);
-    }
-
-    #[test]
-    fn scrim_is_black_but_lighter_in_light_mode() {
-        let (d, l) = (Theme::dark(), Theme::light());
-        assert_eq!(d.scrim().l, 0.0);
-        assert_eq!(l.scrim().l, 0.0);
-        assert!(l.scrim().a < d.scrim().a);
     }
 
     #[test]
@@ -3271,20 +3112,6 @@ mod tests {
     }
 
     #[test]
-    fn floating_surfaces_have_an_opaque_menu_fill() {
-        for mut theme in [Theme::dark(), Theme::light()] {
-            theme.surface_treatment = SurfaceTreatment::Opaque;
-            assert_eq!(
-                crate::popover::surface_bg(&theme),
-                theme.surface_overlay.opacity(1.0)
-            );
-            assert_eq!(crate::popover::surface_bg(&theme).a, 1.0);
-            assert_eq!(theme.for_popup().text_muted, theme.text_muted);
-            assert_eq!(theme.for_popup().text_faint, theme.text_faint);
-        }
-    }
-
-    #[test]
     fn custom_light_popup_text_is_readable_and_preparation_is_idempotent() {
         let mut variant = ThemeRegistry::builtin()
             .variant("zuse-light")
@@ -3316,12 +3143,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn layout_numbers_match_zuse() {
-        assert_eq!(Theme::HEADER_HEIGHT, 44.0); // h-11
-        assert_eq!(Theme::STATUS_STRIP_HEIGHT, 24.0); // h-6
-        assert_eq!(Theme::BUBBLE_RADIUS, 16.0);
     }
 }

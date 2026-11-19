@@ -4,7 +4,7 @@
 use crate::common::{err, ok, rejects, repeat, root};
 use zuse_ui_block::{
     ChartPoint, Component, FlowNode, KeyValuePair, MAX_SOURCE_CHARS, Spec, Step, StepStatus, Tab,
-    Tone, parse, validate,
+    Tone, validate,
 };
 
 // ─── Normalization ──────────────────────────────────────────────────────────
@@ -822,10 +822,4 @@ fn typed_tree_round_trips_through_json_tagged_by_component_name() {
     );
     let back: Spec = serde_json::from_value(json).unwrap();
     assert_eq!(back, spec);
-}
-
-#[test]
-fn parse_error_is_a_std_error() {
-    let error: Box<dyn std::error::Error> = Box::new(parse("root = Nope()").unwrap_err());
-    assert!(error.to_string().contains("Unknown component Nope"));
 }

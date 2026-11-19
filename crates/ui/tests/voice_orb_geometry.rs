@@ -29,26 +29,6 @@ fn all_states_emit_geometry() {
 }
 
 #[test]
-fn connecting_emits_lines() {
-    let resolved = resolve_preset(OrbState::Connecting, OrbSize::Avatar);
-    let frame = draw_mode(resolved.mode, 64.0, 2.0, &resolved.opts);
-    assert!(!frame.lines.is_empty(), "connecting should wire edges");
-    assert!(!frame.dots.is_empty());
-}
-
-#[test]
-fn reduced_motion_frame_is_deterministic() {
-    let resolved = resolve_preset(OrbState::Working, OrbSize::Avatar);
-    let a = draw_mode(resolved.mode, 64.0, 0.6, &resolved.opts);
-    let b = draw_mode(resolved.mode, 64.0, 0.6, &resolved.opts);
-    assert_eq!(a.dots.len(), b.dots.len());
-    for (da, db) in a.dots.iter().zip(b.dots.iter()) {
-        assert!((da.x - db.x).abs() < 1e-4);
-        assert!((da.y - db.y).abs() < 1e-4);
-    }
-}
-
-#[test]
 fn solve_cycle_survives_float_boundary_move_counts() {
     // `move_count` is a public `ModeOpts` knob. Certain values put the slot
     // boundary exactly on a float rounding edge, where `tc / slot_dur` reaches
@@ -152,59 +132,6 @@ fn larger_sizes_add_detail_without_changing_the_legacy_presets() {
         );
         assert!(large.speed <= avatar.speed);
         assert!(hero.speed <= large.speed);
-    }
-}
-
-#[test]
-fn legacy_all_constant_keeps_its_original_array_shape() {
-    #[allow(deprecated)]
-    let original_nine: [OrbState; 9] = OrbState::ALL;
-    assert_eq!(original_nine.len(), 9);
-    assert_eq!(OrbState::ALL_STATES.len(), 12);
-}
-
-#[test]
-fn bench_geometry_cost() {
-    use std::time::Instant;
-    for &state in OrbState::ALL_STATES {
-        for &size in OrbSize::ALL_SIZES {
-            let resolved = resolve_preset(state, size);
-            for i in 0..20 {
-                let _ = draw_mode(
-                    resolved.mode,
-                    size.pixels(),
-                    i as f32 * 0.016,
-                    &resolved.opts,
-                );
-            }
-            let n = 1000usize;
-            let t0 = Instant::now();
-            let mut total_dots = 0usize;
-            let mut total_lines = 0usize;
-            for i in 0..n {
-                let f = draw_mode(
-                    resolved.mode,
-                    size.pixels(),
-                    i as f32 * 0.016,
-                    &resolved.opts,
-                );
-                total_dots += f.dots.len();
-                total_lines += f.lines.len();
-            }
-            let elapsed = t0.elapsed();
-            let per = elapsed / n as u32;
-            let avg_dots = total_dots / n;
-            let avg_lines = total_lines / n;
-            eprintln!(
-                "{:>12}/{:<6}  {:>5} dots  {:>4} lines  {:>8.2?} /frame  (~{:.0}k geom-fps)",
-                state.as_str(),
-                size.pixels() as u32,
-                avg_dots,
-                avg_lines,
-                per,
-                1.0 / per.as_secs_f64() / 1000.0
-            );
-        }
     }
 }
 

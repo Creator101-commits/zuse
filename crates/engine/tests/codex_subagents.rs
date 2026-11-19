@@ -14,7 +14,7 @@ const CHAT: &str = "codex-subagents";
 
 fn assemble(dir: &Path) -> (EngineCore, EngineProfile) {
     let fixture =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../harness/tests/fixtures/fake-codex.sh");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../providers/tests/fixtures/fake-codex.sh");
     let registry = Arc::new(HarnessRegistry::new());
     registry.register(Arc::new(CodexHarness::new().with_executable(fixture)));
     let profile = EngineProfile::development(dir, "test-org", "test-user");

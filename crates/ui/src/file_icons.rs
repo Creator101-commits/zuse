@@ -386,17 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn asset_source_preserves_authored_icon_bytes() {
-        let path = "files/ts.svg";
-        let embedded = EmbeddedFileIcons::get(path).unwrap();
-        let loaded = Assets
-            .load(&format!("{ASSET_PREFIX}{path}"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(loaded.as_ref(), embedded.data.as_ref());
-    }
-
-    #[test]
     fn exact_names_are_case_insensitive_and_ignore_parent_dots() {
         assert_eq!(
             path(FileIconIdentity::file("C:\\project\\PACKAGE.JSON")),

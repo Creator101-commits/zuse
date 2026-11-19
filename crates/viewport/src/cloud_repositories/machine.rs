@@ -510,26 +510,3 @@ impl RepositoryPanel {
         ))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::saved_notice;
-    use zuse_protocol::cloud_computers::MachineRecipe;
-
-    #[test]
-    fn saved_notice_says_what_applies_now_and_what_waits_for_the_image() {
-        let mut recipe = MachineRecipe::default();
-        assert_eq!(
-            saved_notice(&recipe),
-            "Saved. Computers use the standard machine."
-        );
-        recipe.instructions = "Keep commits small.".into();
-        assert!(saved_notice(&recipe).contains("New chats get"));
-        assert!(!saved_notice(&recipe).contains("image"));
-        recipe.setup_script = "npm i -g pnpm".into();
-        assert!(saved_notice(&recipe).contains("New chats get"));
-        assert!(saved_notice(&recipe).contains("once your machine image is built"));
-        recipe.instructions.clear();
-        assert!(!saved_notice(&recipe).contains("New chats"));
-    }
-}

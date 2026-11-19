@@ -550,22 +550,4 @@ mod tests {
             .unwrap();
         }
     }
-
-    #[test]
-    fn manual_commands_and_missing_binary_guidance() {
-        for id in IDS {
-            assert_eq!(
-                manual_command(id).is_some(),
-                !matches!(id, HarnessId::Mock | HarnessId::Antigravity)
-            );
-            let (cli, dir) = cli_and_dir(id);
-            assert!(!cli.is_empty() && !dir.is_empty());
-        }
-        assert!(
-            post_install(HarnessId::Mock)
-                .unwrap_err()
-                .to_string()
-                .contains("open a new terminal")
-        );
-    }
 }

@@ -295,7 +295,7 @@ async fn two_engines_share_a_workspace() {
     )
     .await;
 
-    // Rename + archive from B (LWW from any device) become visible on A.
+    // A rename from B (LWW from any device) becomes visible on A.
     client_b
         .call(
             methods::MUTATE,
@@ -303,22 +303,37 @@ async fn two_engines_share_a_workspace() {
         )
         .await
         .expect("rename chat");
-    client_b
-        .call(
-            methods::MUTATE,
-            serde_json::json!({ "op": "setChatArchived", "chatId": "chat-1", "archived": true }),
-        )
-        .await
-        .expect("archive chat");
     wait_for(
         || {
             a.workspace
                 .chat("chat-1")
                 .ok()
                 .flatten()
+                .is_some_and(|c| c.title.as_deref() == Some("Renamed from B"))
+        },
+        "rename on A",
+    )
+    .await;
+
+    // Archiving is a host lifecycle change (it tears down the host's runtime
+    // and checkout), so it runs on A, the chat's host; the row change still
+    // reaches B, along with the earlier rename.
+    client_a
+        .call(
+            methods::MUTATE,
+            serde_json::json!({ "op": "setChatArchived", "chatId": "chat-1", "archived": true }),
+        )
+        .await
+        .expect("archive chat on its host");
+    wait_for(
+        || {
+            b.workspace
+                .chat("chat-1")
+                .ok()
+                .flatten()
                 .is_some_and(|c| c.title.as_deref() == Some("Renamed from B") && c.archived)
         },
-        "rename + archive on A",
+        "rename + archive on B",
     )
     .await;
 

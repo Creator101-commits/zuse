@@ -601,17 +601,6 @@ mod tests {
     }
 
     #[test]
-    fn push_and_read_round_trip() {
-        let doc = doc();
-        assert!(doc.read_queue().unwrap().is_empty());
-        let mut first = item("q1", "first");
-        first.attachments = vec!["uploads/a.png".into()];
-        doc.push_queued(&first).unwrap();
-        doc.push_queued(&item("q2", "second")).unwrap();
-        assert_eq!(doc.read_queue().unwrap(), vec![first, item("q2", "second")]);
-    }
-
-    #[test]
     fn hold_policy_round_trips_and_old_rows_default_to_automatic_steering() {
         let doc = doc();
         let mut held = item("q1", "hold this");

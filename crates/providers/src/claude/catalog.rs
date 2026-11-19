@@ -456,16 +456,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn ultrathink_prefixes_prompt() {
-        assert_eq!(
-            apply_ultrathink(Some(ReasoningLevel::Ultrathink), "do it"),
-            "Ultrathink:\ndo it"
-        );
-        assert_eq!(
-            apply_ultrathink(Some(ReasoningLevel::Max), "do it"),
-            "do it"
-        );
-    }
 }

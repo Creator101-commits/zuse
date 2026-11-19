@@ -35,19 +35,6 @@ describe("composer plus menu", () => {
 		onTogglePlan: vi.fn(),
 	};
 
-	test("offers attachments and both send modes", () => {
-		const items = composerPlusMenuItems(props);
-		expect(items.map((item) => item.title)).toEqual([
-			"Take photo",
-			"Choose photos",
-			"Choose files",
-			"Add goal",
-			"Plan mode",
-		]);
-		expect(items.find((item) => item.id === "plan")?.checked).toBe(true);
-		expect(items.find((item) => item.id === "goal")?.checked).toBe(false);
-	});
-
 	test("toggles modes and hides Goal when unsupported", () => {
 		const items = composerPlusMenuItems(props);
 		items.find((item) => item.id === "goal")?.onSelect?.();

@@ -44,8 +44,15 @@ async fn rejecting_edge() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<
             let seen = seen.clone();
             tokio::spawn(async move {
                 let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request).await;
-                seen.fetch_add(1, Ordering::SeqCst);
+                let read = stream.read(&mut request).await.unwrap_or(0);
+                // A Zuse app running on the developer's machine probes every
+                // listener opened under one of its project roots (preview
+                // discovery sends `HEAD /`), and a checkout is often such a
+                // root. The engine never sends that to Edge, so it is not
+                // traffic from the runtime under test.
+                if !request[..read].starts_with(b"HEAD / ") {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
                 let body = r#"{"error":"revoked"}"#;
                 let response = format!(
                     "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",

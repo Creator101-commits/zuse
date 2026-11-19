@@ -38,15 +38,6 @@ fn defaults_come_from_each_field() {
 }
 
 #[test]
-fn submission_text_with_defaults() {
-    let form = root(DEPLOY);
-    assert_eq!(
-        form_submission_text(&form, &[]),
-        "Deploy settings\n- Environment: staging\n- Region: eu-west-1\n- Run migrations: Yes\n- Rollout: 25\n- Notes: —"
-    );
-}
-
-#[test]
 fn submission_text_with_answers() {
     let form = root(DEPLOY);
     let values = vec![

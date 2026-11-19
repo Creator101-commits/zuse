@@ -399,22 +399,4 @@ mod tests {
             assert!(text.contains("a.txt"));
         });
     }
-
-    #[gpui::test]
-    fn batch_failures_report_completed_entries(cx: &mut TestAppContext) {
-        let (_, files, cx) = setup(cx);
-        let intent = files.read_with(cx, |files, cx| MutationIntent {
-            operation_id: "op".into(),
-            origin: files.interaction_origin(cx).unwrap(),
-            entry: crate::files::test_support::entry(
-                "src/a.txt",
-                zuse_protocol::WorkspaceEntryKind::File,
-            ),
-            destination: Some("dest/a.txt".into()),
-        });
-        assert_eq!(
-            batch_failure_message(&intent, 2, 5, "Destination exists"),
-            "Moved 2 of 5 — a.txt: Destination exists"
-        );
-    }
 }

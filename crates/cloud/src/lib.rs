@@ -10,6 +10,7 @@ pub mod access_policy;
 #[cfg(test)]
 mod zzz_sql_census {
     #[test]
+    #[ignore = "manual SQL census; run with --ignored --test-threads=1"]
     fn report() {
         crate::aaa_sql_census::report();
     }

@@ -9,7 +9,7 @@ use zuse_providers::PiHarness;
 async fn pi_idle_crash_next_dispatch_loads_stored_session() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../harness/tests/fixtures/fake-pi-rpc.py");
+        .join("../providers/tests/fixtures/fake-pi-rpc.py");
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(
         PiHarness::new()
@@ -62,7 +62,7 @@ async fn timed_out_native_question_resolves_and_finishes_without_user_input() {
         PiHarness::new()
             .with_executable(
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../harness/tests/fixtures/fake-pi-rpc.py"),
+                    .join("../providers/tests/fixtures/fake-pi-rpc.py"),
             )
             .with_session_store(dir.path().join("index"))
             .with_graces(Duration::from_millis(50), Duration::from_millis(100)),

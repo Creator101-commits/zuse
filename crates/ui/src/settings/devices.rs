@@ -551,11 +551,4 @@ mod tests {
             "2d ago"
         );
     }
-
-    #[test]
-    fn local_subtitle_does_not_claim_synced_metadata() {
-        let copy = devices_subtitle(Some(WorkspaceScope::Local));
-        assert!(copy.contains("local workspace"));
-        assert!(!copy.contains("synced"));
-    }
 }

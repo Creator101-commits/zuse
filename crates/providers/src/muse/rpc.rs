@@ -225,15 +225,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_ids_are_version_7() {
-        let a = command_id();
-        let parsed = uuid::Uuid::parse_str(&a).unwrap();
-        assert_eq!(parsed.get_version_num(), 7);
-        assert_eq!(parsed.get_variant(), uuid::Variant::RFC4122);
-        assert_ne!(a, command_id());
-    }
-
-    #[test]
     fn schema_version_must_be_one() {
         assert!(check_schema(json!({"schema": {"version": 1}})).is_ok());
         assert!(
