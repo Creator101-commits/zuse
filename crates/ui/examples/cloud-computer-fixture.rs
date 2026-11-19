@@ -60,7 +60,7 @@ impl RpcService for Controller {
             methods::CLOUD_CONTEXT if self.new_chat => RpcReply::value(&new_chat_context()),
             methods::CLOUD_CREATE if self.new_chat => {
                 assert_eq!(_params["projectId"], "cloud-only-project");
-                assert_eq!(_params["firstMessage"], "Cloud-only first message");
+                assert_eq!(_params["firstMessage"], "Fix the flaky sync test");
                 assert_eq!(_params["agentConnectionId"], "fixture-codex");
                 *self.admitted.lock().unwrap() = Some(_params.clone());
                 RpcReply::value(
@@ -287,6 +287,12 @@ fn main() -> anyhow::Result<()> {
                         .timer(Duration::from_millis(1600))
                         .await;
                 }
+                // `FIXTURE_CLICKS="x,y;x,y"` clicks screen points before the capture.
+                for point in std::env::var("FIXTURE_CLICKS").unwrap_or_default().split(';').filter(|p| !p.is_empty()) {
+                    let status = std::process::Command::new("python3").env("ZUSE_MIXED_CLOUD_CLICK", point).args(["-c", MIXED_CLICK, "click"]).status().unwrap();
+                    assert!(status.success());
+                    cx.background_executor().timer(Duration::from_millis(900)).await;
+                }
                 let actual_window=if mixed&&!inspect {cx.update(|cx|cx.active_window().unwrap_or(window))}else{window};
                 let result = actual_window.update(cx, |_, window, cx| capture(window, cx, &output));
                 result.expect("fixture window").expect("native render");
@@ -372,14 +378,14 @@ fn computer_seed() -> Value {
     let chat = json!({"id":"fixture-session","threadId":"fixture-thread","deviceId":"cloud:fixture-computer","title":"Improve cloud startup","archived":false,"cwd":".","branch":"cloud/startup","createdAt":"2026-10-30T12:00:00Z","config":{"harness":"codex","model":"gpt-5.3-codex","sandbox":"workspace-write"}});
     let messages = json!([
         {"id":"fixture-user","role":"user","parts":[{"id":"fixture-text","kind":"text","text":"Inspect the startup path and reduce redundant repository fetches."}],"createdAt":1793361600000_i64,"deviceId":"cloud:fixture-computer"},
-        {"id":"fixture-assistant","role":"assistant","parts":[{"id":"fixture-result","kind":"text","text":"This fixture shows saved history while the computer sleeps. The transcript, composer, queue and Computer panel use the same components as the web app. Opening this screen does not start a runtime."}],"createdAt":1793361601000_i64,"deviceId":"cloud:fixture-computer","status":"complete"}
+        {"id":"fixture-assistant","role":"assistant","parts":[{"id":"fixture-result","kind":"text","text":"The clone step fetched every branch on each start. It now does a shallow fetch of the task branch only, and the setup cache is keyed by the lockfile, so a warm start skips the install. Startup went from 48 s to 19 s in three runs."}],"createdAt":1793361601000_i64,"deviceId":"cloud:fixture-computer","status":"complete"}
     ]);
     json!({"apiOrigin":"https://fixture-api.example.test","accountId":"fixture-owner","workspace":workspace,"commandDeliveryMode":"server-admitted-v2","commandAdmissionVersion":2,"taskCommandCanEdit":true,"commandAdmissions":[],"head":{"schemaVersion":1,"payloadFormat":"zuse-transcript-v1","workspaceId":"fixture-computer","sessionId":"fixture-session","runtimeGeneration":1,"cursor":{"epoch":"fixture-checkpoint","version":4},"chat":chat,"conversations":[chat],"transcript":{"reset":messages},"queue":[],"queuePaused":false,"olderMessageSequence":null}})
 }
 
 fn new_chat_context() -> Value {
-    let catalog = json!({"providers":[{"id":"codex","name":"Codex","defaultModel":"fixture-model","models":[{"id":"fixture-model","label":"Fixture model"}]}]});
-    json!({"accountId":"fixture-owner","ownerId":"fixture-owner","organizationId":null,"apiOrigin":"https://fixture-api.example.test","projects":[{"projectId":"cloud-only-project","accountId":"fixture-owner","displayName":"Cloud-only repository","repositoryIdentity":"github.com/example/cloud-only","defaultBranch":"main","providerId":"boxd","supportsModelConfiguration":true}],"agentConnections":[{"connectionId":"fixture-codex","agent":"codex","state":"connected","accountLabel":"Fixture Codex"}],"agentCatalog":catalog,"providerAgentCatalogs":{"boxd":catalog},"computerCapabilities":{"providers":[{"id":"boxd","configured":true,"managedBaseReady":true,"preservesDisk":true,"sizes":[{"id":"small","label":"Small"}]}]}})
+    let catalog = json!({"providers":[{"id":"codex","name":"Codex","defaultModel":"fixture-model","models":[{"id":"fixture-model","label":"GPT-5.5"}]}]});
+    json!({"accountId":"fixture-owner","ownerId":"fixture-owner","organizationId":null,"apiOrigin":"https://fixture-api.example.test","projects":[{"projectId":"cloud-only-project","accountId":"fixture-owner","displayName":"opcodehq/web","repositoryIdentity":"github.com/example/cloud-only","defaultBranch":"main","providerId":"boxd","supportsModelConfiguration":true}],"agentConnections":[{"connectionId":"fixture-codex","agent":"codex","state":"connected","accountLabel":"Fixture Codex"}],"agentCatalog":catalog,"providerAgentCatalogs":{"boxd":catalog},"computerCapabilities":{"providers":[{"id":"boxd","configured":true,"managedBaseReady":true,"preservesDisk":true,"sizes":[{"id":"small","label":"4 vCPU · 16 GB"}]}]}})
 }
 
 const TYPE_AND_SEND: &str = r#"
@@ -394,7 +400,7 @@ t.XTestFakeKeyEvent.argtypes=[c.c_void_p,c.c_uint,c.c_int,c.c_ulong]
 def key(name,down):
     code=x.XKeysymToKeycode(d,x.XStringToKeysym(name.encode()));assert code
     t.XTestFakeKeyEvent(d,code,down,0)
-for char in 'Cloud-only first message':
+for char in 'Fix the flaky sync test':
     if char.isupper():key('Shift_L',1)
     name='space' if char==' ' else 'minus' if char=='-' else char.lower()
     key(name,1);key(name,0)
@@ -403,7 +409,7 @@ key('Return',1);key('Return',0);x.XFlush(d)
 "#;
 
 fn admitted_workspace() -> Value {
-    json!({"workspaceId":"admitted-computer","chatId":"admitted-thread","initialSessionId":"admitted-session","state":"provisioning","desiredState":"ready","statusCode":"allocating","title":"Cloud-only first message","branch":"task/cloud-only","createdAt":1793361600000_i64})
+    json!({"workspaceId":"admitted-computer","chatId":"admitted-thread","initialSessionId":"admitted-session","state":"provisioning","desiredState":"ready","statusCode":"allocating","title":"Fix the flaky sync test","branch":"task/cloud-only","createdAt":1793361600000_i64})
 }
 
 fn capture(
