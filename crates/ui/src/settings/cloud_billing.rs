@@ -94,6 +94,8 @@ impl CloudView {
 #[derive(Clone, Copy, Debug)]
 pub enum Navigate {
     Cloud(CloudView),
+    /// The last onboarding step: leave Settings for a new cloud chat.
+    StartCloudChat,
 }
 /// The most usage pages fetched for one period (100 entries each).
 const USAGE_PAGES: usize = 10;
@@ -240,6 +242,13 @@ impl CloudBillingPage {
             &repository_panel,
             |_, _, event: &zuse_viewport::cloud_repositories::OpenPage, cx| {
                 cx.emit(Navigate::Cloud(CloudView::from_page(event.0)));
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &repository_panel,
+            |_, _, _: &zuse_viewport::cloud_repositories::StartChat, cx| {
+                cx.emit(Navigate::StartCloudChat);
             },
         )
         .detach();
@@ -1039,13 +1048,18 @@ impl Render for CloudBillingPage {
                 action,
             ),
             _ => {
-                self.repository_panel
-                    .update(cx, |panel, cx| panel.set_usage(false, None, cx));
+                let access = self.state.read(cx).cloud_access();
+                let subscribed = access.settled().then(|| access.subscribed());
+                self.repository_panel.update(cx, |panel, cx| {
+                    panel.set_usage(false, None, cx);
+                    panel.set_cloud_subscribed(subscribed, cx);
+                });
+                let onboarding = self.repository_panel.read(cx).onboarding_active();
                 div()
                     .child(self.repository_panel.clone())
                     // Slack connections start cloud tasks, so they sit with the
-                    // computer overview.
-                    .when(self.view == CloudView::Overview, |d| {
+                    // computer overview, once first-run setup is out of the way.
+                    .when(self.view == CloudView::Overview && !onboarding, |d| {
                         d.child(div().mt(px(24.)).child(self.slack_panel.clone()))
                     })
             }
@@ -1064,6 +1078,11 @@ impl Render for CloudBillingPage {
     }
 }
 impl CloudBillingPage {
+    /// Opens first-run onboarding on Overview, optionally at a step.
+    pub fn open_onboarding(&mut self, step: Option<&str>, cx: &mut Context<Self>) {
+        self.repository_panel
+            .update(cx, |panel, cx| panel.open_onboarding(step, cx));
+    }
     /// Names each cloud computer by the chat it ran, for the usage map.
     fn machines(
         &self,

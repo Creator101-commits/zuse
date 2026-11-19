@@ -9,34 +9,7 @@ pub(super) fn section(
     action: Option<AnyElement>,
     body: impl IntoElement,
 ) -> Div {
-    let header = row()
-        .items_start()
-        .justify_between()
-        .gap(px(12.))
-        .px(px(12.))
-        .pt(px(10.))
-        .pb(px(10.))
-        .child(
-            column()
-                .flex_1()
-                .min_w_0()
-                .gap(px(2.))
-                .child(s::title_text(title))
-                .when(!description.is_empty(), |v| {
-                    v.child(s::description_text(description))
-                }),
-        )
-        .when_some(action, |v, action| {
-            v.child(
-                div()
-                    .flex_none()
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .child(action),
-            )
-        });
-    s::frame().child(header).child(s::card().child(body))
+    crate::cloud_settings::kit::section(title, description, action, body)
 }
 
 /// Label, hint and a bordered script editor.

@@ -76,7 +76,7 @@ impl MachineView {
 pub(super) fn image_copy(state: &str) -> (&'static str, &'static str, bool) {
     match state {
         "none" => (
-            "Shared base",
+            "Standard machine",
             "Computers start from Zuse's standard machine.",
             false,
         ),
@@ -302,27 +302,73 @@ impl RepositoryPanel {
         self.machine.notice = None;
         cx.notify();
     }
-    pub(super) fn render_machine(&self, cx: &mut Context<Self>) -> Div {
-        use super::form;
-        let busy = self.pending.values().any(|p| p.kind.starts_with("machine"));
-        let mut root = column().gap(px(16.));
-        let Some(version) = &self.machine.version else {
-            root = root.child(form::section(
-                "Machine image",
-                if busy {
-                    "Loading your machine…"
-                } else {
-                    "Your machine couldn't be loaded. Refresh to try again."
-                },
-                None,
-                div(),
-            ));
-            if let Some(error) = &self.machine.error {
-                root = root.child(form::message(error, true));
-            }
-            return root;
+    /// The machine's size: the default every plan starts chats on, and the
+    /// larger Cloud Max size. Choosing a size per chat isn't offered yet, so
+    /// the larger option shows what unlocks it instead of a control.
+    fn machine_size(&self) -> Div {
+        use super::plan::{DEFAULT_MACHINE, LARGE_MACHINE, SLEEP_AFTER_MINUTES, Tier};
+        use crate::cloud_settings::kit::{self, Choice, Tone};
+        let tier = self.plan_tier.map(|(tier, _)| tier);
+        let large_note: SharedString = match tier {
+            Some(Tier::CloudMax) => "Coming soon".into(),
+            _ => "Cloud Max".into(),
         };
-        let (label, detail, warning) = image_copy(&version.image_state);
+        let cards = kit::choice_cards(vec![
+            Choice {
+                title: DEFAULT_MACHINE.into(),
+                detail: "Every chat starts here. Plenty for most repositories.".into(),
+                selected: true,
+                locked: None,
+            },
+            Choice {
+                title: LARGE_MACHINE.into(),
+                detail: "For heavy builds and large test suites. Uses minutes twice as fast."
+                    .into(),
+                selected: false,
+                locked: Some(large_note),
+            },
+        ]);
+        let help = match tier {
+            Some(Tier::CloudMax) => {
+                "Your plan includes machines up to 8 vCPU · 32 GB. Choosing a larger size for a chat is coming soon."
+            }
+            _ => {
+                "Cloud Max runs machines up to 8 vCPU · 32 GB. Change plans in Plan & usage → Billing."
+            }
+        };
+        kit::section(
+            "Your cloud computer",
+            "The machine each cloud chat runs on.",
+            None,
+            column()
+                .child(
+                    column()
+                        .gap(px(10.))
+                        .p(px(kit::INSET))
+                        .child(cards)
+                        .child(kit::help(help)),
+                )
+                .child(kit::row_item(
+                    false,
+                    Some(kit::icon_tile("clock-circle", 28.).into_any_element()),
+                    "Sleeps when quiet",
+                    format!(
+                        "After {SLEEP_AFTER_MINUTES} minutes without activity. A sleeping computer uses no minutes and wakes as soon as you reply."
+                    ),
+                    Some(kit::pill("Automatic", Tone::Neutral).into_any_element()),
+                )),
+        )
+    }
+
+    fn machine_image_card(
+        &self,
+        version: &MachineVersion,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        use super::form;
+        use crate::cloud_settings::kit;
+        let (label, detail, _) = image_copy(&version.image_state);
         let build = version.image.as_ref();
         let detail: SharedString = match (version.image_state.as_str(), build) {
             ("building", Some(b)) => format!(
@@ -342,52 +388,35 @@ impl RepositoryPanel {
                 .unwrap_or_default(),
             _ => format!("Version {}", version.revision),
         };
-        let status = row()
-            .items_center()
-            .gap(px(12.))
-            .px(px(12.))
-            .py(px(12.))
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(32.))
-                    .rounded(px(8.))
-                    .bg(s::frame_bg())
-                    .flex()
+        let mut body = column().child(kit::row_item(
+            true,
+            Some(kit::icon_tile("dither-monitor", 28.).into_any_element()),
+            "Machine image",
+            detail,
+            Some(
+                row()
                     .items_center()
-                    .justify_center()
-                    .child(icon("cloud").size(px(16.)).text_color(palette::rgb(TEXT))),
-            )
-            .child(
-                column()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(2.))
+                    .gap(px(10.))
                     .child(
-                        row()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(s::title_text("Your machine image"))
-                            .child(cs::badge(
-                                label,
-                                warning,
-                                !warning && version.image_state == "none",
-                            )),
+                        div()
+                            .text_size(px(11.))
+                            .text_color(palette::rgb(MUTED))
+                            .child(built),
                     )
-                    .child(s::description_text(detail)),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(11.))
-                    .text_color(palette::rgb(MUTED))
-                    .child(built),
-            );
-        let mut image = column().child(status);
+                    .child(kit::pill(label, image_tone(&version.image_state)))
+                    .into_any_element(),
+            ),
+        ));
+        if version.image_state == "building" {
+            body = body.child(div().px(px(kit::INSET)).pb(px(12.)).child(kit::meter(
+                build_fraction(build.and_then(|b| b.phase.as_deref()).unwrap_or_default()),
+                6.,
+            )));
+        }
         if let Some(error) = version.image_error.as_deref() {
-            image = image.child(
+            body = body.child(
                 div()
-                    .px(px(12.))
+                    .px(px(kit::INSET))
                     .pb(px(12.))
                     .child(form::message(error_copy(error), true)),
             );
@@ -396,9 +425,9 @@ impl RepositoryPanel {
             .and_then(|b| b.log_excerpt.clone())
             .filter(|l| !l.is_empty())
         {
-            image = image.child(
+            body = body.child(
                 div()
-                    .mx(px(12.))
+                    .mx(px(kit::INSET))
                     .mb(px(12.))
                     .p(px(10.))
                     .max_h(px(180.))
@@ -409,62 +438,114 @@ impl RepositoryPanel {
             );
         }
         if let Some(good) = &version.last_good_image {
-            let line = match (good.built_at, good.base_release_id.as_deref()) {
-                (Some(at), Some(base)) => format!(
-                    "New computers use your last working image: version {}, built {}, on {base}.",
+            let line = match good.built_at {
+                Some(at) => format!(
+                    "New computers use your last working image: version {}, built {}.",
                     good.recipe_revision,
                     day(at)
                 ),
-                (Some(at), None) => format!(
-                    "New computers use your last working image, built {}.",
-                    day(at)
-                ),
-                _ => "New computers use your last working image.".into(),
+                None => "New computers use your last working image.".into(),
             };
-            image = image.child(
-                div()
-                    .px(px(12.))
-                    .pb(px(12.))
-                    .child(s::description_text(line)),
-            );
-        } else if let Some(base) = build
-            .filter(|b| b.state == "ready")
-            .and_then(|b| b.base_release_id.clone())
-        {
-            image = image.child(
-                div()
-                    .px(px(12.))
-                    .pb(px(12.))
-                    .child(s::description_text(format!("Built on {base}."))),
-            );
+            body = body.child(div().px(px(kit::INSET)).pb(px(12.)).child(kit::help(line)));
         }
-        if version.image_state != "none" && self.can_manage() {
-            image = image.child(
-                row().px(px(12.)).pb(px(12.)).child(
-                    cs::button(
-                        "cloud-machine-rebuild",
-                        "Rebuild now",
-                        false,
-                        busy || version.image_state == "building",
-                        false,
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| this.rebuild_machine(cx))),
-                ),
-            );
+        let rebuild = (version.image_state != "none" && self.can_manage()).then(|| {
+            cs::button(
+                "cloud-machine-rebuild",
+                "Rebuild now",
+                false,
+                busy || version.image_state == "building",
+                false,
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.rebuild_machine(cx)))
+            .into_any_element()
+        });
+        kit::section(
+            "Image",
+            "Your setup script, built once into the image every new computer boots from.",
+            rebuild,
+            body,
+        )
+    }
+
+    /// The setup script alone, with its save bar: the onboarding step.
+    pub(super) fn render_machine_setup(&self, cx: &mut Context<Self>) -> Div {
+        use super::form;
+        use crate::cloud_settings::kit;
+        let busy = self.pending.values().any(|p| p.kind.starts_with("machine"));
+        let mut root = column().gap(px(kit::SECTION_GAP));
+        if self.machine.version.is_none() {
+            return root.child(kit::section(
+                "Setup script",
+                if busy {
+                    "Loading your machine…"
+                } else {
+                    "Your machine couldn't be loaded. Skip this step and add a script later from Settings → Machine."
+                },
+                None,
+                div(),
+            ));
         }
+        root = root.child(kit::section(
+            "Setup script",
+            "Runs once with sudo when your image is built: apt packages, runtimes, global CLIs. Leave it empty to use the standard machine.",
+            None,
+            div()
+                .p(px(kit::INSET))
+                .child(form::script_box(self.machine.setup.clone())),
+        ));
+        if let Some(notice) = &self.machine.notice {
+            root = root.child(form::message(notice, false));
+        }
+        if let Some(error) = &self.machine.error {
+            root = root.child(form::message(error, true));
+        }
+        root.child(form::save_bar(
+            "cloud-machine",
+            "Your image builds in the background; chats can start right away.".into(),
+            self.machine_dirty(cx) && self.can_manage(),
+            busy,
+            |this, cx| this.discard_machine(cx),
+            |this, cx| this.save_machine(cx),
+            cx,
+        ))
+    }
+
+    pub(super) fn render_machine(&self, cx: &mut Context<Self>) -> Div {
+        use super::form;
+        use crate::cloud_settings::kit;
+        let busy = self.pending.values().any(|p| p.kind.starts_with("machine"));
+        let mut root = column()
+            .gap(px(kit::SECTION_GAP))
+            .child(self.machine_size());
+        let Some(version) = &self.machine.version else {
+            root = root.child(kit::section(
+                "Image",
+                if busy {
+                    "Loading your machine…"
+                } else {
+                    "Your machine couldn't be loaded. Refresh to try again."
+                },
+                None,
+                div(),
+            ));
+            if let Some(error) = &self.machine.error {
+                root = root.child(form::message(error, true));
+            }
+            return root;
+        };
         root = root
-            .child(s::frame().child(s::card().child(image)))
-            .child(form::section(
+            .child(self.machine_image_card(version, busy, cx))
+            .child(kit::section(
                 "Setup script",
                 "Runs once with sudo when your image is built. Install what every repository needs: apt packages, runtimes, global CLIs.",
                 None,
-                div().p(px(12.)).child(form::script_box(self.machine.setup.clone())),
+                div().p(px(kit::INSET)).child(form::script_box(self.machine.setup.clone())),
             ))
-            .child(form::section(
+            .child(kit::section(
                 "Instructions",
                 "Given to every agent in every new chat, alongside the repository's own AGENTS.md. Applies as soon as you save; no image build needed.",
                 None,
-                div().p(px(12.)).child(form::script_box(self.machine.instructions.clone())),
+                div().p(px(kit::INSET)).child(form::script_box(self.machine.instructions.clone())),
             ));
         let recipe = &version.recipe;
         if !recipe.skills.is_empty() || !recipe.files.is_empty() {
@@ -479,14 +560,14 @@ impl RepositoryPanel {
                     row()
                         .items_center()
                         .gap(px(10.))
-                        .px(px(12.))
+                        .px(px(kit::INSET))
                         .py(px(9.))
                         .when(i > 0, |v| v.border_t_1().border_color(palette::rgb(BORDER)))
-                        .child(cs::badge(kind, false, true))
+                        .child(kit::pill(kind, kit::Tone::Neutral))
                         .child(form::mono(name)),
                 );
             }
-            root = root.child(form::section(
+            root = root.child(kit::section(
                 "Also on your machine",
                 "Imported skills and files, copied into every new chat's computer as soon as you save.",
                 None,
@@ -511,9 +592,50 @@ impl RepositoryPanel {
     }
 }
 
+/// The pill tone for a machine image state.
+pub(super) fn image_tone(state: &str) -> crate::cloud_settings::kit::Tone {
+    use crate::cloud_settings::kit::Tone;
+    match state {
+        "ready" => Tone::Ready,
+        "queued" | "building" => Tone::Progress,
+        "failed" => Tone::Error,
+        "none" => Tone::Neutral,
+        _ => Tone::Attention,
+    }
+}
+
+/// How far along a running build is, by phase, for its dithered meter.
+pub(super) fn build_fraction(phase: &str) -> f32 {
+    match phase {
+        "allocate" => 0.1,
+        "setup" => 0.35,
+        "sanitize" => 0.6,
+        "capture" | "retire-builder" => 0.75,
+        "verify" | "retire-verifier" => 0.88,
+        "publish" => 0.96,
+        _ => 0.05,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::saved_notice;
+    use super::{build_fraction, image_copy, image_tone, saved_notice};
+    use crate::cloud_settings::kit::Tone;
+
+    #[test]
+    fn image_states_have_tones_and_builds_move_forward() {
+        assert_eq!(image_tone("ready"), Tone::Ready);
+        assert_eq!(image_tone("building"), Tone::Progress);
+        assert_eq!(image_tone("failed"), Tone::Error);
+        assert_eq!(image_tone("none"), Tone::Neutral);
+        assert_eq!(image_copy("none").0, "Standard machine");
+        let phases = [
+            "allocate", "setup", "sanitize", "capture", "verify", "publish",
+        ];
+        let fractions: Vec<f32> = phases.iter().map(|p| build_fraction(p)).collect();
+        assert!(fractions.windows(2).all(|w| w[0] < w[1]));
+        assert!(fractions.iter().all(|f| (0.0..1.0).contains(f)));
+    }
     use zuse_protocol::cloud_computers::MachineRecipe;
 
     #[test]

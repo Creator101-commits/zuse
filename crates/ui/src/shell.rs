@@ -2330,6 +2330,9 @@ pub struct Shell {
     cloud_page_sub: Option<Subscription>,
     /// Settings → Usage shows Cloud compute instead of model usage.
     usage_settings_compute: bool,
+    /// The account was last seen signed in without a subscription, so the
+    /// next subscribed answer is a fresh purchase (see `follow_cloud_access`).
+    cloud_seen_unsubscribed: bool,
     devices_page: Option<Entity<DevicesPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     archive_project: Option<String>,
@@ -2998,6 +3001,7 @@ impl Shell {
             cloud_billing_page: None,
             cloud_page_sub: None,
             usage_settings_compute: false,
+            cloud_seen_unsubscribed: false,
             devices_page: None,
             archived_page: None,
             archive_project: None,
@@ -13504,8 +13508,8 @@ impl Shell {
                                 .when(cloud_subscribed, |row| row.child(
                                     popover::btn_ghost(&theme_owned, "Set up Cloud", "onboarding-cloud")
                                         .id("onboarding-cloud")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.open_settings(SettingsSection::Cloud, cx)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_cloud_onboarding(None, window, cx)
                                         })),
                                 )),
                         )

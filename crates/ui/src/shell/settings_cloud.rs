@@ -25,10 +25,40 @@ impl Shell {
                 Navigate::Cloud(view) => {
                     this.open_settings(SettingsSection::from_cloud_view(view), cx)
                 }
+                Navigate::StartCloudChat => this.start_first_cloud_chat(cx),
             },
         ));
         self.cloud_billing_page = Some(page.clone());
         page
+    }
+
+    /// The end of onboarding: a new chat on the first cloud repository that
+    /// can start one, or the plain new-chat canvas if none can yet.
+    fn start_first_cloud_chat(&mut self, cx: &mut Context<Self>) {
+        let project = self
+            .state
+            .read(cx)
+            .cloud_sidebar_projects()
+            .into_iter()
+            .find(|project| project["canCreate"] != false);
+        match project {
+            Some(project) => self.open_new_cloud_session(project, cx),
+            None => self.open_new_session(None, cx),
+        }
+    }
+
+    /// Opens first-run Cloud onboarding on Cloud computer → Overview,
+    /// optionally at a step (`welcome`, `repositories`, `setup`, `agents`,
+    /// `start`). The "Set up Cloud" button and review fixtures use it.
+    pub fn open_cloud_onboarding(
+        &mut self,
+        step: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page = self.ensure_cloud_page(window, cx);
+        page.update(cx, |page, cx| page.open_onboarding(step, cx));
+        self.open_settings(SettingsSection::Cloud, cx);
     }
 
     /// Review fixtures open Usage on its Cloud compute tab.
@@ -45,6 +75,14 @@ impl Shell {
     pub(super) fn follow_cloud_access(&mut self, cx: &mut Context<Self>) {
         let access = self.state.read(cx).cloud_access();
         if !access.settled() {
+            return;
+        }
+        // Subscribing while Billing is open (the checkout tab returning)
+        // continues straight into first-run setup on Cloud computer.
+        let subscribed_now = access.subscribed() && self.cloud_seen_unsubscribed;
+        self.cloud_seen_unsubscribed = access.signed_in() && !access.subscribed();
+        if subscribed_now && self.route == Route::Settings(SettingsSection::Billing) {
+            self.open_settings(SettingsSection::Cloud, cx);
             return;
         }
         if self.usage_settings_compute && !access.subscribed() {
