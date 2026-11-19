@@ -795,28 +795,6 @@ impl Shell {
             info_row(&theme, row_glyph(icons::GIT_BRANCH, &theme), branch.into())
                 .id("cloud-session-info-branch")
         });
-        // Its size, and when it sleeps on its own.
-        let size_row = info_row(
-            &theme,
-            row_glyph(icons::CLOCK_CIRCLE, &theme),
-            if summary.sleeping {
-                "Wakes when you send a message".into()
-            } else {
-                "Sleeps after 10 min idle".into()
-            },
-        )
-        .id("cloud-session-info-idle")
-        .when_some(summary.size.clone(), |row, size| {
-            row.child(row_meta(&theme).child(size))
-        });
-        // A computer that restarted on wake lost its terminals' processes and
-        // background work; say so rather than look identical to a memory wake.
-        // Only once running: while a new wake is pending, the stored result
-        // still describes the previous one.
-        let wake_row = summary.last_wake.clone().filter(|_| running).map(|wake| {
-            info_row(&theme, row_glyph(icons::CLOCK_CIRCLE, &theme), wake.into())
-                .id("cloud-session-info-wake")
-        });
         // Performance: one row with CPU at a glance; its submenu opens
         // beside the card with the dithered CPU, memory and disk bars.
         let load = super::cloud_conversation::machine_load(&resources);
@@ -936,8 +914,6 @@ impl Shell {
             .child(computer_row)
             .children(repository_row)
             .children(branch_row)
-            .child(size_row)
-            .children(wake_row)
             .child(fade_rule(&theme))
             .child(performance)
             .child(fade_rule(&theme))
