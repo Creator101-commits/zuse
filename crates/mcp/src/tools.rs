@@ -871,7 +871,7 @@ impl Tools {
             ("zapper_command", zapper_command_description()),
             (
                 "zapper_files",
-                "Read this Zapper's versioned files (rules, notes, digest, reports) with their current versions. Supply zotId and optional history.",
+                "Read this Zapper's versioned files (rules, notes, digest, reports) with their current versions. Supply zotId and optional history, or zotId and path to read one file, including the read-only guides under guide/.",
             ),
             (
                 "zapper_events",
@@ -879,7 +879,7 @@ impl Tools {
             ),
             (
                 "zapper_issue",
-                "Read one issue in full, including its whole description and older activity. Supply zotId and issueId.",
+                "Read one issue in full, including its whole description and older activity: supply zotId and issueId (or its code, such as ZAP-3). Supply only zotId to read the whole board: every issue, thread and decision.",
             ),
             (
                 "zapper_acknowledge",
@@ -889,7 +889,7 @@ impl Tools {
             all.push(ToolDef {
                 name,
                 description,
-                input_schema: if name=="zapper_command" {zapper_command_schema()}else if name=="zapper_issue" {json!({"type":"object","properties":{"zotId":{"type":"string"},"issueId":{"type":"string"}},"required":["zotId","issueId"]})}else{json!({"type":"object","properties":{"zotId":{"type":"string"},"history":{"type":"boolean"},"eventIds":{"type":"array","items":{"type":"string"}}},"required":["zotId"]})},
+                input_schema: if name=="zapper_command" {zapper_command_schema()}else if name=="zapper_issue" {json!({"type":"object","properties":{"zotId":{"type":"string"},"issueId":{"type":"string"}},"required":["zotId"]})}else{json!({"type":"object","properties":{"zotId":{"type":"string"},"history":{"type":"boolean"},"path":{"type":"string"},"eventIds":{"type":"array","items":{"type":"string"}}},"required":["zotId"]})},
             });
         }
         all.into_iter()

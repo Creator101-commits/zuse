@@ -1004,7 +1004,7 @@ impl SessionsEngine {
             return Err(EngineError::Other("runtime_preparation_pending".into()));
         }
         let execution = self.inner.execution.enter()?;
-        execution
+        let dispatched = execution
             .scope(self.dispatch_admitted(
                 chat_id,
                 harness_id,
@@ -1013,7 +1013,16 @@ impl SessionsEngine {
                 startup_retry,
                 idle,
             ))
-            .await
+            .await;
+        // A Zapper turn that never started was never seen: its next turn
+        // carries the brief and full state again instead of a delta.
+        if dispatched.is_err()
+            && let Some(zots) = self.inner.zots.get()
+            && let Err(err) = zots.forget_coordinator_turn(chat_id)
+        {
+            tracing::warn!(chat = %chat_id, error = %err, "Zapper turn ledger reset failed");
+        }
+        dispatched
     }
 
     async fn dispatch_admitted(
@@ -1030,7 +1039,7 @@ impl SessionsEngine {
         let _activity = self.claim_filesystem_admission(chat_id);
         drop(admission);
         if let Some(zots) = self.inner.zots.get() {
-            zots.prepare_request(chat_id, &mut request)
+            zots.prepare_request(chat_id, harness_id, &mut request)
                 .map_err(|e| EngineError::Other(e.to_string()))?;
             if zots
                 .coordinator(chat_id)

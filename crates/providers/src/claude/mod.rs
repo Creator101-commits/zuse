@@ -179,6 +179,21 @@ fn option_is_on(options: &serde_json::Map<String, Value>, key: &str) -> bool {
 /// Its environment is fixed at spawn, so a different value needs a new process.
 pub const CONNECTION_OPTION: &str = "zuseClaudeConnection";
 
+/// Run option the host stamps on a request whose standing instructions belong
+/// in the system prompt rather than in every user turn (a Zapper's brief).
+/// It launches as `--append-system-prompt`, so Claude Code's own prompt and
+/// tools stay intact. It is fixed at spawn: a different value needs a new
+/// process, which resumes the same session with the new instructions.
+pub const SYSTEM_PROMPT_OPTION: &str = "zuseSystemPrompt";
+
+fn system_prompt(request: &RunRequest) -> Option<&str> {
+    request
+        .model_options
+        .get(SYSTEM_PROMPT_OPTION)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
 fn same_connection(live: &RunRequest, next: &RunRequest) -> bool {
     live.model_options.get(CONNECTION_OPTION) == next.model_options.get(CONNECTION_OPTION)
 }
@@ -308,6 +323,9 @@ impl ClaudeHarness {
             args.extend(["--effort".into(), effort.into()]);
         }
         args.extend(permission_args(request).iter().map(|arg| (*arg).to_owned()));
+        if let Some(prompt) = system_prompt(request) {
+            args.extend(["--append-system-prompt".into(), prompt.to_owned()]);
+        }
         let mut settings = serde_json::Map::new();
         if option_is_on(&request.model_options, "fastMode") {
             settings.insert("fastMode".into(), Value::Bool(true));
@@ -551,9 +569,11 @@ impl Harness for ClaudeHarness {
     }
     /// Model, context window, effort, fast mode, thinking and ultracode all
     /// change on the live process (`set_model`, `apply_flag_settings`). Only
-    /// the directory and the permission mode it launched with need a new one.
+    /// the directory, the permission mode and the system prompt it launched
+    /// with need a new one.
     fn reconfigures_in_place(&self, live: &RunRequest, next: &RunRequest) -> bool {
         same_connection(live, next)
+            && system_prompt(live) == system_prompt(next)
             && live.cwd == next.cwd
             && live.auto_approve == next.auto_approve
             && live.sandbox == next.sandbox
@@ -1722,6 +1742,43 @@ mod tests {
         assert!(!harness.same_runtime(&direct, &proxied));
         assert!(!harness.reconfigures_in_place(&direct, &proxied));
         assert!(!harness.same_runtime(&request(None), &proxied));
+    }
+
+    #[test]
+    fn a_system_prompt_launches_with_the_process_and_a_new_one_replaces_it() {
+        let harness = ClaudeHarness::new();
+        let request = |prompt: Option<&str>| {
+            let mut request: RunRequest = serde_json::from_value(
+                json!({"prompt":"hi","cwd":"/tmp","sandbox":"workspace-write"}),
+            )
+            .unwrap();
+            if let Some(prompt) = prompt {
+                request
+                    .model_options
+                    .insert(SYSTEM_PROMPT_OPTION.into(), prompt.into());
+            }
+            request
+        };
+        let brief = request(Some("You are a Zapper."));
+        let args = ClaudeHarness::launch_args(&brief);
+        let at = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .unwrap();
+        assert_eq!(args[at + 1], "You are a Zapper.");
+        assert!(
+            !ClaudeHarness::launch_args(&request(None))
+                .iter()
+                .any(|a| a == "--append-system-prompt")
+        );
+        assert!(harness.same_runtime(&brief, &request(Some("You are a Zapper."))));
+        let changed = request(Some("You are a Zapper with a new purpose."));
+        assert!(!harness.same_runtime(&brief, &changed));
+        assert!(!harness.reconfigures_in_place(&brief, &changed));
+        // Another model on the same brief still reconfigures in place.
+        let mut model = request(Some("You are a Zapper."));
+        model.model = Some("claude-sonnet-5-5".into());
+        assert!(harness.reconfigures_in_place(&brief, &model));
     }
 
     #[test]
