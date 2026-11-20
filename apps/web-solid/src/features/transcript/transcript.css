@@ -73,7 +73,7 @@
   min-width: 0; max-width: 80%; padding: 8px 14px; border-radius: 12px 4px 12px 12px;
   background: var(--raised); color: var(--text); font-size: var(--text-md); line-height: 22px;
 }
-.t-bubble-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.t-bubble-text { overflow-wrap: anywhere; }
 .t-bubble-text[data-collapsed] {
   max-height: 110px; overflow: hidden;
   mask-image: linear-gradient(to bottom, #000 60%, transparent);

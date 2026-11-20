@@ -1494,8 +1494,8 @@ pub fn rows_for_entry(
         // transport); split them back out for the thumbnail strip.
         let parsed = crate::attachments::parse_user_message_images(&raw);
         // File mentions render as chips here too, not just in the composer.
-        // The projection is pure over the text, so the raw-length row version
-        // below stays a valid cache/diff key.
+        // The projection is pure over the text, so the source content hash
+        // below also covers the projected chips.
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
@@ -1567,7 +1567,7 @@ pub fn rows_for_entry(
                     .unwrap_or_default(),
                 )
             } else {
-                (raw.len() as u64) << 1 | pending as u64 | ((!turn_start) as u64) << 62
+                (fnv1a(raw.as_bytes()) << 1) | pending as u64 | ((!turn_start) as u64) << 62
             },
             turn_start,
             kind: RowKind::User {
@@ -3756,6 +3756,8 @@ pub struct Transcript {
     /// click handlers read them as exact endpoints for the RESIZE tween. This
     /// preserves smooth layout motion without a paint → notify feedback loop.
     user_heights: HashMap<SharedString, Rc<Cell<f32>>>,
+    /// Parsed display text for visible user bubbles, reused across repaints.
+    user_markdown: HashMap<SharedString, (SharedString, Arc<BlockTree>)>,
     /// Pending long-press toggle. A single task is enough because only one
     /// pointer can own a hold gesture at a time; a token invalidates stale
     /// timers when the pointer is released or moves into a text selection.
@@ -4233,6 +4235,7 @@ impl Transcript {
             user_folds: HashMap::new(),
             zapper_prompts_open: HashSet::new(),
             user_heights: HashMap::new(),
+            user_markdown: HashMap::new(),
             user_hold_task: None,
             user_hold_token: 0,
             user_collapse_scroll: None,
@@ -5603,6 +5606,7 @@ impl Transcript {
             self.historical_markdown.clear();
             self.user_folds.clear();
             self.user_heights.clear();
+            self.user_markdown.clear();
             self.compact_fold_heights.clear();
             self.compact_fold_settle = None;
             self.user_hold_token = self.user_hold_token.wrapping_add(1);
@@ -7609,6 +7613,73 @@ impl Transcript {
         ))
     }
 
+    fn render_user_markdown(
+        &mut self,
+        row_id: &SharedString,
+        text: &SharedString,
+        measured_h: Rc<Cell<f32>>,
+        theme: &Theme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let cached = self
+            .user_markdown
+            .entry(row_id.clone())
+            .or_insert_with(|| (text.clone(), Arc::new(parse_full(text))));
+        if cached.0 != *text {
+            *cached = (text.clone(), Arc::new(parse_full(text)));
+            self.render_cache.borrow_mut().clear();
+        }
+        let tree = cached.1.clone();
+        let link = self.link_ui(cx);
+        let tree = self.inline_code_tree(&tree, link.as_ref(), cx);
+        let mut code = HashMap::new();
+        for (ix, top) in tree.blocks.iter().enumerate() {
+            if let Some(uis) = self.code_uis_for(row_id, &top.block, ix, cx) {
+                code.extend(uis);
+            }
+        }
+        let opts = RenderOptions {
+            tasks: None,
+            media: None,
+            row_key: row_id.clone(),
+            veil: None,
+            cache: (!render_cache_disabled()).then(|| self.render_cache.clone()),
+            now: Instant::now(),
+            copy: Some(self.copy_ui_for(row_id, cx)),
+            link,
+            workspace_root: {
+                let state = self.state.read(cx);
+                self.chat_id
+                    .as_deref()
+                    .and_then(|id| state.chats.iter().find(|chat| chat.id == id))
+                    .or_else(|| state.selected_chat_row())
+                    .and_then(|chat| chat.cwd.as_deref())
+                    .map(SharedString::from)
+            },
+            code: Some(code),
+        };
+        let highlight = self.code_highlight_for(row_id, &tree, None, cx);
+        let entity_id = cx.entity_id();
+        div()
+            .min_w_0()
+            .child(render::render_tree(&tree, &opts, theme, window, &|ix| {
+                highlight.get(&ix).cloned().flatten()
+            }))
+            // Measure the natural Markdown height even behind the collapsed
+            // viewport. Paragraph gaps, headings and fences all affect it.
+            .on_children_prepainted(move |bounds, _, cx| {
+                if let Some(bounds) = bounds.first() {
+                    let height = f32::from(bounds.size.height);
+                    if (measured_h.get() - height).abs() > 0.5 {
+                        measured_h.set(height);
+                        cx.notify(entity_id);
+                    }
+                }
+            })
+            .into_any_element()
+    }
+
     /// The inside of a user bubble: the prompt text, clipped to
     /// [`USER_COLLAPSED_LINES`] until expanded, plus the expander chevron for
     /// prompts past the cap. Returns the bubble's children in order.
@@ -7644,9 +7715,11 @@ impl Transcript {
             .or_insert_with(|| Rc::new(Cell::new(0.0)))
             .clone();
         let measured = measured_h.get();
-        let collapsible = text.lines().count() > USER_COLLAPSED_LINES
-            || (measured > 0.0 && measured > collapsed_text_h + 0.5)
-            || (measured == 0.0 && user_message_needs_collapse(&text));
+        let collapsible = if measured > 0.0 {
+            measured > collapsed_text_h + 0.5
+        } else {
+            user_message_needs_collapse(&text)
+        };
         let full_h = measured_h.get().max(collapsed_h);
         if let Some(fold) = self.user_folds.get_mut(row_id) {
             // Wrapping can change with the window width while expanded.
@@ -7656,6 +7729,25 @@ impl Transcript {
         let hold_key = row_id.clone();
         let hold_height = measured_h.clone();
         let hold_selection: Arc<str> = format!("{row_id}:u").into();
+        // Mention chips use source byte ranges for painting and interaction.
+        // Keep that path for chip-bearing prompts; ordinary user and forwarded
+        // messages share the assistant's Markdown renderer.
+        let content = if mentions.is_empty() {
+            self.render_user_markdown(row_id, &text, measured_h.clone(), theme, window, cx)
+        } else {
+            user_bubble_text(
+                row_id,
+                text,
+                mentions,
+                theme,
+                measured_h.clone(),
+                cx.entity_id(),
+                chip_overlays,
+                Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
+                    this.open_chip_image(path, window, cx);
+                })),
+            )
+        };
         let body = div()
             .id(SharedString::from(format!("{row_id}-body")))
             // A long press toggles instead of double-click. A normal release
@@ -7694,18 +7786,7 @@ impl Transcript {
                     this.cancel_user_hold();
                 }))
             })
-            .child(user_bubble_text(
-                row_id,
-                text,
-                mentions,
-                theme,
-                measured_h.clone(),
-                cx.entity_id(),
-                chip_overlays,
-                Rc::new(cx.listener(|this, path: &SharedString, window, cx| {
-                    this.open_chip_image(path, window, cx);
-                })),
-            ));
+            .child(content);
         // Height motion uses the same ease-out curve as sidebars, tool folds,
         // and pane transitions, with duration scaled to travel distance. The
         // full text remains laid out behind the clip; only the viewport over it
@@ -12466,6 +12547,12 @@ fn entry_fingerprint(entry: &SessionMessageEntry, pending: bool) -> u64 {
     for part in &entry.parts {
         acc.extend_from_slice(part.id().as_bytes());
         acc.extend_from_slice(&(part.byte_len() as u64).to_le_bytes());
+        if entry.role == MessageRole::User
+            && let MessagePart::Text { text, .. } = part
+        {
+            // A replacement can change Markdown without changing its length.
+            acc.extend_from_slice(text.as_bytes());
+        }
         if matches!(
             part,
             MessagePart::AgentContext { .. } | MessagePart::MessageSource { .. }
@@ -12553,6 +12640,8 @@ impl Render for Transcript {
         self.render_cache
             .borrow_mut()
             .retain_rows(&self.rendered_rows);
+        self.user_markdown
+            .retain(|id, _| self.rendered_rows.contains(id));
         self.rendered_rows.clear();
         let compact_mode = crate::settings::transcript_compact_mode(cx);
         if self.compact_mode != compact_mode {
@@ -16127,6 +16216,53 @@ mod tests {
         }
 
         #[test]
+        fn user_markdown_renders_formatted_text_and_measures_its_full_height() {
+            with_window(|transcript, window, cx| {
+                let mut user = prompt("prompt");
+                user.parts = vec![text_part(
+                    "text",
+                    "**Head:** `4af052ad`\n\nSecond paragraph.",
+                )];
+                transcript.update(cx, |this, cx| {
+                    feed(this, vec![user.clone()], cx);
+                    this.rail_enabled = false;
+                    cx.notify();
+                });
+                draw(window, cx);
+                draw(window, cx);
+                let (text, _, _) = render::selection_test_snapshot("prompt:0");
+                assert_eq!(text.as_ref(), "Head: 4af052ad");
+                let height = transcript.read(cx).user_heights["prompt"].get();
+                assert!(height > USER_LINE_HEIGHT * 2.0, "include the paragraph gap");
+                let original = transcript.read(cx).user_markdown["prompt"].1.clone();
+                draw(window, cx);
+                assert!(Arc::ptr_eq(
+                    &original,
+                    &transcript.read(cx).user_markdown["prompt"].1
+                ));
+
+                // Editing a sent message must replace its cached parse even
+                // when the new source has the same byte length.
+                user.parts = vec![text_part(
+                    "text",
+                    "**Base:** `mainmain`\n\nSecond paragraph.",
+                )];
+                transcript.update(cx, |this, cx| {
+                    feed(this, vec![user], cx);
+                    cx.notify();
+                });
+                draw(window, cx);
+                draw(window, cx);
+                let (text, _, _) = render::selection_test_snapshot("prompt:0");
+                assert_eq!(text.as_ref(), "Base: mainmain");
+                assert!(!Arc::ptr_eq(
+                    &original,
+                    &transcript.read(cx).user_markdown["prompt"].1
+                ));
+            });
+        }
+
+        #[test]
         fn workflow_board_row_renders_inside_list_layout() {
             with_window(|transcript, window, cx| {
                 let entry = assistant(
@@ -18477,7 +18613,6 @@ mod tests {
                 .map(|copy| copy.contains("composer.rs")),
             Some(true)
         );
-        assert_eq!(rows[0].version, (raw.len() as u64) << 1);
 
         entry.parts = vec![text_part("t0", "no mentions here")];
         let rows = rows_for_entry(&entry, false, false, &mut parse);

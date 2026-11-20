@@ -1595,7 +1595,7 @@ pub(crate) fn selection_test_bounds(key: &str) -> gpui::Bounds<gpui::Pixels> {
 }
 
 #[cfg(test)]
-pub(super) fn selection_test_snapshot(
+pub(crate) fn selection_test_snapshot(
     key: &str,
 ) -> (
     SharedString,
