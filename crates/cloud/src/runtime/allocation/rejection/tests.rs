@@ -451,7 +451,7 @@ async fn permanent_create_rejection_requires_authorized_original_retry_and_prese
                     .await
                     .unwrap();
                     control
-                        .begin_allocation_dispatch(&held, &operation)
+                        .begin_allocation_dispatch(&held, &operation, true)
                         .await
                         .unwrap();
                     let pending: String = sqlx::query_scalar(

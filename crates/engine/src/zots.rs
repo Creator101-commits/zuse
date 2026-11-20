@@ -489,20 +489,17 @@ impl Zots {
                 request.cwd = self.workspace(&zot.id)?.to_string_lossy().into_owned();
                 request.worktree = None;
                 request.plan = false;
-                let context = self
-                    .files(&zot.id, false)?
-                    .into_iter()
-                    .filter(|f| {
-                        matches!(
-                            f.path.as_str(),
-                            "INSTRUCTIONS.md" | "NOTES.md" | "DIGEST.md"
-                        )
-                    })
+                let files = self.files(&zot.id, false)?;
+                let soul = files.iter().find(|f| f.path == PURPOSE_FILE);
+                let context = files
+                    .iter()
+                    .filter(|f| matches!(f.path.as_str(), "NOTES.md" | "DIGEST.md"))
                     .map(|f| format!("\n## {}\n{}", f.path, f.content))
                     .collect::<String>();
                 request.prompt = coordinator_brief(
                     &zot,
                     &serde_json::to_string(&issues::coordinator_view(&zot)?)?,
+                    &purpose_section(&zot, soul),
                     &context,
                     &request.prompt,
                 );
@@ -657,7 +654,7 @@ impl Zots {
             | ZotAction::CloseIssue { .. } => {}
             ZotAction::Create { .. } => {
                 for (path, content) in [
-                    ("INSTRUCTIONS.md", zot.config.purpose.as_str()),
+                    (PURPOSE_FILE, zot.config.purpose.as_str()),
                     ("WORKERS.md", ""),
                     ("NOTES.md", ""),
                     ("DIGEST.md", ""),
@@ -677,6 +674,10 @@ impl Zots {
                         .any(|r| r.device_id == w.device_id && r.space_id == w.space_id)),
                     "release affected workers before removing repositories"
                 );
+                let (version, doc) = latest_file(&tx, &zot.id, PURPOSE_FILE)?;
+                if let Some(doc) = reseed_purpose(&doc, &zot.config.purpose, &config.purpose) {
+                    write_file(&tx, &zot.id, PURPOSE_FILE, &doc, version)?;
+                }
                 zot.config = config.clone();
             }
             ZotAction::SetStatus { status } => zot.status = *status,
@@ -843,6 +844,9 @@ impl Zots {
                 expected_version,
             } => {
                 write_file(&tx, &zot.id, path, content, *expected_version)?;
+                if path == PURPOSE_FILE {
+                    zot.config.purpose = purpose_line(content);
+                }
             }
             ZotAction::RestoreFile {
                 path,
@@ -855,6 +859,9 @@ impl Zots {
                     |row| row.get(0),
                 )?;
                 write_file(&tx, &zot.id, path, &content, *expected_version)?;
+                if path == PURPOSE_FILE {
+                    zot.config.purpose = purpose_line(&content);
+                }
             }
             ZotAction::FreshConversation => {
                 zot.previous_coordinator_chats
@@ -1351,16 +1358,119 @@ fn write_file(
     Ok(())
 }
 
+/// The Zapper's purpose and working rules, in its own words. It is seeded from
+/// the purpose given at creation, the coordinator rewrites it with writeFile,
+/// and every version stays restorable. `config.purpose` mirrors its opening
+/// paragraph so lists and the overview can show the job in one line.
+pub(crate) const PURPOSE_FILE: &str = "INSTRUCTIONS.md";
+const PURPOSE_LINE_MAX: usize = 500;
+
+fn latest_file(tx: &rusqlite::Transaction<'_>, zot: &str, path: &str) -> Result<(u32, String)> {
+    Ok(tx
+        .query_row(
+            "SELECT version,content FROM zot_files WHERE zot=?1 AND path=?2 ORDER BY version DESC LIMIT 1",
+            params![zot, path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or_default())
+}
+
+/// Byte range of the doc's first paragraph that isn't a heading.
+fn purpose_span(doc: &str) -> Option<std::ops::Range<usize>> {
+    let mut span: Option<std::ops::Range<usize>> = None;
+    let mut at = 0;
+    for line in doc.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        let text = line.trim();
+        let prose = !text.is_empty() && !text.starts_with('#');
+        match (&mut span, prose) {
+            (None, true) => span = Some(start..start + line.trim_end().len()),
+            (Some(s), true) => s.end = start + line.trim_end().len(),
+            (Some(_), false) => break,
+            (None, false) => {}
+        }
+    }
+    span
+}
+
+/// The job in plain words: the doc's opening paragraph on one line.
+fn purpose_line(doc: &str) -> String {
+    let Some(span) = purpose_span(doc) else {
+        return String::new();
+    };
+    let line = doc[span].split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= PURPOSE_LINE_MAX {
+        return line;
+    }
+    let mut short: String = line.chars().take(PURPOSE_LINE_MAX - 1).collect();
+    short.push('…');
+    short
+}
+
+/// The doc after the user edits the purpose in settings, or None when it stays.
+/// A doc that is still the seed is replaced; a rewritten one keeps everything
+/// but its opening paragraph, which takes the new words.
+fn reseed_purpose(doc: &str, old: &str, new: &str) -> Option<String> {
+    let (old, new) = (old.trim(), new.trim());
+    if old == new {
+        return None;
+    }
+    if doc.trim().is_empty() || doc.trim() == old {
+        return Some(new.to_owned());
+    }
+    if new.is_empty() {
+        return None;
+    }
+    Some(match purpose_span(doc) {
+        Some(span) => format!("{}{new}{}", &doc[..span.start], &doc[span.end..]),
+        None => format!("{new}\n\n{doc}"),
+    })
+}
+
+/// What the coordinator is for. An empty doc and purpose means nobody has told
+/// it yet, so it runs the first-run interview until it has written the doc.
+fn purpose_section(zot: &Zot, soul: Option<&ZotFile>) -> String {
+    if let Some(file) = soul.filter(|f| !f.content.trim().is_empty()) {
+        return format!(
+            "## Purpose ({PURPOSE_FILE}, version {})\n{}",
+            file.version,
+            file.content.trim()
+        );
+    }
+    let purpose = zot.config.purpose.trim();
+    if !purpose.is_empty() {
+        return format!("## Purpose\n{purpose}");
+    }
+    let version = soul.map_or(0, |f| f.version);
+    format!(
+        r#"## Purpose: not set yet
+Nobody has told you what you are for, so this turn starts a short getting-to-know-you conversation before any work. Answer anything the user's message asks first, briefly, then ask about what the message hasn't already answered:
+1. What should you be doing for them? The job in a sentence or two.
+2. Which repositories and which parts of them matter most? Offer the repositories in your state as options.
+3. How much should you do on your own? For example: open draft pull requests freely and ask before anything risky, or check in before each new piece of work.
+4. How and when should you report? For example: a short summary when something finishes, a daily digest, or only when they're needed.
+Ask conversationally, two at a time at most, in plain words: this is a chat, not a form. If a reply skips a question, ask it again once instead of assuming an answer. Don't start work, create issues or delegate until you have a purpose, unless the user asks you to get going; then work from what you know and fill the gaps later.
+Once you have the answers, or the user wants to skip the rest, write {PURPOSE_FILE} with writeFile (expectedVersion {version}). Start it with one plain sentence naming your job: the app shows that sentence as your purpose. Then short sections for the repositories and areas, when to ask versus act, and how and when to report. Write it in the first person and keep it under a page. Then tell the user in a line or two what you wrote and that they can change it any time by telling you."#
+    )
+}
+
 /// The standing brief a coordinator reads before every user message: who it
 /// is, how it works, the exact command shapes, and its current state. Action
 /// shapes are spelled out because models guessing them was the commonest
 /// failed tool call; the working rules exist to keep reports short and
 /// threads well briefed.
-fn coordinator_brief(zot: &Zot, state: &str, context: &str, message: &str) -> String {
+fn coordinator_brief(
+    zot: &Zot,
+    state: &str,
+    purpose: &str,
+    context: &str,
+    message: &str,
+) -> String {
     let name = zot.config.name.trim();
     let id = &zot.id;
     let revision = zot.revision;
-    let purpose = zot.config.purpose.trim();
     format!(
         r#"You are {name}, a Zapper: you run work across the user's repositories by delegating it to threads. Each thread is a worker conversation in its own isolated git worktree. Call yourself a Zapper or {name}; never a "Zot".
 
@@ -1388,7 +1498,8 @@ zapper_command makes every change: {{"commandId": a new unique id per command (r
 - linkIssueThread / unlinkIssueThread {{issueId, chatId}}
 - delegate {{issueId, worker: {{chatId: "zot-worker-<commandId>", deviceId, spaceId, objective, followups: 0}}, model: {{harness, model}}, base: a ref such as "origin/main"}}. Pick deviceId, spaceId and model with list_projects, list_harnesses and list_models. Use a cheaper model for mechanical work. Run issues in parallel only when they touch separate parts of the code; otherwise base the next one on the previous branch.
 - messageWorker {{chatId, text, automatic: true}}; stopWorker / archiveWorker / releaseWorker {{chatId}}
-- writeFile {{path, content, expectedVersion}}: the file's current version from zapper_files. Seeded files start at version 1; a new file is 0.
+- writeFile {{path, content, expectedVersion}}: the file's current version from zapper_files. Seeded files start at version 1; a new file is 0. Writing INSTRUCTIONS.md also sets the purpose the app shows, from its first paragraph.
+- restoreFile {{path, version, expectedVersion}}: brings an earlier version back as the newest one.
 - decide {{decision: {{id, workerChatId: chat id or null, question, answer: null}}}}: only for a question that belongs to no issue; prefer askUser.
 Status values: backlog, todo, inProgress, needsYou, blocked, inReview, done, canceled. Priority: urgent, high, normal, low.
 zapper_command returns a compact result (new revision, the changed issue, worker, decision or file, and a summary); add "fullState": true to a command only if you need the whole state back.
@@ -1403,12 +1514,12 @@ For issueChanged events, inspect the issue, do what it needs, then acknowledge. 
 - A lifecycle refusal ("link the pull request before…", "an issue is inProgress only while a thread works on it…", "close issues with closeIssue…") names the missing evidence: provide it, don't work around it.
 
 ## Your files
+INSTRUCTIONS.md is your purpose and working rules, in your words, and the Purpose section below is its current text. Keep its first sentence your job in plain words; the app shows it as your purpose. When the user changes what they want from you, or you settle on a better way to work with them, rewrite it with writeFile and tell the user in one line what changed. The user sees every version and can restore any, so rewrite it whole rather than appending a log.
 NOTES.md is your private memory for plans, decisions and findings. DIGEST.md is a short status summary for the user. WORKERS.md is prepended to every thread's prompt, so keep it to standing rules for threads (conventions, how to verify) and never use it as a log.
 
 ## Current state (revision {revision})
 {state}
 
-## Purpose
 {purpose}
 {context}
 
@@ -2257,5 +2368,197 @@ mod tests {
                 0
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod purpose_tests {
+    use super::tests::{command, config};
+    use super::*;
+
+    fn store() -> (tempfile::TempDir, Zots) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Zots::open(dir.path(), "local").unwrap();
+        (dir, store)
+    }
+    fn create_with(store: &Zots, purpose: &str) {
+        let mut config = config();
+        config.purpose = purpose.into();
+        store
+            .command(command("release", "create", ZotAction::Create { config }))
+            .unwrap();
+    }
+    fn coordinator_prompt(store: &Zots, message: &str) -> String {
+        let zot = store.get("release").unwrap();
+        let mut request: zuse_protocol::RunRequest = serde_json::from_value(
+            serde_json::json!({"prompt": message, "cwd": "/tmp", "sandbox": "workspace-write"}),
+        )
+        .unwrap();
+        store
+            .prepare_request(&zot.coordinator_chat_id, &mut request)
+            .unwrap();
+        request.prompt
+    }
+    fn doc(store: &Zots) -> ZotFile {
+        store
+            .files("release", false)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.path == PURPOSE_FILE)
+            .unwrap()
+    }
+    fn write(store: &Zots, id: &str, content: &str, expected_version: u32) -> Zot {
+        store
+            .command(command(
+                "release",
+                id,
+                ZotAction::WriteFile {
+                    path: PURPOSE_FILE.into(),
+                    content: content.into(),
+                    expected_version,
+                },
+            ))
+            .unwrap()
+            .unwrap()
+    }
+    const SOUL: &str = "# Who I am\n\nI keep the zuse release moving: triage CI,\nfix flaky tests and cut releases.\n\n## When to ask\nOpen draft PRs freely; ask before merging anything.\n";
+
+    #[test]
+    fn empty_purpose_runs_the_interview_until_the_doc_is_written() {
+        let (_dir, store) = store();
+        create_with(&store, "");
+        assert_eq!(doc(&store).version, 1);
+        let first = coordinator_prompt(&store, "hi");
+        assert!(first.contains("## Purpose: not set yet"));
+        assert!(first.contains("Which repositories"));
+        assert!(first.contains("How much should you do on your own"));
+        assert!(first.contains("How and when should you report"));
+        assert!(first.contains("write INSTRUCTIONS.md with writeFile (expectedVersion 1)"));
+        assert!(!first.contains("## INSTRUCTIONS.md"));
+        // A mid-interview turn still carries the interview.
+        assert!(coordinator_prompt(&store, "mostly the engine").contains("not set yet"));
+
+        let zot = write(&store, "soul", SOUL, 1);
+        assert_eq!(
+            zot.config.purpose,
+            "I keep the zuse release moving: triage CI, fix flaky tests and cut releases."
+        );
+        let next = coordinator_prompt(&store, "what's next?");
+        assert!(!next.contains("not set yet"));
+        assert!(next.contains("## Purpose (INSTRUCTIONS.md, version 2)\n# Who I am"));
+        assert!(next.contains("ask before merging anything"));
+        assert_eq!(next.matches("I keep the zuse release moving").count(), 1);
+    }
+
+    #[test]
+    fn purpose_rewrite_is_versioned_and_restorable() {
+        let (_dir, store) = store();
+        create_with(&store, "Coordinate the release");
+        write(&store, "rewrite", SOUL, 1);
+        assert_eq!(doc(&store).version, 2);
+        let restored = store
+            .command(command(
+                "release",
+                "restore",
+                ZotAction::RestoreFile {
+                    path: PURPOSE_FILE.into(),
+                    version: 1,
+                    expected_version: 2,
+                },
+            ))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.config.purpose, "Coordinate the release");
+        let current = doc(&store);
+        assert_eq!(
+            (current.version, current.content.as_str()),
+            (3, "Coordinate the release")
+        );
+        let history: Vec<_> = store
+            .files("release", true)
+            .unwrap()
+            .into_iter()
+            .filter(|f| f.path == PURPOSE_FILE)
+            .map(|f| f.version)
+            .collect();
+        assert_eq!(history, [3, 2, 1]);
+        assert!(coordinator_prompt(&store, "hi").contains("version 3)\nCoordinate the release"));
+    }
+
+    #[test]
+    fn existing_purpose_keeps_working_without_migration() {
+        let (_dir, store) = store();
+        create_with(&store, "Coordinate the release");
+        let prompt = coordinator_prompt(&store, "hi");
+        assert!(prompt.contains("## Purpose (INSTRUCTIONS.md, version 1)\nCoordinate the release"));
+        assert!(!prompt.contains("not set yet"));
+        assert_eq!(prompt.matches("Coordinate the release").count(), 1);
+        // Settings saves that leave the purpose alone don't touch the doc.
+        let mut same = store.get("release").unwrap().config;
+        same.coordinator_model.model = Some("other".into());
+        store
+            .command(command(
+                "release",
+                "model",
+                ZotAction::Configure { config: same },
+            ))
+            .unwrap();
+        assert_eq!(doc(&store).version, 1);
+        // A purpose stored only in config, with an empty doc, still reaches the prompt.
+        let zot = store.get("release").unwrap();
+        let empty = ZotFile {
+            path: PURPOSE_FILE.into(),
+            version: 1,
+            content: String::new(),
+        };
+        assert_eq!(
+            purpose_section(&zot, Some(&empty)),
+            "## Purpose\nCoordinate the release"
+        );
+    }
+
+    #[test]
+    fn editing_the_purpose_in_settings_updates_the_doc() {
+        let (_dir, store) = store();
+        create_with(&store, "Coordinate the release");
+        let mut config = store.get("release").unwrap().config;
+        config.purpose = "Coordinate the 0.28 release".into();
+        store
+            .command(command("release", "edit", ZotAction::Configure { config }))
+            .unwrap();
+        assert_eq!(doc(&store).content, "Coordinate the 0.28 release");
+        write(&store, "soul", SOUL, 2);
+        let mut config = store.get("release").unwrap().config;
+        config.purpose = "I run the zuse release train.".into();
+        store
+            .command(command(
+                "release",
+                "edit-2",
+                ZotAction::Configure { config },
+            ))
+            .unwrap();
+        let current = doc(&store);
+        assert_eq!(current.version, 4);
+        assert_eq!(
+            current.content,
+            "# Who I am\n\nI run the zuse release train.\n\n## When to ask\nOpen draft PRs freely; ask before merging anything.\n"
+        );
+    }
+
+    #[test]
+    fn purpose_line_takes_the_opening_paragraph() {
+        assert_eq!(purpose_line(""), "");
+        assert_eq!(purpose_line("# Only a heading\n"), "");
+        assert_eq!(purpose_line("Ship it.\r\n\r\nMore"), "Ship it.");
+        let long = "a".repeat(PURPOSE_LINE_MAX + 10);
+        assert_eq!(purpose_line(&long).chars().count(), PURPOSE_LINE_MAX);
+        assert_eq!(reseed_purpose("anything", "same", " same "), None);
+        assert_eq!(reseed_purpose("", "", "New"), Some("New".into()));
+        assert_eq!(reseed_purpose("Old", "Old", ""), Some(String::new()));
+        assert_eq!(reseed_purpose(SOUL, "Old", ""), None);
+        assert_eq!(
+            reseed_purpose("# Heading\n", "Old", "New"),
+            Some("New\n\n# Heading\n".into())
+        );
     }
 }
