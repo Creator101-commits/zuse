@@ -1,0 +1,25 @@
+{
+	"name": "@repo/ui",
+	"type": "module",
+	"version": "0.0.0",
+	"private": true,
+	"exports": {
+		"./*": "./src/*.tsx",
+		"./image-dither": "./src/image-dither.ts",
+		"./app-palette.css": "./src/app-palette.css",
+		"./zuse-mark": "./src/zuse-mark.json"
+	},
+	"devDependencies": {
+		"@types/three": "^0.186.0"
+	},
+	"dependencies": {
+		"@react-three/fiber": "^9.7.0",
+		"@react-three/postprocessing": "^3.1.1",
+		"postprocessing": "^6.39.5",
+		"three": "^0.186.0"
+	},
+	"peerDependencies": {
+		"react": "^19",
+		"react-dom": "^19"
+	}
+}

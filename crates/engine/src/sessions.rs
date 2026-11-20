@@ -1038,9 +1038,24 @@ impl SessionsEngine {
         self.require_unarchived(chat_id)?;
         let _activity = self.claim_filesystem_admission(chat_id);
         drop(admission);
+        let mut turn_source = None;
         if let Some(zots) = self.inner.zots.get() {
+            let original = request.prompt.clone();
             zots.prepare_request(chat_id, harness_id, &mut request)
                 .map_err(|e| EngineError::Other(e.to_string()))?;
+            // A coordinator turn shows its user text or update summary, not
+            // the assembled brief. Never fail a send over the label.
+            turn_source = zots
+                .turn_source(chat_id, &original, message_id.as_deref())
+                .unwrap_or_else(|error| {
+                    tracing::warn!(chat = %chat_id, %error, "Zapper turn summary unavailable");
+                    None
+                });
+            if let (Some(zuse_protocol::slack::MessageSource::Zapper { text, .. }), Some(filter)) =
+                (turn_source.as_mut(), self.inner.secret_filter.get())
+            {
+                *text = filter.mask(text);
+            }
             if zots
                 .coordinator(chat_id)
                 .map_err(|e| EngineError::Other(e.to_string()))?
@@ -1174,6 +1189,9 @@ impl SessionsEngine {
                     presentation.as_deref().unwrap_or(&request.prompt),
                     now_ms(),
                 )?;
+                if let Some(source) = &turn_source {
+                    handle.record_message_source(&user_id, source)?;
+                }
                 self.record_agent_context(chat_id, &user_id, harness_id, request.model.clone())?;
                 if self.is_live(chat_id, &run_id) {
                     if bootstrap.is_some() {
@@ -1243,6 +1261,9 @@ impl SessionsEngine {
                 presentation.as_deref().unwrap_or(&request.prompt),
                 now_ms(),
             )?;
+            if let Some(source) = &turn_source {
+                handle.record_message_source(&user_id, source)?;
+            }
             self.record_agent_context(chat_id, &user_id, harness_id, request.model.clone())?;
         }
 
@@ -3358,7 +3379,7 @@ fn record_slack_result(doc: &SessionDoc, message: &str, parts: &[MessagePart], s
                 && entry
                     .parts
                     .iter()
-                    .any(|part| matches!(part, MessagePart::MessageSource { .. }))
+                    .any(|part| matches!(part, MessagePart::MessageSource { source, .. } if source.is_slack()))
         })
     }) {
         return;

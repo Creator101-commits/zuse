@@ -11,6 +11,7 @@ mod guide;
 mod issues;
 mod supervision;
 mod turn_prompt;
+mod turns;
 pub use supervision::ZotSupervisor;
 
 #[derive(Clone)]
@@ -273,6 +274,7 @@ impl Zots {
                 action TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'pending', error TEXT);
             CREATE TABLE IF NOT EXISTS zot_delivery(id TEXT PRIMARY KEY, baseline TEXT, sent_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS zot_notifications(id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS zot_turn_summaries(id TEXT PRIMARY KEY, summary TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS zot_worker_context(chat TEXT PRIMARY KEY, home TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, instructions TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS zot_binding_versions(chat TEXT NOT NULL, home TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(chat,home,zot));
             CREATE TABLE IF NOT EXISTS zot_releases(chat TEXT NOT NULL, device TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(chat,device,zot));

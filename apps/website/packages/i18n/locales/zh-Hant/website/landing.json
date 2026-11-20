@@ -1,0 +1,15 @@
+{
+	"open_source_cloud_beta_live": "<part0></part0>開源·雲端內測上線",
+	"cloud_coding_agents_open_source": "開源雲端程式設計代理。",
+	"hero_subtitle": "在隔離的雲端工作區或本機上執行程式設計代理，並審閱每一處變更。",
+	"hero_description": "在本機或隔離的雲端工作區中平行執行程式設計代理。用 Git worktree 隔離任務、交接上下文，並在同一處審閱變更。",
+	"free_in_beta_no_token_markup": "測試版免費 · 無代幣加價",
+	"schema_worktrees": "用於平行代理運行的隔離 Git 工作樹",
+	"schema_parallel": "從一個工作區運行多個編碼代理",
+	"see_how_it_works": "看看它是如何工作的",
+	"meta_title": "Zuse: 所有編碼代理都在一個工作區中",
+	"schema_tools": "內建差異、終端、瀏覽器和拉取請求審查",
+	"meta_description": "並行運行編碼代理，在它們之間傳遞上下文，並使用 Zuse 將每個任務隔離在自己的 git 工作樹中。",
+	"schema_environments": "本地和雲端執行環境",
+	"schema_subscriptions": "帶上您現有的機型訂閱"
+}

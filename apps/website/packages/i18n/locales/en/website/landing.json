@@ -1,0 +1,15 @@
+{
+	"open_source_cloud_beta_live": "<part0></part0>Open source · Cloud beta live",
+	"cloud_coding_agents_open_source": "Open source cloud agents.",
+	"hero_subtitle": "Run coding agents in isolated cloud workspaces, or on your machine, and review every change.",
+	"hero_description": "Run coding agents in parallel, locally or in isolated cloud workspaces. Keep tasks separate with Git worktrees, hand off context, and review changes in one place.",
+	"see_how_it_works": "See how it works",
+	"free_in_beta_no_token_markup": "Free in beta · no token markup",
+	"meta_title": "Open Source Cloud Agents for Coding | Zuse",
+	"meta_description": "Zuse is an open source workspace for local and cloud coding agents. Bring your model subscriptions, isolate tasks, and review every change.",
+	"schema_parallel": "Run multiple coding agents from one workspace",
+	"schema_worktrees": "Isolated Git worktrees for parallel agent runs",
+	"schema_environments": "Local and cloud execution environments",
+	"schema_tools": "Built-in diff, terminal, browser, and pull-request review",
+	"schema_subscriptions": "Bring your existing model subscriptions"
+}
