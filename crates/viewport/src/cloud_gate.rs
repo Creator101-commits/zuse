@@ -8,13 +8,14 @@
 //! Cloud is on in every desktop build. Within it, the desktop app offers
 //! cloud computers only to accounts with an active Cloud subscription (see
 //! `zuse_ui::state::CloudAccess`), so a signed-out or unsubscribed account
-//! sees the local app plus a way to sign in and subscribe. Remote access
-//! stays off in release builds and on in development builds.
+//! sees the local app plus a way to sign in and subscribe. Remote access is
+//! on in every build: pairing works over Wi-Fi, Tailscale and SSH without an
+//! account.
 //!
 //! `ZUSE_CLOUD` / `ZUSE_REMOTE` set to `1` turn a feature on and `0` turn it
-//! off (`ZUSE_CLOUD=0` previews the local-only app). Browsers have no
-//! process environment and no subscription gate yet, so they keep the build
-//! default for both: on in development builds, off in release builds.
+//! off (`ZUSE_CLOUD=0` previews the local-only app, `ZUSE_REMOTE=0` hides
+//! remote access). Browsers have no process environment, so they keep the
+//! build defaults.
 
 use std::sync::OnceLock;
 
@@ -25,16 +26,14 @@ pub fn enabled() -> bool {
     *ENABLED.get_or_init(|| resolve(std::env::var("ZUSE_CLOUD").ok().as_deref(), CLOUD_DEFAULT))
 }
 
+/// Remote access is offered by default; `ZUSE_REMOTE=0` hides it.
+const REMOTE_DEFAULT: bool = true;
+
 /// Remote access (pairing and other computers). Read once per process; a
 /// restart picks up a changed `ZUSE_REMOTE`.
 pub fn remote_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        resolve(
-            std::env::var("ZUSE_REMOTE").ok().as_deref(),
-            cfg!(debug_assertions),
-        )
-    })
+    *ENABLED.get_or_init(|| resolve(std::env::var("ZUSE_REMOTE").ok().as_deref(), REMOTE_DEFAULT))
 }
 
 /// Placeholder for the archived-chats search, which only covers Cloud
@@ -73,6 +72,11 @@ mod tests {
             assert_eq!(resolve(None, default), default);
             assert_eq!(resolve(Some("maybe"), default), default);
         }
+    }
+
+    #[test]
+    fn every_build_offers_remote_access_by_default() {
+        const { assert!(super::REMOTE_DEFAULT) };
     }
 
     #[cfg(not(target_arch = "wasm32"))]
