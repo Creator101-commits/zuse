@@ -1234,3 +1234,41 @@ native-pr_watch_auto_fix_help = Let this chat fix failing CI, review comments an
 # Draft English fallback; translation pending review.
 # Context: Settings > General, release channel explanation. Track changes do not downgrade local data.
 native-release_channel_description = Stable receives tested releases. Preview receives early builds. Switching channels waits for a newer version; your sessions stay in place.
+
+# Context: "What's new" card and dialog heading. Keep the product name. $version (string): release version, e.g. 0.26.1.
+native-whats_new_title = Zuse { $version }
+
+# Context: "What's new" dialog, counts of changes in the release by kind. $added, $changed, $fixed (number).
+native-whats_new_summary = 새 기능 { $added } · 개선 { $changed } · 수정 { $fixed }
+
+# Context: "What's new" dialog primary button; closes it and hides the sidebar card for this version.
+native-whats_new_got_it = 확인
+
+# Context: "What's new" dialog footer link to the website changelog with every release.
+native-whats_new_all_releases = 모든 릴리스
+
+# Context: "What's new" dialog footer, shows the next newer release.
+native-whats_new_next = 다음
+
+# Context: "What's new" dialog footer, accessible label for the button showing the previous (older) release.
+native-whats_new_previous = 이전
+
+# Context: "What's new" dialog, link to the rest of a release's notes. $count (number): changes not listed.
+native-whats_new_more_plural =
+    { $count ->
+        [one] 변경 사항 1개 더 보기
+       *[other] 변경 사항 { $count }개 더 보기
+    }
+
+# Context: tooltip on the close button of the sidebar "What's new" card.
+native-whats_new_dismiss = 닫기
+
+# Context: accessible label of the sidebar "What's new" card. $version (string): release version.
+native-whats_new_open = Zuse { $version }의 새로운 기능 열기
+
+# Context: app menu item under "Check for Updates", opens the release notes dialog for this version.
+native-whats_new_menu = 새로운 기능
+
+
+
+

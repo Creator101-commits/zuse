@@ -1,0 +1,46 @@
+{
+	"0.26.1": {
+		"summary": "Pick your update track, and a guided first run",
+		"scene": "update-channel",
+		"tint": "olive",
+		"highlights": [
+			{
+				"icon": "refresh",
+				"title": "Stable or Preview updates",
+				"body": "Choose a release track in General settings. Switching tracks cancels any download from the old one."
+			},
+			{
+				"icon": "checklist",
+				"title": "A guided first run",
+				"body": "Set up agents, sign in, add MCP servers and bring over chats from other apps in one pass."
+			},
+			{
+				"icon": "terminal",
+				"title": "The zuse command",
+				"body": "A standalone terminal command now ships next to the desktop downloads."
+			}
+		]
+	},
+	"0.26.0-preview.5": {
+		"summary": "Favorites in the model picker, and search from the address bar",
+		"scene": "model-picker",
+		"tint": "teal",
+		"highlights": [
+			{
+				"icon": "star",
+				"title": "Favorite models",
+				"body": "Keep the models you use at the top of the picker. Reasoning, Fast mode and context live in their own menu."
+			},
+			{
+				"icon": "globe",
+				"title": "Search from the address bar",
+				"body": "Type a query in the browser bar. The home page shows local previews and recent pages."
+			},
+			{
+				"icon": "pull-request",
+				"title": "Mermaid in pull requests",
+				"body": "Diagrams render in pull request descriptions and comments."
+			}
+		]
+	}
+}
