@@ -92,6 +92,7 @@ mod cloud_plan;
 mod cloud_sidebar;
 pub use cloud_connection::CloudTarget;
 pub use cloud_plan::CloudAccess;
+pub(crate) use cloud_sidebar::ProjectLabels;
 mod remote_connection;
 pub use account_connection::{AccountTarget, RemoteTarget};
 

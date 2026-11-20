@@ -1,7 +1,10 @@
 //! Client presentation state shared without filesystem or rendering dependencies.
 mod cloud_projects;
 mod effort;
-pub use cloud_projects::{CloudProjectGroup, cloud_project_group};
+pub use cloud_projects::{
+    CloudProjectGroup, ProjectLabelInput, cloud_project_group, cloud_project_short_name,
+    project_labels, repository_key, repository_owner_and_name,
+};
 pub mod git_history;
 mod model_config;
 pub mod motion;

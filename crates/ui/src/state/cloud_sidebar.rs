@@ -89,7 +89,71 @@ fn access_denied(error: &RpcError) -> bool {
     matches!(error,RpcError::Capability(code) if code=="workspace_access_denied"||code=="workspace_not_found")
         || matches!(error,RpcError::Failed(message) if matches!(message.as_str(),"You do not have access to this workspace."|"Cloud could not verify your session. Reconnect in Settings → General."))
 }
+/// What each project is called in the sidebar and the pickers.
+#[derive(Default, Debug)]
+pub(crate) struct ProjectLabels {
+    /// By local project key (`view::project_key`).
+    pub local: HashMap<String, String>,
+    /// By cloud project id; a project linked to a local checkout shares
+    /// that checkout's label.
+    pub cloud: HashMap<String, String>,
+}
 impl AppState {
+    /// Labels for every local project and `cloud_projects`: short names,
+    /// with `owner/repo` only where two repositories share a name.
+    pub(crate) fn project_labels(&self, cloud_projects: &[Value]) -> ProjectLabels {
+        use zuse_protocol::presentation::{ProjectLabelInput, cloud_project_group, project_labels};
+        enum Entry {
+            Local(String),
+            Cloud(String),
+        }
+        let mut entries = Vec::new();
+        let mut inputs = Vec::new();
+        let mut aliases = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for space in &self.spaces {
+            let key = zuse_protocol::view::project_key(space);
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let representative = self.representative_space(space);
+            inputs.push(ProjectLabelInput {
+                name: representative.display_name().to_owned(),
+                repository: representative
+                    .remote_repository
+                    .clone()
+                    .or_else(|| representative.repository_id.clone()),
+            });
+            entries.push(Entry::Local(key));
+        }
+        for project in cloud_projects {
+            let Some(group) = cloud_project_group(project, &self.spaces) else {
+                continue;
+            };
+            if group.local_space.is_some() {
+                aliases.push((group.project_id, group.key));
+                continue;
+            }
+            inputs.push(ProjectLabelInput {
+                name: group.name,
+                repository: project["repositoryIdentity"].as_str().map(str::to_owned),
+            });
+            entries.push(Entry::Cloud(group.project_id));
+        }
+        let mut labels = ProjectLabels::default();
+        for (entry, label) in entries.into_iter().zip(project_labels(&inputs)) {
+            match entry {
+                Entry::Local(key) => labels.local.insert(key, label),
+                Entry::Cloud(id) => labels.cloud.insert(id, label),
+            };
+        }
+        for (id, key) in aliases {
+            if let Some(label) = labels.local.get(&key).cloned() {
+                labels.cloud.insert(id, label);
+            }
+        }
+        labels
+    }
     pub(crate) fn cloud_sidebar_projects(&self) -> Vec<Value> {
         if self
             .cloud_sidebar
