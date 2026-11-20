@@ -2617,7 +2617,6 @@ impl Shell {
                     self.show_zot_page(page, cx);
                 }
             }
-<<<<<<< HEAD
             // `pr-ready`, `pr-blocked`, `pr-draft`: the PR tab on seeded,
             // offline details linked from the second issue.
             step if step.starts_with("pr-") => {
@@ -2645,11 +2644,10 @@ impl Shell {
                     }
                 });
                 self.show_zot_page(ZotPage::PullRequest(url), cx);
-=======
+            }
             "threads" => {
                 self.zot_ui.finished_open = true;
                 self.show_zot_page(ZotPage::Section(ZotTab::Threads), cx);
->>>>>>> origin/main
             }
             "history-menu" => self.zot_ui.overflow.open(()),
             "history" => self.show_zot_page(ZotPage::History, cx),
