@@ -47,7 +47,7 @@ pub(crate) fn remember_model_labels<'a>(models: impl IntoIterator<Item = &'a Mod
     });
 }
 
-fn known_model_label(id: &str) -> Option<String> {
+pub(crate) fn known_model_label(id: &str) -> Option<String> {
     KNOWN_MODEL_LABELS.with_borrow(|known| known.get(id).cloned())
 }
 use std::path::PathBuf;

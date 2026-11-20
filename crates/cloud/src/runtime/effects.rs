@@ -57,6 +57,24 @@ impl Guard {
         }
     }
 }
+/// How long an uncertain create (`unknown`, or a `pending` whose worker died)
+/// may stay unresolved. After it, a create that is still not visible by its
+/// exact name is treated as never accepted and may be dispatched again under
+/// the same name. Far longer than one create call (60s HTTP + 15s token).
+pub(crate) const UNRESOLVED_CREATE_WINDOW_MS: i64 = 3 * 60 * 1000;
+/// Total time a first start may spend without a provider machine before the
+/// workspace shows a visible failure with Retry and Delete.
+pub(crate) const ALLOCATION_START_DEADLINE_MS: i64 = 10 * 60 * 1000;
+/// A provider answer that proves no machine was created: the request was
+/// refused (bad argument, permission, missing snapshot). Journaled as
+/// `rejected`, never `unknown`. Transport, timeout, rate-limit and other
+/// ambiguous answers stay `unknown` and are reconciled by name.
+pub(crate) fn definitely_not_created(error: &crate::providers::ProviderError) -> bool {
+    matches!(
+        error,
+        crate::providers::ProviderError::Rejected | crate::providers::ProviderError::NotFound
+    )
+}
 fn failed() -> ApiError {
     ApiError::unavailable("cloud_workspace_effects_storage_failed")
 }
@@ -102,7 +120,11 @@ pub(super) async fn creating(
             .fetch_one(pool)
             .await?;
     if ready {
-        let saved=sqlx::query("INSERT INTO zuse_rust_provider_creates(operation_id,workspace_id,machine_name,outcome,updated_at) VALUES($1,$2,$3,'pending',$4) ON CONFLICT(operation_id) DO UPDATE SET outcome='pending',updated_at=EXCLUDED.updated_at WHERE zuse_rust_provider_creates.workspace_id=EXCLUDED.workspace_id AND zuse_rust_provider_creates.machine_name=EXCLUDED.machine_name AND zuse_rust_provider_creates.outcome='rejected' AND zuse_rust_provider_creates.machine_id IS NULL").bind(operation).bind(workspace).bind(name).bind(chrono::Utc::now().timestamp_millis()).execute(pool).await?;
+        // Callers have just reconciled the exact name and found nothing. A
+        // definite rejection, or an uncertain create older than the
+        // resolution window, may be dispatched again under the same name.
+        let now = chrono::Utc::now().timestamp_millis();
+        let saved=sqlx::query("INSERT INTO zuse_rust_provider_creates(operation_id,workspace_id,machine_name,outcome,updated_at) VALUES($1,$2,$3,'pending',$4) ON CONFLICT(operation_id) DO UPDATE SET outcome='pending',updated_at=EXCLUDED.updated_at WHERE zuse_rust_provider_creates.workspace_id=EXCLUDED.workspace_id AND zuse_rust_provider_creates.machine_name=EXCLUDED.machine_name AND zuse_rust_provider_creates.machine_id IS NULL AND (zuse_rust_provider_creates.outcome='rejected' OR (zuse_rust_provider_creates.outcome IN ('unknown','pending') AND zuse_rust_provider_creates.updated_at<=$5))").bind(operation).bind(workspace).bind(name).bind(now).bind(now.saturating_sub(UNRESOLVED_CREATE_WINDOW_MS)).execute(pool).await?;
         if saved.rows_affected() != 1 {
             return Err(ApiError::unavailable(
                 "cloud_provider_allocation_outcome_unknown",
@@ -132,7 +154,7 @@ async fn write_created_result(
 ) -> Result<(), ApiError> {
     let (state, id) = match result {
         Ok(m) => ("confirmed", Some(m.id.as_str())),
-        Err(crate::providers::ProviderError::Rejected) => ("rejected", None),
+        Err(error) if definitely_not_created(error) => ("rejected", None),
         Err(_) => ("unknown", None),
     };
     sqlx::query("UPDATE zuse_rust_provider_creates SET outcome=$2,machine_id=COALESCE($3,machine_id),updated_at=$4 WHERE operation_id=$1").bind(operation).bind(state).bind(id).bind(chrono::Utc::now().timestamp_millis()).execute(pool).await?;
