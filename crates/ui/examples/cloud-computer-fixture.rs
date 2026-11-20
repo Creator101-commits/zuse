@@ -19,6 +19,9 @@ struct Controller {
     feeds: Mutex<Vec<futures::channel::mpsc::UnboundedSender<Value>>>,
     accounts: Mutex<Vec<futures::channel::mpsc::UnboundedSender<Value>>>,
     new_chat: bool,
+    /// The account holds a Cloud plan, so a new chat in a cloud-backed
+    /// project starts on Cloud (`native-mixed-first`).
+    subscribed: bool,
     admitted: Mutex<Option<Value>>,
 }
 #[async_trait::async_trait]
@@ -73,6 +76,12 @@ impl RpcService for Controller {
             methods::CLOUD_BILLING_ENTITLEMENTS if self.new_chat => {
                 assert_eq!(_params["expectedAccountId"], "fixture-owner");
                 assert!(_params["expectedOrganizationId"].is_null());
+                if self.subscribed {
+                    return RpcReply::value(
+                        &json!({"accountId":"fixture-owner","organizationId":null,
+                        "data":{"entitlements":[{"offerId":"cloud-starter-v1","status":"active"}]}}),
+                    );
+                }
                 RpcReply::value(&json!({"data":{"entitlements":[]}}))
             }
             methods::CLOUD_CONTEXT if self.new_chat => RpcReply::value(&new_chat_context()),
@@ -162,7 +171,20 @@ impl RpcService for Controller {
                         .any(|m| m == methods::CLOUD_CREATE),
                     "Draft must never allocate/connect before Send"
                 );
-                Ok(RpcReply::Stream(Box::pin(stream::once(async {json!({"workspaceId":"admitted-computer","state":"provisioning","statusCode":"allocating","runtimeStatus":"offline"})}).chain(stream::pending()))))
+                let first = stream::once(async {
+                    json!({"workspaceId":"admitted-computer","state":"provisioning","statusCode":"allocating","runtimeStatus":"offline"})
+                });
+                // `FIXTURE_LAUNCH_FAILS=1`: the server reports the start failed.
+                if std::env::var("FIXTURE_LAUNCH_FAILS").is_ok() {
+                    let failed = stream::once(async {
+                        tokio::time::sleep(Duration::from_millis(600)).await;
+                        json!({"workspaceId":"admitted-computer","state":"failed","statusCode":"failed","message":"Computer start needs attention"})
+                    });
+                    return Ok(RpcReply::Stream(Box::pin(
+                        first.chain(failed).chain(stream::pending()),
+                    )));
+                }
+                Ok(RpcReply::Stream(Box::pin(first.chain(stream::pending()))))
             }
             methods::CLOUD_ENVIRONMENT => {
                 panic!("Opening Cloud setup must never acquire an execution environment")
@@ -209,6 +231,7 @@ fn main() -> anyhow::Result<()> {
         feeds: Default::default(),
         accounts: Default::default(),
         new_chat: new_chat || mixed,
+        subscribed: mode.contains("first"),
         admitted: Default::default(),
     });
     let client = zuse_rpc::memory_client(controller.clone());
@@ -245,7 +268,7 @@ fn main() -> anyhow::Result<()> {
             let window = if shared_mixed {
                 shared_mixed_window(client,cx)
             } else if native_mixed {
-                native_mixed_window(client,new_chat_context(),mode.contains("offline"),temp.path(),cx)
+                native_mixed_window(client,new_chat_context(),mode.contains("offline"),mode.contains("first"),temp.path(),cx)
             } else if cached {
                 cloud_saved_history_fixture(client, cx)
             } else {
@@ -339,7 +362,7 @@ fn main() -> anyhow::Result<()> {
                             .any(|m| m == methods::CLOUD_ENVIRONMENT)
                     );
                 }
-                if new_chat {
+                if new_chat && !mode.contains("first") {
                     assert!(
                         controller.admitted.lock().unwrap().is_some(),
                         "Exact cloud admission payload was not accepted"
@@ -418,7 +441,29 @@ fn computer_seed() -> Value {
     json!({"apiOrigin":"https://fixture-api.example.test","accountId":"fixture-owner","workspace":workspace,"commandDeliveryMode":"server-admitted-v2","commandAdmissionVersion":2,"taskCommandCanEdit":true,"commandAdmissions":[],"head":{"schemaVersion":1,"payloadFormat":"zuse-transcript-v1","workspaceId":"fixture-computer","sessionId":"fixture-session","runtimeGeneration":1,"cursor":{"epoch":"fixture-checkpoint","version":4},"chat":chat,"conversations":[chat],"transcript":{"reset":messages},"queue":[],"queuePaused":false,"olderMessageSequence":null}})
 }
 
+fn collide() -> bool {
+    std::env::var("FIXTURE_COLLIDE").is_ok()
+}
 fn new_chat_context() -> Value {
+    let mut context = new_chat_context_base();
+    if collide() {
+        let base = context["projects"][0].clone();
+        let project = |id: &str, name: &str, repo: &str| {
+            let mut row = base.clone();
+            row["projectId"] = json!(id);
+            row["displayName"] = json!(name);
+            row["repositoryIdentity"] = json!(format!("github.com/{repo}"));
+            row
+        };
+        context["projects"] = json!([
+            project("cloud-only-project", "zuse", "opcodehq/zuse"),
+            project("fork-project", "zuse", "swarajbachu/zuse"),
+            project("review-project", "zuse-review", "opcodehq/zuse-review"),
+        ]);
+    }
+    context
+}
+fn new_chat_context_base() -> Value {
     let catalog = json!({"providers":[{"id":"codex","name":"Codex","defaultModel":"gpt-5.5","models":[{"id":"gpt-5.5","label":"GPT-5.5"}]}]});
     json!({"accountId":"fixture-owner","ownerId":"fixture-owner","organizationId":null,"apiOrigin":"https://fixture-api.example.test","projects":[{"projectId":"cloud-only-project","accountId":"fixture-owner","displayName":"opcodehq/web","repositoryIdentity":"github.com/example/cloud-only","defaultBranch":"main","providerId":"boxd","supportsModelConfiguration":true}],"agentConnections":[{"connectionId":"fixture-codex","agent":"codex","state":"connected","accountLabel":"Fixture Codex"}],"agentCatalog":catalog,"providerAgentCatalogs":{"boxd":catalog},"computerCapabilities":{"defaultProvider":"boxd","providers":[{"id":"boxd","configured":true,"managedBaseReady":true,"commandAdmissionVersion":2,"preservesDisk":true,"preservesMemory":true,"supportsSnapshots":true,"supportsDocker":false,"sizes":[{"id":"default","label":"Standard","vcpus":4,"memoryMib":16384,"diskGib":32}]}],"computerSizes":[{"id":"default","label":"Standard · 4 vCPU · 16 GB","vcpus":4,"memoryMib":16384,"machineRate":4,"available":true},{"id":"large","label":"Large · 8 vCPU · 32 GB","vcpus":8,"memoryMib":32768,"machineRate":8,"available":false,"requiresPlan":"cloud-max"}]}})
 }
@@ -471,6 +516,7 @@ fn native_mixed_window(
     client: zuse_rpc::RpcClient,
     context: Value,
     offline: bool,
+    subscribed: bool,
     data: &std::path::Path,
     cx: &mut gpui::App,
 ) -> gpui::AnyWindowHandle {
@@ -480,10 +526,15 @@ fn native_mixed_window(
         s.connection=if offline{zuse_protocol::view::ConnectionStatus::Failed("Local engine is offline".into())}else{zuse_protocol::view::ConnectionStatus::Ready};
         s.workspace_scope=Some(zuse_protocol::WorkspaceScope::Local);s.local_device_id=Some("fixture-local".into());s.devices=vec![serde_json::from_value(json!({"id":"fixture-local","name":"Offline local computer","platform":std::env::consts::OS,"lastSeenAt":null})).unwrap()];s.auto_selected=true;s.spaces_synced=true;s.chats_synced=true;
         s.apply_cloud_account(json!({"user":{"id":"fixture-owner","email":"alex@example.test"},"orgId":null}));
-        s.spaces=vec![serde_json::from_value(json!({"id":"mixed-space","deviceId":"fixture-local","path":"/Users/alex/code/web","remoteRepository":"github.com/example/cloud-only","createdAt":"2026-10-30T12:00:00Z"})).unwrap()];
+        s.spaces=vec![serde_json::from_value(if collide() {
+            json!({"id":"mixed-space","deviceId":"fixture-local","path":"/Users/alex/code/zuse","remoteRepository":"https://github.com/opcodehq/zuse.git","createdAt":"2026-10-30T12:00:00Z"})
+        } else {
+            json!({"id":"mixed-space","deviceId":"fixture-local","path":"/Users/alex/code/web","remoteRepository":"github.com/example/cloud-only","createdAt":"2026-10-30T12:00:00Z"})
+        }).unwrap()];
         s.chats=vec![serde_json::from_value(json!({"id":"mixed-local-chat","deviceId":"fixture-local","spaceId":"mixed-space","title":"Tidy the settings layout","archived":false,"createdAt":"2026-10-30T12:00:00Z","config":{"harness":"codex","model":"gpt-5.5","sandbox":"workspace-write"}})).unwrap()];s.selected_chat=Some("mixed-local-chat".into());s.selected_space=Some("mixed-space".into());
         let mut workspace=computer_seed()["workspace"].clone();workspace["projectId"]=json!("cloud-only-project");
         assert!(s.fixture_cloud_sidebar_catalog(client,&context,&json!({"accountId":"fixture-owner","organizationId":null,"workspaces":[workspace]})));
+        if subscribed {s.fixture_cloud_subscription(true);}
         s
     });
     let boot = EngineBootConfig {

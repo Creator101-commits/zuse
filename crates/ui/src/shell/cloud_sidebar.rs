@@ -1,5 +1,7 @@
 //! Cloud tasks share project headings with local checkouts. These are real
-//! account task rows, never synthetic local chats or guest connections.
+//! account task rows, never synthetic local chats or guest connections; the
+//! one exception is a new cloud chat still being created, shown from its
+//! tab's pending launch until the account's list has it.
 use super::*;
 use serde_json::Value;
 
@@ -104,19 +106,36 @@ impl Shell {
     }
     pub(super) fn cloud_sidebar_groups(&self, cx: &App) -> Vec<CloudSidebarGroup> {
         let state = self.state.read(cx);
-        let workspaces = state.cloud_sidebar_workspaces();
+        let mut workspaces = state.cloud_sidebar_workspaces();
+        // New chats still being created show at once, like a local chat
+        // does, until the account's list has them.
+        let now = Utc::now().timestamp_millis();
+        for launch in self.composer.read(cx).cloud_launch_summaries() {
+            if launch.workspace.as_ref().is_some_and(|id| {
+                workspaces
+                    .iter()
+                    .any(|row| row["workspaceId"].as_str() == Some(id.as_str()))
+            }) {
+                continue;
+            }
+            workspaces.push(pending_launch_row(&launch, now));
+        }
         let filter_key = self
             .settings
             .space_filter
             .as_deref()
             .and_then(|id| state.space_row(id))
             .map(zuse_protocol::view::project_key);
-        state
-            .cloud_sidebar_projects()
+        let projects = state.cloud_sidebar_projects();
+        let labels = state.project_labels(&projects);
+        projects
             .into_iter()
             .filter_map(|project| {
-                let identity =
+                let mut identity =
                     zuse_protocol::presentation::cloud_project_group(&project, &state.spaces)?;
+                if let Some(label) = labels.cloud.get(&identity.project_id) {
+                    identity.name = label.clone();
+                }
                 if filter_key.as_ref().is_some_and(|key| key != &identity.key) {
                     return None;
                 }
@@ -166,6 +185,10 @@ impl Shell {
         let Some(workspace) = id.strip_prefix(super::CLOUD_ROW_PREFIX) else {
             return;
         };
+        if let Some(key) = workspace.strip_prefix(PENDING_LAUNCH_PREFIX) {
+            self.select_cloud_launch(key, cx);
+            return;
+        }
         let row = self
             .state
             .read(cx)
@@ -262,18 +285,30 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<(String, f32, AnyElement)> {
-        self.cloud_row_target(&row, cx)?;
+        let pending = row["pendingLaunch"].as_str().map(str::to_owned);
+        if pending.is_none() {
+            self.cloud_row_target(&row, cx)?;
+        }
         let workspace = row["workspaceId"].as_str()?.to_owned();
         let state = self.state.read(cx);
-        let selected = self
-            .cloud_conversation
-            .as_ref()
-            .is_some_and(|view| view.read(cx).target.workspace == workspace)
-            || state
-                .engine()
-                .and_then(|engine| engine.cloud_workspace())
-                .as_deref()
-                == Some(workspace.as_str());
+        let selected = match &pending {
+            // The tab creating it is in front.
+            Some(key) => {
+                self.cloud_conversation.is_none()
+                    && state.selected_chat.is_none()
+                    && self.composer.read(cx).current_key == *key
+            }
+            None => {
+                self.cloud_conversation
+                    .as_ref()
+                    .is_some_and(|view| view.read(cx).target.workspace == workspace)
+                    || state
+                        .engine()
+                        .and_then(|engine| engine.cloud_workspace())
+                        .as_deref()
+                        == Some(workspace.as_str())
+            }
+        };
         let title = transcript::single_line(&zuse_protocol::file_mentions::mention_display_text(
             row["title"]
                 .as_str()
@@ -324,6 +359,14 @@ impl Shell {
         );
         Some((id, height, element))
     }
+    #[cfg(test)]
+    pub(super) fn pending_launch_rows(&self, cx: &App) -> Vec<Value> {
+        self.cloud_sidebar_groups(cx)
+            .into_iter()
+            .flat_map(|group| group.rows)
+            .filter(|row| row["pendingLaunch"].is_string())
+            .collect()
+    }
     pub(super) fn cloud_row_project_name(&self, row: &Value, cx: &App) -> String {
         let state = self.state.read(cx);
         let project_id = row["projectId"].as_str().unwrap_or_default();
@@ -337,6 +380,27 @@ impl Shell {
             })
             .unwrap_or_else(|| "Cloud".into())
     }
+}
+
+/// Sidebar ids of new chats still being created: `cloud:launch:<draft key>`.
+pub(super) const PENDING_LAUNCH_PREFIX: &str = "launch:";
+/// The sidebar row of a new chat before the server lists it: its first
+/// message as the title, starting (or failed) like a starting computer.
+fn pending_launch_row(launch: &crate::composer::cloud::CloudLaunchSummary, now: i64) -> Value {
+    let started = launch
+        .started_at
+        .map(|at| now - at.elapsed().as_millis() as i64)
+        .unwrap_or(now);
+    serde_json::json!({
+        "workspaceId": format!("{PENDING_LAUNCH_PREFIX}{}", launch.key),
+        "pendingLaunch": launch.key,
+        "projectId": launch.project_id,
+        "title": launch.first_message,
+        "agent": launch.harness,
+        "state": if launch.failed { "failed" } else { "provisioning" },
+        "createdAt": started,
+        "updatedAt": started,
+    })
 }
 
 #[cfg(test)]
@@ -550,6 +614,172 @@ mod tests {
                 shell.state.read(cx).cloud_project.as_ref().unwrap()["projectId"],
                 "project"
             );
+        });
+    }
+
+    /// The owner's account: two local checkouts of `opcodehq/zuse`, Cloud
+    /// projects for `opcodehq/zuse` and `swarajbachu/zuse` (same short name)
+    /// plus four others, and two ready cloud chats in `opcodehq/zuse`.
+    fn owner_account_sidebar(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Shell>, &mut gpui::VisualTestContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            gpui_tokio::init_from_handle(cx, runtime.handle().clone());
+            cx.set_global(Theme::default());
+            crate::app_menus::init(cx);
+            settings::init(UiSettings::default(), directory.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            std::sync::Arc::new(Pending),
+        ));
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    state.workspace_scope = Some(zuse_protocol::WorkspaceScope::Local);
+                    state.local_device_id = Some("mac".into());
+                    state.apply_cloud_account(json!({"user":{"id":"owner"},"orgId":null}));
+                    state.set_cloud_subscription_for_test(true);
+                    let project = |id: &str, repo: &str| {
+                        json!({
+                            "projectId": id, "displayName": repo,
+                            "repositoryIdentity": format!("github.com/{repo}"),
+                            "repositoryUrl": format!("https://github.com/{repo}"),
+                            "canCreate": true,
+                        })
+                    };
+                    let workspace = |id: &str, title: &str, at: i64| {
+                        let row: zuse_model::cloud::Workspace = serde_json::from_value(json!({
+                            "workspaceId": id, "projectId": "project_3d6bff4de5a34ef5b345c71dd9686801",
+                            "providerId": "boxd", "chatId": format!("{id}-thread"),
+                            "initialSessionId": format!("{id}-session"), "title": title, "branch": format!("cloud/{id}"),
+                            "state": "ready", "desiredState": "ready", "statusCode": "ready",
+                            "revision": 1, "rpcProtocol": "zuse-rpc-v1", "createdAt": at, "updatedAt": at,
+                        }))
+                        .unwrap();
+                        serde_json::to_value(row).unwrap()
+                    };
+                    assert!(state.apply_cloud_sidebar_catalog(
+                        &json!({"accountId":"owner","organizationId":null,"ownerId":"owner","projects":[
+                            project("project_92e8e07c", "swarajbachu/zuse"),
+                            project("project_3d6bff4de5a34ef5b345c71dd9686801", "opcodehq/zuse"),
+                            project("project_review", "opcodehq/zuse-review"),
+                            project("project_zkit", "opcodehq/zkit"),
+                            project("project_delulu", "opcodehq/delulu"),
+                            project("project_brokeboy", "opcodehq/brokeboy"),
+                        ]}),
+                        &json!({"accountId":"owner","organizationId":null,"workspaces":[
+                            workspace("workspace_37ce54a9", "nice finally we can work on cloud", 2),
+                            workspace("workspace_6d270d98", "yo", 1),
+                        ]})
+                    ));
+                    for (id, path) in [
+                        ("space-startups", "/Users/owner/Developer/startups/zuse"),
+                        ("space-token-maxing", "/Users/owner/Developer/token-maxing/zuse"),
+                    ] {
+                        state.spaces.push(zuse_protocol::Space {
+                            id: id.into(),
+                            device_id: "mac".into(),
+                            path: path.into(),
+                            name: None,
+                            git_detected: true,
+                            git_checked_at: None,
+                            checkout_id: None,
+                            repository_id: Some("github.com/opcodehq/zuse".into()),
+                            remote_repository: Some("https://github.com/opcodehq/zuse.git".into()),
+                            created_at: chrono::Utc::now(),
+                        });
+                    }
+                    state.chats = vec![
+                        serde_json::from_value(json!({
+                            "id":"local-chat","deviceId":"mac","spaceId":"space-startups",
+                            "title":"Debug Image Issue","archived":false,
+                            "createdAt":"2026-11-19T12:00:00Z"
+                        }))
+                        .unwrap(),
+                    ];
+                    state
+                });
+                state.update(cx, |state, _| state.set_test_engine(controller));
+                let mut shell = Shell::new(
+                    state,
+                    EngineBootConfig {
+                        target: None,
+                        data_dir: directory.path().into(),
+                        ipc_port: 0,
+                        edge_url: "http://127.0.0.1:1".into(),
+                        edge_token: None,
+                        org_id: None,
+                        workos_client_id: None,
+                        default_harness: zuse_protocol::HarnessId::Mock,
+                    },
+                    cx,
+                );
+                shell.reduced_motion = true;
+                shell.settings.sidebar_organization = SidebarOrganization::ByProject;
+                shell.sidebar_collapsed_groups.clear();
+                shell
+            });
+            ProjectList {
+                shell,
+                _directory: directory,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        (shell, cx)
+    }
+
+    /// Every listed cloud chat renders under some project, and a local
+    /// checkout joins its Cloud repository by GitHub identity, never by its
+    /// short name: `opcodehq/zuse`'s chats sit in the local "zuse" project,
+    /// `swarajbachu/zuse` stays its own project labelled with its owner.
+    #[gpui::test]
+    fn owner_account_cloud_chats_render_under_their_repository(cx: &mut TestAppContext) {
+        let (shell, cx) = owner_account_sidebar(cx);
+        cx.update(|window, cx| window.draw(cx).clear());
+        for workspace in [
+            "chat-cloud:workspace_37ce54a9",
+            "chat-cloud:workspace_6d270d98",
+        ] {
+            assert!(
+                cx.debug_bounds(workspace).is_some(),
+                "ready cloud chat {workspace} was dropped from the sidebar"
+            );
+        }
+        shell.read_with(cx, |shell, cx| {
+            let groups = shell.cloud_sidebar_groups(cx);
+            // No listed workspace is left without a group.
+            let shown: usize = groups.iter().map(|group| group.rows.len()).sum();
+            assert_eq!(shown, shell.state.read(cx).cloud_sidebar_workspaces().len());
+            let group = |id: &str| {
+                groups
+                    .iter()
+                    .find(|g| g.project["projectId"] == id)
+                    .and_then(|g| g.group.clone())
+                    .unwrap()
+            };
+            let local_key = zuse_protocol::view::project_key(&shell.state.read(cx).spaces[0]);
+            let zuse = group("project_3d6bff4de5a34ef5b345c71dd9686801");
+            assert_eq!(zuse.0, local_key, "opcodehq/zuse joins the local checkout");
+            let fork = group("project_92e8e07c");
+            assert_ne!(fork.0, local_key);
+            assert_eq!(fork.1, "swarajbachu/zuse");
+            assert_eq!(zuse.1, "opcodehq/zuse");
+            assert_eq!(group("project_review").1, "zuse-review");
         });
     }
 

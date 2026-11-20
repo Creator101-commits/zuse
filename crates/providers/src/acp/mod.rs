@@ -648,8 +648,8 @@ fn antigravity_registry_platform() -> Option<&'static str> {
     })
 }
 
-/// completed installs whose marker proves their origin: a digest pinned by
-/// this or an earlier build, or google's verified code signature.
+/// Completed installs verified against a pinned or official registry digest,
+/// or Google's code signature.
 fn trusted_antigravity_installs() -> Vec<(semver::Version, PathBuf)> {
     let pins: Vec<_> = [antigravity_archive(), antigravity_legacy_archive()]
         .into_iter()
@@ -662,7 +662,10 @@ fn trusted_antigravity_installs() -> Vec<(semver::Version, PathBuf)> {
             let trusted = pins
                 .iter()
                 .any(|pin| pin.version == version && pin.sha512 == marker)
-                || (crate::code_signature::SUPPORTED && marker == ANTIGRAVITY_SIGNED_MARKER);
+                || (crate::code_signature::SUPPORTED && marker == ANTIGRAVITY_SIGNED_MARKER)
+                || marker.strip_prefix("registry-sha256:").is_some_and(|hash| {
+                    hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+                });
             if !trusted {
                 return None;
             }
@@ -694,13 +697,15 @@ pub struct AntigravityRelease {
     pub version: String,
     /// `None` when the manifest has no usable google-hosted archive here.
     archive_url: Option<String>,
+    sha256: Option<String>,
 }
 
 impl AntigravityRelease {
     /// whether zuse can prove this release's origin before installing it.
     pub fn installable(&self) -> bool {
         antigravity_archive().is_some_and(|pin| pin.version == self.version)
-            || (crate::code_signature::SUPPORTED && self.archive_url.is_some())
+            || (self.archive_url.is_some()
+                && (self.sha256.is_some() || crate::code_signature::SUPPORTED))
     }
 }
 
@@ -710,20 +715,25 @@ pub fn antigravity_release(manifest: &Value) -> Option<AntigravityRelease> {
     }
     let version = manifest.get("version")?.as_str()?;
     semver::Version::parse(version).ok()?;
-    let archive_url = antigravity_registry_platform()
+    let binary = antigravity_registry_platform()
         .and_then(|platform| manifest.get("distribution")?.get("binary")?.get(platform))
         .filter(|binary| {
             binary
                 .get("cmd")
                 .and_then(Value::as_str)
                 .is_some_and(|cmd| cmd.strip_prefix("./").unwrap_or(cmd) == antigravity_entry())
-        })
+        });
+    let archive_url = binary
         .and_then(|binary| binary.get("archive")?.as_str())
         .filter(|url| is_google_release_url(url))
         .map(str::to_owned);
     Some(AntigravityRelease {
         version: version.to_owned(),
         archive_url,
+        sha256: binary
+            .and_then(|b| b.get("sha256")?.as_str())
+            .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_ascii_lowercase),
     })
 }
 
@@ -745,9 +755,9 @@ pub async fn install_antigravity_release(
     if let Some(pin) = antigravity_archive().filter(|pin| pin.version == release.version) {
         return crate::archive_install::ensure_installed(pin, "Antigravity").await;
     }
-    if !crate::code_signature::SUPPORTED {
+    if !release.installable() {
         return Err(HarnessError::Install(format!(
-            "Antigravity {} is not pinned by this build of Zuse; update Zuse to install it",
+            "Antigravity {} has no verifiable archive in the official registry",
             release.version
         )));
     }
@@ -757,16 +767,23 @@ pub async fn install_antigravity_release(
             release.version
         ))
     })?;
+    let marker = release
+        .sha256
+        .as_ref()
+        .map(|hash| format!("registry-sha256:{hash}"));
     let verified = crate::archive_install::VerifiedRelease {
+        sha256: release.sha256.as_deref(),
         name: ANTIGRAVITY_ARCHIVE_NAME,
         version: &release.version,
         url,
         entry: antigravity_entry(),
-        marker: ANTIGRAVITY_SIGNED_MARKER,
+        marker: marker.as_deref().unwrap_or(ANTIGRAVITY_SIGNED_MARKER),
     };
     let expected = release.version.clone();
     crate::archive_install::install_verified(&verified, "Antigravity", |dir| async move {
-        crate::code_signature::verify_google_signed(&dir).await?;
+        if crate::code_signature::SUPPORTED {
+            crate::code_signature::verify_google_signed(&dir).await?;
+        }
         // a signature proves google built the server, not that it is the
         // release the registry named; the install directory, and so launch
         // order, is keyed by that name.
@@ -955,22 +972,36 @@ fn comparable_path(path: &str) -> String {
     }
 }
 
-/// Whether the listing device has a pinned, explicitly installable archive.
+/// Whether the official registry distributes an archive for this device.
 pub fn can_install(harness: HarnessId) -> bool {
     harness == HarnessId::Antigravity && antigravity_archive().is_some()
 }
 
 /// Only an explicit Settings action may call this installer.
 pub async fn install_harness(harness: HarnessId) -> Result<(), HarnessError> {
-    let pin = (harness == HarnessId::Antigravity)
-        .then(antigravity_archive)
-        .flatten()
-        .ok_or_else(|| {
-            HarnessError::NotInstalled(
-                "Set ANTIGRAVITY_ACP_EXECUTABLE to an installed ACP server".into(),
-            )
-        })?;
-    crate::archive_install::ensure_installed(pin, "Antigravity").await?;
+    if !can_install(harness) {
+        return Err(HarnessError::NotInstalled(
+            "Set ANTIGRAVITY_ACP_EXECUTABLE to an installed ACP server".into(),
+        ));
+    }
+    let manifest: Value = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| HarnessError::Install(error.to_string()))?
+        .get(ANTIGRAVITY_REGISTRY_URL)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| {
+            HarnessError::Install(format!("Antigravity release check failed: {error}"))
+        })?
+        .json()
+        .await
+        .map_err(|error| HarnessError::Install(format!("Invalid Antigravity registry: {error}")))?;
+    let release = antigravity_release(&manifest)
+        .ok_or_else(|| HarnessError::Install("No valid Antigravity registry release".into()))?;
+    install_antigravity_release(&release).await?;
+    prune_superseded_antigravity_installs();
     Ok(())
 }
 
@@ -2466,6 +2497,8 @@ impl Harness for AcpHarness {
             let root = antigravity_paths::home()?.join("antigravity-acp");
             vec![
                 root.join("settings.json"),
+                root.join("acp_token.json"),
+                root.join("acp_business_token.json"),
                 root.join("oauth_creds.json"),
                 root.join("google_accounts.json"),
                 root.join("credentials.json"),
@@ -6016,6 +6049,10 @@ for line in sys.stdin:
         assert_eq!(harness.executable_path(), Some(newest.clone()));
         assert!(is_managed_antigravity_server(&newest));
 
+        let newest = install("100.0.0", &format!("registry-sha256:{}", "ab".repeat(32)));
+        assert_eq!(harness.executable_path(), Some(newest.clone()));
+        assert!(is_managed_antigravity_server(&newest));
+
         #[cfg(unix)]
         let mut running = {
             let mut command = std::process::Command::new("/bin/sh");
@@ -6083,6 +6120,7 @@ for line in sys.stdin:
         let release = AntigravityRelease {
             version: "9.9.9".into(),
             archive_url: Some(pin.url.to_owned()),
+            sha256: None,
         };
         assert!(release.installable());
         let error = install_antigravity_release(&release).await.unwrap_err();
@@ -6120,6 +6158,14 @@ for line in sys.stdin:
         assert_eq!(release.version, "1.3.0");
         assert_eq!(release.archive_url.as_deref(), Some(url));
         assert_eq!(release.installable(), crate::code_signature::SUPPORTED);
+
+        let mut checksummed = manifest("1.5.0", url, &cmd);
+        checksummed["distribution"]["binary"][platform]["sha256"] = json!("ab".repeat(32));
+        let latest = antigravity_release(&checksummed).unwrap();
+        assert!(latest.installable(), "registry checksums work on Linux too");
+        assert_eq!(latest.sha256, Some("ab".repeat(32)));
+        checksummed["distribution"]["binary"][platform]["sha256"] = json!("invalid");
+        assert!(antigravity_release(&checksummed).unwrap().sha256.is_none());
 
         for rejected in [
             "http://dl.google.com/agy-extensions/releases/x.zip",

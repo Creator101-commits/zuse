@@ -92,6 +92,7 @@ mod cloud_plan;
 mod cloud_sidebar;
 pub use cloud_connection::CloudTarget;
 pub use cloud_plan::CloudAccess;
+pub(crate) use cloud_sidebar::ProjectLabels;
 mod remote_connection;
 pub use account_connection::{AccountTarget, RemoteTarget};
 
@@ -1761,25 +1762,27 @@ impl AppState {
     }
 
     /// Whether a chat belongs under the Zappers section rather than its
-    /// project: a Zapper's coordinator or thread, a side chat of one, or a
-    /// conversation with a Zapper id the Zapper list hasn't reported yet
-    /// (just delegated, or the list still loading after a reconnect).
+    /// project: a Zapper's coordinator or thread, a side chat of one, a
+    /// thread a Zapper started in any state (running, finished, released,
+    /// stopped or archived), or a coordinator id the Zapper list hasn't
+    /// reported yet (the list still loading after a reconnect).
     pub fn zot_hides_chat(&self, chat: &Chat) -> bool {
-        use zuse_protocol::presentation::zot_panel::{zapper_chat_id, zot_owns_chat};
-        let owned = |id: &str| zot_owns_chat(&self.zots, id);
-        if owned(&chat.id)
-            || chat.parent_chat_id.as_deref().is_some_and(owned)
-            || chat.thread_id.as_deref().is_some_and(owned)
-        {
+        use zuse_protocol::presentation::zot_panel::{zapper_chat_id, zapper_keeps_chat};
+        if zapper_keeps_chat(
+            &self.zots,
+            &chat.id,
+            chat.parent_chat_id.as_deref(),
+            chat.thread_id.as_deref(),
+        ) {
             return true;
         }
         if !zapper_chat_id(&chat.id) {
             return false;
         }
-        // A released thread keeps its id but rejoins its project once every
-        // watched device's Zapper list is in (any of them may own it) and the
-        // delegation race has long passed. Lists that never arrive (no Zapper
-        // support, failing watches) stop hiding anything after a short grace.
+        // A coordinator conversation of a deleted Zapper rejoins its project
+        // once every watched device's Zapper list is in (any of them may own
+        // it). Lists that never arrive (no Zapper support, failing watches)
+        // stop hiding anything after a short grace.
         let fresh = (Utc::now() - chat.created_at).num_minutes() < 5;
         let loading = !self
             .zot_watches
@@ -1795,6 +1798,7 @@ impl AppState {
         if self.zots == zots {
             return false;
         }
+        zuse_viewport::zapper_avatar::remember_zots(&zots);
         self.zots = zots;
         true
     }
@@ -6689,6 +6693,63 @@ mod tests {
             .map(|(_, c)| c.id.as_str())
             .collect();
         assert_eq!(overview, ["old", "new", "dangling"]);
+    }
+
+    #[test]
+    fn zapper_threads_never_list_under_their_project() {
+        let mut state = AppState::new();
+        state.apply_spaces(vec![space("s1", "dev", "/a", 1)]);
+        let in_space = |id: &str, parent: Option<&str>| {
+            let mut c = chat(id, 1, None);
+            c.space_id = Some("s1".into());
+            c.parent_chat_id = parent.map(str::to_owned);
+            c
+        };
+        state.apply_chats(vec![
+            in_space("plain", None),
+            in_space("zot-worker-running", None),
+            // Released: no longer a worker of any Zapper, long past creation.
+            in_space("zot-worker-delegate-zap11-ci-fix-1", None),
+            in_space(
+                "side-of-released",
+                Some("zot-worker-delegate-zap11-ci-fix-1"),
+            ),
+            // An ordinary chat the Zapper adopted and then released.
+            in_space("adopted-then-released", None),
+        ]);
+        let zot: zuse_protocol::zots::Zot = serde_json::from_value(serde_json::json!({
+            "id": "z", "revision": 3,
+            "config": {"name": "n", "purpose": "", "homeDeviceId": "dev", "repositories": [],
+                "coordinatorModel": {"harness": "mock", "model": null},
+                "workerDeviceId": "dev", "maxConcurrentWorkers": 1, "maxFollowups": 1},
+            "status": "active", "coordinatorChatId": "zot-z-0", "previousCoordinatorChats": [],
+            "workers": [{"chatId": "zot-worker-running", "deviceId": "dev", "spaceId": "s1",
+                "objective": "o", "followups": 0}],
+            "decisions": []
+        }))
+        .unwrap();
+        state.apply_zots(vec![zot]);
+        let ids: Vec<&str> = state
+            .chats_in_space("s1")
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, ["adopted-then-released", "plain"]);
+        let mut sidebar: Vec<&str> = state
+            .sidebar_chats(Utc::now(), None)
+            .iter()
+            .map(|(_, c)| c.id.as_str())
+            .collect();
+        sidebar.sort();
+        assert_eq!(sidebar, ["adopted-then-released", "plain"]);
+        // Still hidden with no Zapper list at all (e.g. the Zapper deleted).
+        state.apply_zots(vec![]);
+        let ids: Vec<&str> = state
+            .chats_in_space("s1")
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(ids, ["adopted-then-released", "plain"]);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! (the ACP registry's `binary` distribution), such as Google's Antigravity
 //! server.
 //!
-//! same contract as the npm installs in [`crate::adapter_install`]: the pinned
+//! same contract as the npm installs in [`crate::adapter_install`]: the verified
 //! archive lands ONCE in `~/.zuse/adapters/<name>/<version>`, extraction runs
 //! in a `.tmp-*` sibling that is renamed into place only after the entry
 //! resolves and the marker is written, so a killed download never passes for
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures::StreamExt;
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncWriteExt;
 
 use crate::HarnessError;
@@ -37,9 +37,11 @@ const MAX_ARCHIVE_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 
-/// an archive release whose integrity is proven after extraction (by a
-/// vendor code signature) rather than by a digest pinned in zuse's source.
+/// A release verified using an official registry checksum and/or an extracted
+/// vendor code signature, without a version pinned in Zuse's source.
 pub struct VerifiedRelease<'a> {
+    /// Expected archive digest from the official release registry.
+    pub sha256: Option<&'a str>,
     pub name: &'a str,
     pub version: &'a str,
     pub url: &'a str,
@@ -54,6 +56,7 @@ struct Source<'a> {
     url: &'a str,
     entry: &'a str,
     sha512: Option<&'a str>,
+    sha256: Option<&'a str>,
     marker: &'a str,
 }
 
@@ -65,6 +68,7 @@ impl<'a> From<&'a ArchivePin> for Source<'a> {
             url: pin.url,
             entry: pin.entry,
             sha512: Some(pin.sha512),
+            sha256: None,
             marker: pin.sha512,
         }
     }
@@ -78,6 +82,7 @@ impl<'a> From<&'a VerifiedRelease<'a>> for Source<'a> {
             url: release.url,
             entry: release.entry,
             sha512: None,
+            sha256: release.sha256,
             marker: release.marker,
         }
     }
@@ -133,8 +138,8 @@ pub async fn ensure_installed(
     install(Source::from(&pin), display_name, |_| async { Ok(()) }).await
 }
 
-/// install a release that has no pinned digest. `verify` inspects the
-/// extracted tree before it is committed; any error discards the download.
+/// Verify the registry digest before extraction, then inspect the extracted
+/// tree with `verify` before committing it. Any error discards the download.
 pub async fn install_verified<F, Fut>(
     release: &VerifiedRelease<'_>,
     display_name: &str,
@@ -266,6 +271,7 @@ async fn download(
     let mut file = tokio::fs::File::create(dest).await?;
     let mut received = 0_u64;
     let mut digest = Sha512::new();
+    let mut digest256 = Sha256::new();
     loop {
         let chunk = tokio::time::timeout(STALL_TIMEOUT, body.next())
             .await
@@ -285,6 +291,7 @@ async fn download(
                     )));
                 }
                 digest.update(&bytes);
+                digest256.update(&bytes);
                 file.write_all(&bytes).await?;
             }
             Some(Err(e)) => return Err(failed(e.to_string())),
@@ -292,6 +299,14 @@ async fn download(
         }
     }
     file.flush().await?;
+    let actual256 = format!("{:x}", digest256.finalize());
+    if let Some(expected) = source.sha256
+        && actual256 != expected
+    {
+        return Err(failed(format!(
+            "SHA-256 mismatch (expected {expected}, got {actual256})"
+        )));
+    }
     let actual = format!("{:x}", digest.finalize());
     if let Some(expected) = source.sha512
         && actual != expected
@@ -497,14 +512,29 @@ mod tests {
                     .unwrap();
                 zip.write_all(b"#!/bin/sh\n").unwrap();
                 let bytes = zip.finish().unwrap().into_inner();
+                let expected = format!("{:x}", Sha256::digest(&bytes));
                 let url = serve(bytes).await;
-                let release = VerifiedRelease {
+                let mut release = VerifiedRelease {
+                    sha256: None,
                     name: "verified-acp",
                     version: "2.0.0",
                     url: &url,
                     entry: "server",
                     marker: "vendor-signature",
                 };
+
+                let wrong = "00".repeat(32);
+                release.sha256 = Some(&wrong);
+                let mismatch = install_verified(&release, "Test", |_| async {
+                    panic!("checksum mismatch must fail before extraction or execution")
+                })
+                .await
+                .unwrap_err();
+                assert!(
+                    mismatch.to_string().contains("SHA-256 mismatch"),
+                    "{mismatch}"
+                );
+                release.sha256 = Some(&expected);
 
                 let rejected = install_verified(&release, "Test", |dir| async move {
                     assert!(dir.join("server").is_file());

@@ -159,9 +159,11 @@ impl WorkspaceView {
             })
             // Zots list their own threads; projects don't repeat them.
             .filter(|c| {
-                !zuse_protocol::presentation::zot_panel::zot_owns_chat(
+                !zuse_protocol::presentation::zot_panel::zapper_keeps_chat(
                     &self.zots.items,
                     c["id"].as_str().unwrap_or_default(),
+                    None,
+                    None,
                 )
             })
             .filter(|c| {
