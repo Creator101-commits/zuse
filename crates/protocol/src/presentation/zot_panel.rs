@@ -243,6 +243,51 @@ pub fn zapper_chat_id(chat_id: &str) -> bool {
     chat_id.starts_with("zot-")
 }
 
+/// Whether `chat_id` is a thread a Zapper started: the engine names every
+/// delegated thread `zot-worker-<command>` and the id never changes, so this
+/// still holds after the Zapper releases, stops or archives it.
+pub fn zapper_thread_chat_id(chat_id: &str) -> bool {
+    chat_id.starts_with("zot-worker-")
+}
+
+/// Whether a chat stays out of project lists for good: a conversation a
+/// Zapper owns right now (coordinator, thread, or a side chat of one), or a
+/// thread a Zapper started, in any later state. Releasing a thread drops it
+/// from the Zapper's `workers`, so ownership alone let released threads fall
+/// back into their project; the `zot-worker-` id keeps them out, including
+/// threads released before this check existed. Threads a Zapper adopted from
+/// an ordinary chat keep their own id and rejoin their project on release.
+pub fn zapper_keeps_chat(
+    zots: &[crate::zots::Zot],
+    chat_id: &str,
+    parent_chat_id: Option<&str>,
+    thread_id: Option<&str>,
+) -> bool {
+    std::iter::once(chat_id)
+        .chain(parent_chat_id)
+        .chain(thread_id)
+        .any(|id| zot_owns_chat(zots, id) || zapper_thread_chat_id(id))
+}
+
+/// Threads a Zapper started that are no longer among its workers (released,
+/// or dropped when it finished) but are still linked to one of its issues:
+/// newest issue first, and within an issue its latest thread first. The Threads tab lists them under "Finished" so they stay
+/// reachable from the Zapper once they leave the active list.
+pub fn finished_zapper_threads(zot: &crate::zots::Zot) -> Vec<String> {
+    let mut finished: Vec<String> = Vec::new();
+    for issue in zot.issues.iter().rev() {
+        for id in issue.threads.iter().rev() {
+            if zapper_thread_chat_id(id)
+                && !zot.workers.iter().any(|w| &w.chat_id == id)
+                && !finished.contains(id)
+            {
+                finished.push(id.clone());
+            }
+        }
+    }
+    finished
+}
+
 /// One thing in the Overview's "Needs you" card: something that really waits
 /// on the user. Coordinator events (thread reports, linked pull requests,
 /// interruptions) are the Zapper's inbox and never appear here.
@@ -496,6 +541,111 @@ mod tests {
             question: format!("Question {id}?"),
             answer: answer.map(str::to_owned),
         }
+    }
+
+    fn zapper(workers: &[&str], issue_threads: &[&[&str]]) -> crate::zots::Zot {
+        use crate::zots::*;
+        Zot {
+            id: "z".into(),
+            revision: 1,
+            activity_revision: 0,
+            config: ZotConfig {
+                name: "n".into(),
+                purpose: String::new(),
+                home_device_id: "d".into(),
+                repositories: vec![],
+                coordinator_model: ZotModel {
+                    harness: "mock".into(),
+                    model: None,
+                },
+                worker_device_id: "d".into(),
+                max_concurrent_workers: 1,
+                max_followups: 1,
+                avatar: None,
+            },
+            status: ZotStatus::Active,
+            coordinator_chat_id: "zot-z-2".into(),
+            previous_coordinator_chats: vec!["zot-z-1".into()],
+            workers: workers
+                .iter()
+                .map(|id| ZotWorker {
+                    chat_id: (*id).into(),
+                    device_id: "d".into(),
+                    space_id: "s".into(),
+                    objective: format!("Objective {id}"),
+                    followups: 0,
+                    queue_position: None,
+                })
+                .collect(),
+            decisions: vec![],
+            issues: issue_threads
+                .iter()
+                .enumerate()
+                .map(|(n, threads)| {
+                    let mut issue = raised(n as u32 + 1, ZotIssueStatus::InProgress, None, &[]);
+                    issue.threads = threads.iter().map(|t| (*t).into()).collect();
+                    issue
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn zapper_threads_stay_out_of_projects_once_released() {
+        let zots = [zapper(&["zot-worker-running", "adopted"], &[])];
+        let keeps = |id: &str| zapper_keeps_chat(&zots, id, None, None);
+        // Running threads and every coordinator conversation.
+        assert!(keeps("zot-worker-running"));
+        assert!(keeps("adopted"));
+        assert!(keeps("zot-z-2"));
+        assert!(keeps("zot-z-1"));
+        // Released threads are gone from `workers` (including ones released
+        // before this check), yet still belong to the Zapper.
+        assert!(keeps("zot-worker-delegate-zap11-ci-fix-1"));
+        assert!(zapper_keeps_chat(&[], "zot-worker-old", None, None));
+        // Side chats of a thread, running or released, follow it.
+        assert!(zapper_keeps_chat(
+            &zots,
+            "side",
+            Some("zot-worker-running"),
+            None
+        ));
+        assert!(zapper_keeps_chat(
+            &zots,
+            "side",
+            Some("zot-worker-gone"),
+            None
+        ));
+        assert!(zapper_keeps_chat(
+            &zots,
+            "tab",
+            None,
+            Some("zot-worker-gone")
+        ));
+        // Ordinary chats, and an adopted chat after its release, are projects'.
+        assert!(!keeps("plain"));
+        assert!(!zapper_keeps_chat(&[], "adopted", None, None));
+        assert!(!zapper_keeps_chat(&zots, "side", Some("plain"), None));
+        assert!(zapper_thread_chat_id("zot-worker-1"));
+        assert!(!zapper_thread_chat_id("zot-z-1"));
+    }
+
+    #[test]
+    fn finished_threads_are_released_issue_threads_newest_first() {
+        let zot = zapper(
+            &["zot-worker-running"],
+            &[
+                &["zot-worker-a", "zot-worker-running"],
+                &["zot-worker-b", "adopted", "zot-worker-a", "zot-worker-c"],
+            ],
+        );
+        assert_eq!(
+            finished_zapper_threads(&zot),
+            ["zot-worker-c", "zot-worker-a", "zot-worker-b"]
+        );
+        assert!(
+            finished_zapper_threads(&zapper(&["zot-worker-a"], &[&["zot-worker-a"]])).is_empty()
+        );
     }
 
     #[test]

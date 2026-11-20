@@ -7,6 +7,29 @@
 - Add opt-in Slack cloud tasks with threaded status/results, sender/channel attribution, and a workspace/repository connection flow in Cloud settings. Server credentials stay encrypted; enablement requires the Slack migration and a rebuilt compatible runtime image.
 - Link a chat or a Zapper to a Slack channel from its right-click menu. Finished replies post into a Slack thread, your replies in that thread come back to the chat, and Zappers post under their own name and avatar. Their worker threads get their own threads in the same channel. Requires the new Slack migration and re-authorizing the Slack app for its added scopes.
 
+## 0.27.3 - 2026-11-20
+
+### Added
+
+- Zappers: a cleaner New Zapper screen with a searchable repository picker, a first-run interview that writes the Zapper's own versioned INSTRUCTIONS.md, closable issue and document tabs, compact "Sent from Zapper" turns with a Zapper icon on its tool calls, and subagent chips that open in the side pane.
+- In-app What's new.
+- Remote access appears in every build.
+
+### Changed
+
+- New cloud chats show your first message instantly, at the top like any message, with the agent's icon on the tab and a sidebar row right away; it becomes one bubble when the computer's copy arrives.
+- A cloud chat that is still starting belongs to its own tab: other tabs, new chats and the model picker keep working. Closing that tab shuts down any computer it started.
+- Local and cloud projects link by GitHub repository; projects with the same name show as owner/repo, and a linked repository is a single row in the project picker.
+- User chat messages render as Markdown.
+- Zapper "Needs you" lists only real asks, Zapper-started threads stay out of the project chat list, and Zapper briefs are shorter.
+
+### Fixed
+
+- Cloud chats no longer show a stale "Waiting for computer…" or "Agent working…" after the computer is ready or the turn ends.
+- A failed cloud start shows the server's reason with Retry and Delete, and Delete keeps your message; refused messages name the real reason instead of "busy".
+- One unreadable cloud chat no longer hides the whole cloud chat list in the sidebar.
+- Antigravity account removal, current ACP releases, and Zapper commands that kept failing.
+
 ## 0.27.2 - 2026-11-20
 
 ### Added

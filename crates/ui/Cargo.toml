@@ -45,6 +45,10 @@ name = "zapper-queue-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "zapper-threads-fixture"
+required-features = ["appshots-fixture", "browser-fixture"]
+
+[[example]]
 name = "zapper-fixture"
 required-features = ["browser-fixture"]
 
@@ -71,6 +75,10 @@ required-features = ["cloud-computer-fixture"]
 [[example]]
 name = "tool-images-fixture"
 required-features = ["appshots-fixture"]
+
+[[example]]
+name = "subagent-pane-fixture"
+required-features = ["appshots-fixture", "browser-fixture"]
 
 [[example]]
 name = "zapper-turn-fixture"

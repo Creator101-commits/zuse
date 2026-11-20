@@ -3,7 +3,8 @@ use super::zot_forms::{Form, Kind, ZotAfter};
 use super::*;
 use zuse_protocol::presentation::zot_mascots;
 use zuse_protocol::presentation::zot_panel::{
-    NeedsYouItem, NeedsYouTarget, ZOT_SECTIONS, ZotPage, ZotPanelTabs, ZotTab, needs_you_items,
+    NeedsYouItem, NeedsYouTarget, ZOT_SECTIONS, ZotPage, ZotPanelTabs, ZotTab,
+    finished_zapper_threads, needs_you_items,
 };
 use zuse_protocol::zots::*;
 
@@ -34,6 +35,8 @@ pub(super) struct ZotUi {
     /// Threads just archived here. The engine applies it on its next pass, a
     /// few seconds later; until then the row should already be gone.
     archiving: std::collections::HashMap<String, std::time::Instant>,
+    /// The Threads tab's "Finished" group (released threads) is expanded.
+    finished_open: bool,
     /// Right-click menu of a sidebar Zapper row: its id and where it opened.
     pub(super) menu: popover::Popup<(String, Point<Pixels>)>,
     /// The menu's Slack submenu (linking the coordinator chat) is open.
@@ -2214,6 +2217,9 @@ impl Shell {
             );
         }
         let mut view = div().flex().flex_col().gap(px(14.0)).child(threads);
+        if let Some(finished) = self.zot_finished_threads(zot, theme, cx) {
+            view = view.child(finished);
+        }
         let mut coordinator = div()
             .flex()
             .flex_col()
@@ -2249,6 +2255,83 @@ impl Shell {
         }
         view = view.child(coordinator);
         view.into_any_element()
+    }
+
+    /// Threads this Zapper started and later released. They stay out of
+    /// project lists, so this collapsed group keeps them a click away.
+    fn zot_finished_threads(
+        &mut self,
+        zot: &Zot,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let finished: Vec<String> = finished_zapper_threads(zot)
+            .into_iter()
+            .filter(|id| !self.zot_thread_archived(id, cx))
+            .collect();
+        if finished.is_empty() {
+            return None;
+        }
+        let open = self.zot_ui.finished_open;
+        let mut group = div().flex().flex_col().gap(px(2.0)).child(
+            div()
+                .id("zot-finished-threads")
+                .role(gpui::Role::Button)
+                .aria_label(SharedString::from(format!(
+                    "Finished threads, {}",
+                    if open { "expanded" } else { "collapsed" }
+                )))
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .child(section(format!("Finished · {}", finished.len()), theme))
+                .child(
+                    icon(if open {
+                        icons::ALT_ARROW_DOWN
+                    } else {
+                        icons::ALT_ARROW_RIGHT
+                    })
+                    .size(px(11.0))
+                    .mb(px(4.0))
+                    .text_color(theme.text_faint),
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.zot_ui.finished_open = !this.zot_ui.finished_open;
+                    cx.notify();
+                })),
+        );
+        if !open {
+            return Some(group.into_any_element());
+        }
+        for id in finished {
+            let title = self
+                .state
+                .read(cx)
+                .chats
+                .iter()
+                .find(|c| c.id == id)
+                .and_then(|c| c.title.clone())
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or_else(|| id.clone());
+            let code = zot
+                .issues
+                .iter()
+                .find(|i| i.threads.contains(&id))
+                .map(|i| i.code());
+            let open = id.clone();
+            group = group.child(list_row(
+                format!("zot-finished-{id}"),
+                icons::CHAT_ROUND_LINE,
+                theme.text_faint,
+                title,
+                code,
+                theme,
+                move |this, _, _, cx| this.open_chat(open.clone(), cx),
+                cx,
+            ));
+        }
+        Some(group.into_any_element())
     }
 
     fn zot_drive(
@@ -2746,6 +2829,10 @@ impl Shell {
                 if let Some(page) = file {
                     self.show_zot_page(page, cx);
                 }
+            }
+            "threads" => {
+                self.zot_ui.finished_open = true;
+                self.show_zot_page(ZotPage::Section(ZotTab::Threads), cx);
             }
             "history-menu" => self.zot_ui.overflow.open(()),
             "history" => self.show_zot_page(ZotPage::History, cx),

@@ -55,6 +55,22 @@ pub(super) fn resolve_cloud_harness(
         .or(remembered)
 }
 
+/// Whether the agent has replied (with text) after the latest user message.
+fn latest_message_answered(transcript: &[zuse_model::SessionMessageEntry]) -> bool {
+    let Some(last_user) = transcript
+        .iter()
+        .rposition(|entry| entry.role == zuse_model::MessageRole::User)
+    else {
+        return false;
+    };
+    transcript[last_user + 1..].iter().any(|entry| {
+        entry.role == zuse_model::MessageRole::Assistant
+            && entry.parts.iter().any(|part| {
+                matches!(part, zuse_model::MessagePart::Text { text, .. } if !text.trim().is_empty())
+            })
+    })
+}
+
 pub(super) struct CloudConversation {
     pub(super) target: CloudTarget,
     pub(super) state: Entity<AppState>,
@@ -184,6 +200,8 @@ impl CloudConversation {
             cx.subscribe(&composer, |this: &mut Self, _, event, cx| match event {
                 ComposerEvent::CloudLaunchChanged => this.refresh_history(cx),
                 ComposerEvent::CloudForegroundAdmitted => this.foreground_admitted(cx),
+                ComposerEvent::CloudStatusRetry => this.retry_failed_computer(cx),
+                ComposerEvent::CloudStatusDelete => this.delete_failed_computer(cx),
                 ComposerEvent::CloudSleepRequested => this.sleep(cx),
                 ComposerEvent::CloudWakeRequested => this.wake_for_upload(cx),
                 ComposerEvent::CloudComputerRecreating { recreation } => {
@@ -299,8 +317,17 @@ impl CloudConversation {
                     .find(|entry| entry.role == zuse_model::MessageRole::User)
                     .map(|entry| entry.id.as_str())
             });
-        let response_started = initial_id
-            .is_some_and(|id| zuse_viewport::cloud_response_started(&state.transcript, id));
+        // The computer may record the first message under its own id: a reply
+        // to the transcript's first user message counts as well.
+        let first_user = state
+            .transcript
+            .iter()
+            .find(|entry| entry.role == zuse_model::MessageRole::User)
+            .map(|entry| entry.id.as_str());
+        let response_started = [initial_id, first_user]
+            .into_iter()
+            .flatten()
+            .any(|id| zuse_viewport::cloud_response_started(&state.transcript, id));
         let initial = !response_started
             && (self.first_message.is_some()
                 || launch.is_some_and(|row| {
@@ -382,15 +409,23 @@ impl CloudConversation {
         // Only issues (a failed stage, a message that needs checking) reach
         // the status line; startup phases are the environment card's.
         let status = activity::status_line(computer.as_ref(), agent.as_ref());
-        let line = if computer.as_ref().is_some_and(|stage| stage.busy) {
+        // A computer stage that failed (the server's failed or
+        // needs-attention status) offers Retry and Delete on that line.
+        let failed = computer.as_ref().is_some_and(|stage| !stage.busy);
+        // Once the agent answered the latest message, the computer is clearly
+        // up: no waiting line.
+        let answered = latest_message_answered(&self.state.read(cx).transcript);
+        let line = if !answered && computer.as_ref().is_some_and(|stage| stage.busy) {
             Some(SharedString::from("Waiting for computer…"))
         } else {
             agent
                 .filter(|activity| activity.busy)
                 .map(|activity| SharedString::from(activity.label))
         };
-        self.composer
-            .update(cx, |composer, cx| composer.set_cloud_status(status, cx));
+        self.composer.update(cx, |composer, cx| {
+            composer.set_cloud_status(status, cx);
+            composer.set_cloud_status_actions(failed, cx);
+        });
         self.transcript.update(cx, |transcript, cx| {
             transcript.set_external_activity(line, cx)
         });
@@ -986,6 +1021,8 @@ impl Shell {
         let Some(prompt) = self.composer.read(cx).cloud_launch_prompt() else {
             return div().into_any_element();
         };
+        // A failed start says why on the status line; nothing spins here.
+        let working = self.composer.read(cx).cloud_launch_working();
         let width = crate::settings::transcript_width(cx);
         let clearance = (self.bottom_stack.get() - self.terminal_geometry.get().height).max(0.0)
             + Theme::TRANSCRIPT_FADE_BAND
@@ -1025,27 +1062,29 @@ impl Shell {
                                     .child(prompt),
                             ),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(Theme::SPACE_SM))
-                                .pt(px(Theme::SPACE_LG))
-                                .child(crate::loaders::mini_glyph_spinner(
-                                    "cloud-launch-working",
-                                    2.5,
-                                    theme.loader_glyph(),
-                                    cx.entity_id(),
-                                    cx,
-                                ))
-                                .child(
-                                    div()
-                                        .text_size(crate::typography::text_xs())
-                                        .text_color(theme.text_muted)
-                                        .child("Waiting for computer…"),
-                                ),
-                        ),
+                        .when(working, |column| {
+                            column.child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(Theme::SPACE_SM))
+                                    .pt(px(Theme::SPACE_LG))
+                                    .child(crate::loaders::mini_glyph_spinner(
+                                        "cloud-launch-working",
+                                        2.5,
+                                        theme.loader_glyph(),
+                                        cx.entity_id(),
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(crate::typography::text_xs())
+                                            .text_color(theme.text_muted)
+                                            .child("Waiting for computer…"),
+                                    ),
+                            )
+                        }),
                 ),
             )
             .into_any_element()
@@ -1132,6 +1171,27 @@ impl Shell {
             self.track_current_cloud_canvas(cx);
         }
         let session = target.initial_session.clone();
+        let view = self.new_cloud_conversation_view(target, row, launch, cx);
+        // A tab still creating a chat keeps it; this one opens beside it.
+        self.ensure_free_cloud_tab(cx);
+        self.subscribe_cloud_conversation(&view, cx);
+        self.cloud_tabs.set_current(view.clone(), cx);
+        self.cloud_conversation = Some(view);
+        self.active_chat = session;
+        self.state
+            .update(cx, |state, cx| state.select_chat(None, cx));
+        self.set_route(Route::Chat, cx);
+        cx.notify();
+    }
+    /// A cloud conversation view for `target`, its row enriched with the
+    /// repository's name from the account's project list.
+    pub(super) fn new_cloud_conversation_view(
+        &mut self,
+        target: CloudTarget,
+        row: Value,
+        launch: Value,
+        cx: &mut Context<Self>,
+    ) -> Entity<CloudConversation> {
         // The computer record names its project only by id; carry the
         // repository's name in from the account's project list.
         let mut row = row;
@@ -1158,15 +1218,7 @@ impl Shell {
                 }
             }
         }
-        let view = cx.new(|cx| CloudConversation::new(target, row, launch, self.boot.clone(), cx));
-        self.subscribe_cloud_conversation(&view, cx);
-        self.cloud_tabs.set_current(view.clone(), cx);
-        self.cloud_conversation = Some(view);
-        self.active_chat = session;
-        self.state
-            .update(cx, |state, cx| state.select_chat(None, cx));
-        self.set_route(Route::Chat, cx);
-        cx.notify();
+        cx.new(|cx| CloudConversation::new(target, row, launch, self.boot.clone(), cx))
     }
 }
 
@@ -1919,6 +1971,94 @@ mod tests {
 
         });
     }
+    /// The owner's "yoo" sequence: the first message shows at once as the
+    /// launch's stand-in with "Waiting for computer…"; when the computer is
+    /// ready and its transcript has the message (under its own id) and the
+    /// reply, the stand-in and the waiting line are gone: one user bubble.
+    #[gpui::test]
+    fn first_message_reconciles_to_one_bubble_without_a_stale_waiting_line(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(initialize);
+        let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            std::sync::Arc::new(PendingController),
+        ));
+        let view = cx.new(|cx| {
+            CloudConversation::new(
+                CloudTarget {
+                    controller,
+                    subject: "owner".into(),
+                    organization: None,
+                    workspace: "task".into(),
+                    initial_session: "session".into(),
+                },
+                json!({"workspaceId":"task","state":"provisioning","statusCode":"allocating"}),
+                json!({"firstMessage":"yoo"}),
+                boot(dir.path()),
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.sync_progress(cx);
+            let echo = view.launch_echo_id();
+            assert!(
+                view.state
+                    .read(cx)
+                    .pending_echoes()
+                    .iter()
+                    .any(|e| e.id == echo),
+                "the first message shows at once"
+            );
+            assert!(view.computer_activity(cx).is_some_and(|stage| stage.busy));
+            // Ready; history and the live transcript arrive together.
+            view.computer.metadata = json!({"workspaceId":"task","state":"ready"});
+            view.admissions = json!([{"commandId":"launch:task","messageId":"admitted-first",
+                "text":"yoo","executionState":"completed"}]);
+            let entry = |id: &str, role, text: &str| zuse_model::SessionMessageEntry {
+                id: id.into(),
+                role,
+                parts: vec![zuse_model::MessagePart::Text {
+                    id: format!("text:{id}"),
+                    text: text.into(),
+                }],
+                created_at: 1,
+                device_id: String::new(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            };
+            view.state.update(cx, |state, _| {
+                state.apply_transcript(vec![
+                    entry("runtime-user", zuse_model::MessageRole::User, "yoo"),
+                    entry(
+                        "runtime-reply",
+                        zuse_model::MessageRole::Assistant,
+                        "Yoo! What are we working on?",
+                    ),
+                ])
+            });
+            view.sync_progress(cx);
+            let state = view.state.read(cx);
+            assert!(
+                state.pending_echoes().is_empty(),
+                "the stand-in is replaced"
+            );
+            let users = state
+                .transcript
+                .iter()
+                .filter(|e| e.role == zuse_model::MessageRole::User)
+                .count();
+            assert_eq!(users, 1, "exactly one user bubble");
+            assert!(latest_message_answered(&state.transcript));
+            assert!(
+                !view.computer_activity(cx).is_some_and(|stage| stage.busy),
+                "no stale waiting line"
+            );
+        });
+    }
     struct OlderHistoryController {
         calls: std::sync::Mutex<Vec<Value>>,
         page: Value,
@@ -2335,7 +2475,7 @@ mod tests {
         let (controller_state,sidebar,composer)=window.update(cx,|shell,_,cx| {
             let controller_state=shell.state.entity_id();let sidebar=shell.sidebar_pane.entity_id();let composer=shell.composer.entity_id();
             // Exercise the production composer event subscription, not a root replacement.
-            shell.composer.update(cx,|_,cx|cx.emit(ComposerEvent::CloudAdmitted {
+            shell.composer.update(cx,|c,cx|cx.emit(ComposerEvent::CloudAdmitted {key:c.current_key.clone(),
                 workspace:json!({"workspaceId":"task","initialSessionId":"session","commandDeliveryMode":"server-admitted-v2","commandAdmissionVersion":2}),
                 account:"owner".into(),organization:None,
                 launch:json!({"firstMessage":"One admitted message","agent":"codex","model":"fixture"}),
