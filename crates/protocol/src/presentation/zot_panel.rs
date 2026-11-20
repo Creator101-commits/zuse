@@ -135,10 +135,20 @@ impl ZotPanelTabs {
         &self.active
     }
 
-    /// The section that shows its label: the active one, or the one a
-    /// closable tab was opened over.
+    /// The section last shown: the active one, or the one a closable tab
+    /// was opened over. Closing tabs falls back to it.
     pub fn section(&self) -> ZotTab {
         self.section
+    }
+
+    /// The section button that shows its label: only the active section.
+    /// With an issue, document, pull request or History tab active, every
+    /// section is a plain icon.
+    pub fn expanded_section(&self) -> Option<ZotTab> {
+        match self.active {
+            ZotPage::Section(tab) => Some(tab),
+            _ => None,
+        }
     }
 
     pub fn open_tabs(&self) -> &[ZotPage] {
@@ -271,6 +281,27 @@ mod tests {
         // The section it was opened from keeps its label.
         assert_eq!(tabs.section(), ZotTab::Issues);
         assert!(!tabs.show(issue("a")));
+    }
+
+    #[test]
+    fn only_the_active_section_is_expanded() {
+        let mut tabs = ZotPanelTabs::default();
+        assert_eq!(tabs.expanded_section(), Some(ZotTab::Overview));
+        tabs.select(ZotTab::Issues);
+        assert_eq!(tabs.expanded_section(), Some(ZotTab::Issues));
+        // An issue or file tab collapses every section to an icon.
+        tabs.show(issue("a"));
+        assert_eq!(tabs.expanded_section(), None);
+        tabs.show(ZotPage::File("NOTES.md".into()));
+        assert_eq!(tabs.expanded_section(), None);
+        tabs.show(ZotPage::History);
+        assert_eq!(tabs.expanded_section(), None);
+        // The section it came from is still remembered for closing back.
+        assert_eq!(tabs.section(), ZotTab::Issues);
+        tabs.close(&ZotPage::History);
+        tabs.close(&ZotPage::File("NOTES.md".into()));
+        tabs.close(&issue("a"));
+        assert_eq!(tabs.expanded_section(), Some(ZotTab::Issues));
     }
 
     #[test]

@@ -16,6 +16,8 @@ pub(super) struct ZotUi {
     tabs_zot: Option<String>,
     /// The strip's `…` menu.
     overflow: popover::Popup<()>,
+    /// Scroll of the open tabs, so a newly shown tab is brought into view.
+    open_scroll: gpui::ScrollHandle,
     /// Parsed Drive documents by path, with the version they were parsed at.
     documents: std::collections::HashMap<String, (u32, std::sync::Arc<crate::markdown::BlockTree>)>,
     pub(super) issues: Option<Entity<zuse_viewport::zot_issues::IssuePanel>>,
@@ -194,12 +196,24 @@ fn section_icon(tab: ZotTab) -> &'static str {
 /// Side of a collapsed section button.
 const SECTION_BUTTON: f32 = 28.0;
 
+/// Gap between section buttons.
+const SECTION_GAP: f32 = 2.0;
+
 /// Width of the expanded section button, sized for the longest visible
 /// label so the group keeps one width whichever section is open.
 fn section_width(visible: &[ZotTab]) -> f32 {
     let label = visible.iter().map(|t| t.label_width()).fold(0.0, f32::max);
     // Padding, the 13px icon and the gap before the label.
     10.0 + 13.0 + 6.0 + label + 10.0
+}
+
+/// The section group's fixed width: room for one expanded button and the
+/// rest as icons. With an issue or file tab active every button is an icon
+/// and the spare room stays at the group's end, so the tabs after it never
+/// move. Every part is sized in the same rem units, so this sum matches.
+fn section_group_width(visible: &[ZotTab]) -> f32 {
+    let icons = visible.len().saturating_sub(1) as f32;
+    section_width(visible) + icons * (SECTION_BUTTON + SECTION_GAP)
 }
 
 /// The newest version of `path`; history listings carry several.
@@ -858,6 +872,7 @@ impl Shell {
         let history = self.zot_history_view();
         self.zot_ui.tabs.show(page);
         self.zot_page_changed(history);
+        self.reveal_active_zot_tab();
         cx.notify();
     }
 
@@ -866,7 +881,18 @@ impl Shell {
         let history = self.zot_history_view();
         if self.zot_ui.tabs.close(page) {
             self.zot_page_changed(history);
+            self.reveal_active_zot_tab();
             cx.notify();
+        }
+    }
+
+    /// Bring the active tab into view; with a section active, return the
+    /// open tabs to their start so a shrunk strip isn't left scrolled.
+    fn reveal_active_zot_tab(&self) {
+        let tabs = &self.zot_ui.tabs;
+        let ix = tabs.open_tabs().iter().position(|p| tabs.is_active(p));
+        if !tabs.open_tabs().is_empty() {
+            self.zot_ui.open_scroll.scroll_to_item(ix.unwrap_or(0));
         }
     }
 
@@ -897,17 +923,20 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tabs = &self.zot_ui.tabs;
-        let on_section = matches!(tabs.active(), ZotPage::Section(_)) && !editing;
+        let expanded_section = tabs.expanded_section().filter(|_| !editing);
         let expanded_width = crate::typography::ui_rems(section_width(visible));
-        let mut sections = div().flex().flex_none().items_center().gap(px(2.0));
+        let mut sections = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(crate::typography::ui_rems(SECTION_GAP))
+            .w(crate::typography::ui_rems(section_group_width(visible)));
         for &tab in visible {
             let label = tab.label();
-            let expanded = tab == tabs.section();
-            let active = expanded && on_section;
+            let expanded = Some(tab) == expanded_section;
+            let active = expanded;
             let color = if active {
                 super::tabs::active_tab_text_color(theme)
-            } else if expanded {
-                theme.text
             } else {
                 theme.text_muted
             };
@@ -941,7 +970,7 @@ impl Shell {
                     d.w(expanded_width)
                         .child(div().whitespace_nowrap().child(label))
                 } else {
-                    d.w(px(SECTION_BUTTON)).tip(label)
+                    d.w(crate::typography::ui_rems(SECTION_BUTTON)).tip(label)
                 }
             })
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -957,7 +986,8 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(2.0))
-            .overflow_x_scroll();
+            .overflow_x_scroll()
+            .track_scroll(&self.zot_ui.open_scroll);
         for page in tabs.open_tabs() {
             open = open.child(self.zot_page_tab(
                 zot,
@@ -2426,8 +2456,11 @@ mod tests {
         for tab in ZOT_SECTIONS {
             assert!(width >= 39.0 + tab.label_width());
         }
-        // One width for the group whichever section is open.
-        assert_eq!(section_width(&ZOT_SECTIONS), width);
+        // The group holds one expanded button and the rest as icons, so it
+        // keeps its width whether a section or an issue tab is active.
+        let group = section_group_width(&ZOT_SECTIONS);
+        assert_eq!(group, width + 3.0 * (SECTION_BUTTON + SECTION_GAP));
+        assert!(group > 4.0 * SECTION_BUTTON + 3.0 * SECTION_GAP);
     }
 
     #[test]
