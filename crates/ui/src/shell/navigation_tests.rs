@@ -713,6 +713,12 @@ fn the_right_pane_toggle_closes_the_zot_panel(cx: &mut TestAppContext) {
         shell.state.update(cx, |state, _| state.zots = vec![zot]);
         assert!(shell.selected_zot(cx).is_some());
         assert!(!shell.zot_ui.panel_hidden);
+        // The setup's subagent tabs stand in for the panel: the first toggle
+        // closes them back to it.
+        assert!(!shell.zot_panel_on_right(cx));
+        shell.toggle_right_pane(cx);
+        assert!(shell.zot_panel_on_right(cx));
+        assert!(!shell.zot_ui.panel_hidden);
         shell.toggle_right_pane(cx);
         assert!(shell.zot_ui.panel_hidden);
         shell.toggle_right_pane(cx);
@@ -731,5 +737,116 @@ fn pending_delete_dialog_can_be_dismissed_without_releasing_submission_guard(
         assert!(shell.capture_escape_surface(cx));
         assert!(shell.delete_confirm.is_none());
         assert!(shell.deleting_chat);
+    });
+}
+
+fn coordinate_zot_from(shell: &mut Shell, chat: &str, cx: &mut Context<Shell>) {
+    let zot = serde_json::from_value(serde_json::json!({
+        "id": "zot", "revision": 1, "status": "active",
+        "coordinatorChatId": chat, "previousCoordinatorChats": [],
+        "workers": [], "decisions": [],
+        "config": {
+            "name": "Captain", "purpose": "", "homeDeviceId": "d",
+            "repositories": [], "workerDeviceId": "d",
+            "coordinatorModel": { "harness": "codex", "model": null },
+            "maxConcurrentWorkers": 4, "maxFollowups": 3
+        }
+    }))
+    .unwrap();
+    shell.state.update(cx, |state, _| state.zots = vec![zot]);
+}
+
+fn close_surface(shell: &Entity<Shell>, cx: &mut VisualTestContext, surface: RightSurface) {
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.close_right_surface(surface, window, cx)
+        })
+    });
+}
+
+#[gpui::test]
+fn a_subagent_chip_opens_focuses_and_closes_its_right_pane_tab(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    // A closed pane opens on the chip, and the doc already open is focused,
+    // not duplicated.
+    shell.update(cx, |shell, cx| {
+        shell.set_surfaces_open(false, cx);
+        assert!(!shell.right_pane_open(cx));
+        shell.add_subagent_surface("parent".into(), "first".into(), "first".into(), false, cx);
+        assert!(shell.right_pane_shown(cx));
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
+        assert_eq!(shell.right_tabs["parent"].len(), 2);
+        assert_eq!(shell.subagent_tabs.len(), 2);
+    });
+    close_surface(&shell, cx, RightSurface::Subagent(1));
+    shell.read_with(cx, |shell, cx| {
+        assert!(!shell.subagent_tabs.contains_key(&1));
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(2));
+        assert!(shell.right_pane_open(cx));
+    });
+    close_surface(&shell, cx, RightSurface::Subagent(2));
+    shell.read_with(cx, |shell, cx| {
+        assert!(shell.subagent_tabs.is_empty());
+        assert!(!shell.right_pane_open(cx));
+    });
+}
+
+#[gpui::test]
+fn a_subagent_chip_in_a_zapper_chat_shows_in_the_right_side_pane(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    shell.update(cx, |shell, cx| shell.open_chat("other".into(), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear());
+    shell.update(cx, |shell, cx| {
+        assert_eq!(shell.active_chat, "other");
+        coordinate_zot_from(shell, "other", cx);
+        assert!(shell.zot_panel_on_right(cx));
+        assert!(!shell.titlebar_trailing_layout(false, cx).right_pane_visible);
+
+        shell.add_subagent_surface("other".into(), "zsub".into(), "Research".into(), false, cx);
+        // The pane under the titlebar's surface strip is the surface host,
+        // so the tab the strip lists is the one on screen.
+        assert!(!shell.zot_panel_on_right(cx));
+        assert!(shell.titlebar_trailing_layout(false, cx).right_pane_visible);
+        assert_eq!(shell.right_tabs["other"], vec![RightSurface::Subagent(3)]);
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(3));
+
+        // Reopening focuses it.
+        shell.add_subagent_surface("other".into(), "zsub".into(), "Research".into(), false, cx);
+        assert_eq!(shell.right_tabs["other"].len(), 1);
+        assert_eq!(shell.subagent_tabs.len(), 3);
+
+        // The panel toggle goes back to the Zapper panel, keeping the tab.
+        shell.toggle_right_pane(cx);
+        assert!(shell.zot_panel_on_right(cx));
+        assert!(!shell.zot_ui.panel_hidden);
+        assert!(shell.subagent_tabs.contains_key(&3));
+        shell.add_subagent_surface("other".into(), "zsub".into(), "Research".into(), false, cx);
+        assert!(!shell.zot_panel_on_right(cx));
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(3));
+    });
+    cx.update(|window, cx| window.draw(cx).clear());
+    close_surface(&shell, cx, RightSurface::Subagent(3));
+    shell.read_with(cx, |shell, cx| {
+        assert!(!shell.subagent_tabs.contains_key(&3));
+        assert!(shell.zot_panel_on_right(cx));
+        assert!(!shell.titlebar_trailing_layout(false, cx).right_pane_visible);
+    });
+}
+
+#[gpui::test]
+fn a_subagent_tab_open_in_another_chat_moves_into_this_chats_strip(cx: &mut TestAppContext) {
+    let (shell, cx) = setup(cx);
+    shell.update(cx, |shell, cx| shell.open_chat("other".into(), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear());
+    shell.update(cx, |shell, cx| {
+        assert_eq!(shell.active_chat, "other");
+        shell.add_subagent_surface("other".into(), "first".into(), "first".into(), false, cx);
+        assert_eq!(shell.subagent_tabs.len(), 2);
+        assert_eq!(shell.right_tabs["other"], vec![RightSurface::Subagent(1)]);
+        assert!(!shell.right_tabs["parent"].contains(&RightSurface::Subagent(1)));
+        assert_eq!(shell.resolved_right_active(cx), RightSurface::Subagent(1));
+        assert!(shell.right_pane_shown(cx));
     });
 }
