@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use zuse_protocol::presentation::zot_mascots;
+use zuse_protocol::presentation::zot_mascots::{self, Mood};
 use zuse_protocol::zots::*;
 use zuse_ui::*;
 use zuse_viewport::zapper_avatar::{
@@ -281,13 +281,51 @@ impl Render for Board {
                     .child(person_avatar("Sam", 24.))
                     .child(unassigned_avatar(16.)),
             );
+        // Every mood on one mascot, at header and sidebar size.
+        let mut moods = div().flex().gap(px(22.)).items_end();
+        for (mood, name) in [
+            (Mood::Resting, "Resting"),
+            (Mood::Working, "Working"),
+            (Mood::Delegating, "Threads working"),
+            (Mood::NeedsYou, "Needs you"),
+            (Mood::Awake, "Awake"),
+        ] {
+            let face = ZapperFace::mascot(ZotAvatar {
+                mascot: "bolt".into(),
+                color: "violet".into(),
+            })
+            .with_mood(mood);
+            moods = moods.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_end()
+                            .gap(px(6.))
+                            .child(zapper_face(&face, 64.))
+                            .child(zapper_face(&face, 16.)),
+                    )
+                    .child(label(name)),
+            );
+        }
         let faces = div()
             .flex()
-            .gap(px(28.))
-            .items_start()
-            .child(faces)
-            .child(sidebar)
-            .child(headers);
+            .flex_col()
+            .gap(px(18.))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(28.))
+                    .items_start()
+                    .child(faces)
+                    .child(sidebar)
+                    .child(headers),
+            )
+            .child(moods);
         let panel = |child: Entity<IssuePanel>| {
             div()
                 .w(px(520.))
@@ -405,6 +443,7 @@ fn main() -> anyhow::Result<()> {
                                     color: "coral".into(),
                                 },
                                 image: Some(sample_photo().into()),
+                                mood: Default::default(),
                             },
                             issues,
                             overview,
@@ -422,6 +461,16 @@ fn main() -> anyhow::Result<()> {
                     // so frames land wherever the shared clock is.
                     if std::env::var_os("ZAPPER_FRAMES").is_some() {
                         for frame in 0..24 {
+                            // A pointer circling the mascot strip, so the
+                            // clip shows heads and eyes following it.
+                            let turn = frame as f32 / 24. * std::f32::consts::TAU;
+                            let at = gpui::point(
+                                px(520. + 480. * turn.cos()),
+                                px(110. + 160. * turn.sin()),
+                            );
+                            cx.update(|cx| {
+                                zuse_viewport::zapper_avatar::fixture_point_at(Some(at), cx)
+                            });
                             capture(
                                 window.into(),
                                 cx,

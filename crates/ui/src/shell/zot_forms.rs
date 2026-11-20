@@ -935,6 +935,7 @@ impl Shell {
         let face = ZapperFace {
             avatar: avatar.clone(),
             image: form.image.clone().map(SharedString::from),
+            mood: Default::default(),
         };
         let name = form.inputs[0].clone();
         let purpose = form.inputs[1].clone();

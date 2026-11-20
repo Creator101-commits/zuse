@@ -1,20 +1,20 @@
 //! Profile pictures for Zappers and the people working with them.
 //!
-//! A Zapper is either the user's own picture or one of the retro pixel robots
-//! in [`zot_mascots`], drawn on a transparent ground as runs of flat quads so
-//! it stays crisp from a 14px sidebar row to the 64px settings preview.
-//! Robots idle (a blink, a sideways glance, an antenna flash, a one-pixel
-//! settle at larger sizes) on a coarse shared clock that only
-//! re-renders the views painting them, never every frame, and holds still
-//! under reduced motion. People get a quiet monogram disc; an unassigned slot
-//! is a dashed ring.
+//! A Zapper is either the user's own picture or one of the soft pixel
+//! mascots in [`zot_mascots`], drawn on a transparent ground as runs of flat
+//! quads snapped to device pixels. Mascots turn their heads toward the
+//! pointer, sway, blink and glance around. A shared sampler re-poses every
+//! live mascot a few times a second and re-renders a view only when one of
+//! its mascots' pixels actually changed, so a still screen costs no paints.
+//! Under reduced motion mascots face forward and hold still. People get a
+//! quiet monogram disc; an unassigned slot is a dashed ring.
 use base64::Engine as _;
 use gpui::{prelude::*, *};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use zuse_protocol::presentation::zot_mascots::{self, Frame, SPRITE};
+use zuse_protocol::presentation::zot_mascots::{self, Cell, Mascot, Mood, Pose};
 use zuse_protocol::zots::{AVATAR_IMAGE_MAX_LEN, Zot, ZotAvatar, avatar_image_ok};
 
 /// Everything needed to draw one Zapper: its mascot, which is also the
@@ -23,6 +23,8 @@ use zuse_protocol::zots::{AVATAR_IMAGE_MAX_LEN, Zot, ZotAvatar, avatar_image_ok}
 pub struct ZapperFace {
     pub avatar: ZotAvatar,
     pub image: Option<SharedString>,
+    /// What the Zapper is doing, shown by its mascot.
+    pub mood: Mood,
 }
 
 impl ZapperFace {
@@ -30,6 +32,7 @@ impl ZapperFace {
         Self {
             avatar,
             image: None,
+            mood: Mood::Awake,
         }
     }
 
@@ -41,7 +44,12 @@ impl ZapperFace {
                 .clone()
                 .unwrap_or_else(|| zot_mascots::default_avatar(&zot.id)),
             image: zot.config.avatar_image.clone().map(SharedString::from),
+            mood: Mood::Awake,
         }
+    }
+
+    pub fn with_mood(self, mood: Mood) -> Self {
+        Self { mood, ..self }
     }
 }
 
@@ -51,7 +59,7 @@ pub fn zapper_avatar(avatar: &ZotAvatar, size: f32) -> Div {
 }
 
 /// A Zapper's picture, `size` logical pixels across: its own image when it
-/// has a readable one, otherwise its robot.
+/// has a readable one, otherwise its mascot.
 pub fn zapper_face(face: &ZapperFace, size: f32) -> Div {
     let radius = px(size * 0.2);
     if let Some(image) = face.image.as_deref().and_then(decoded) {
@@ -63,31 +71,20 @@ pub fn zapper_face(face: &ZapperFace, size: f32) -> Div {
         );
     }
     let (mascot, color) = zot_mascots::resolve(&face.avatar);
-    let palette = zot_mascots::palette(color);
-    let id = mascot.id;
-    // A one-pixel settle is too jumpy at sidebar size.
-    let squash = size >= 24.;
+    let body = color.body;
+    let mood = face.mood;
     div().size(px(size)).flex_none().child(
         canvas(
             |_, _, _| {},
             move |bounds, _, window, cx| {
-                let frame = if cx.reduce_motion() {
-                    Frame::default()
+                let grid = zot_mascots::grid_for(size);
+                let pose = if cx.reduce_motion() {
+                    zot_mascots::still_pose(mood)
                 } else {
-                    let ms = clock_ms(cx);
-                    let next = zot_mascots::next_change(id, ms, squash);
-                    wake(window.current_view(), next, cx);
-                    let frame = zot_mascots::frame_at(id, ms);
-                    Frame {
-                        squash: squash && frame.squash,
-                        ..frame
-                    }
+                    live_pose(mascot, mood, size, bounds, window, cx)
                 };
-                paint_robot(
-                    &zot_mascots::pixels(mascot, &palette, frame),
-                    bounds,
-                    window,
-                );
+                let cells = zot_mascots::raster(mascot, grid, pose);
+                paint_cells(&cells, grid, body, bounds, window);
             },
         )
         .size(px(size)),
@@ -116,6 +113,7 @@ pub fn known_face(zot_id: &str, avatar: &ZotAvatar) -> ZapperFace {
     ZapperFace {
         avatar: avatar.clone(),
         image: KNOWN.with_borrow(|known| known.get(zot_id).cloned()),
+        mood: Mood::Awake,
     }
 }
 
@@ -236,110 +234,234 @@ fn decode_url(url: &str) -> Option<Image> {
     Some(Image::from_bytes(format, bytes))
 }
 
-/// The idle clock: one shared epoch, and one timer that wakes only the views
-/// whose robots change pose next. Views drop off when they stop painting a
-/// robot, so a hidden sidebar costs nothing.
-struct AvatarClock {
-    epoch: Instant,
-    wakes: HashMap<EntityId, u64>,
-    timer: Option<u64>,
-    generation: u64,
+/// How far the pointer must be, in logical pixels, for a full turn.
+const LOOK_REACH: f32 = 360.;
+/// How often live mascots are re-posed.
+const SAMPLE: Duration = Duration::from_millis(50);
+/// A view that was asked to repaint and didn't is no longer showing the
+/// mascot; forget it after this long.
+const GONE_AFTER: Duration = Duration::from_millis(400);
+
+/// One mascot on screen, keyed by its view and where it sits.
+struct Live {
+    view: EntityId,
+    window: AnyWindowHandle,
+    centre: Point<Pixels>,
+    mascot: &'static Mascot,
+    mood: Mood,
+    grid: usize,
+    /// Smoothed look targets: the eyes lead, the head follows.
+    eyes: (f32, f32),
+    head: (f32, f32),
+    sampled: Instant,
+    drawn: u64,
+    asked: Option<Instant>,
 }
 
-impl Global for AvatarClock {}
-
-impl Default for AvatarClock {
-    fn default() -> Self {
-        Self {
-            epoch: Instant::now(),
-            wakes: HashMap::new(),
-            timer: None,
-            generation: 0,
-        }
-    }
+#[derive(Default)]
+struct Motion {
+    epoch: Option<Instant>,
+    live: HashMap<(EntityId, u64), Live>,
+    running: bool,
+    /// A stand-in pointer for visual fixtures, in window coordinates.
+    pointer: Option<Point<Pixels>>,
 }
 
-fn clock_ms(cx: &mut App) -> u64 {
-    cx.default_global::<AvatarClock>()
+/// Make every mascot look at `at` instead of the real pointer, for fixtures
+/// that record the animation without moving anyone's mouse.
+#[doc(hidden)]
+pub fn fixture_point_at(at: Option<Point<Pixels>>, cx: &mut App) {
+    cx.default_global::<Motion>().pointer = at;
+}
+
+impl Global for Motion {}
+
+fn now_ms(motion: &mut Motion) -> u64 {
+    motion
         .epoch
+        .get_or_insert_with(Instant::now)
         .elapsed()
         .as_millis() as u64
 }
 
-fn wake(view: EntityId, at: u64, cx: &mut App) {
-    let clock = cx.default_global::<AvatarClock>();
-    let due = clock.wakes.entry(view).or_insert(at);
-    *due = (*due).min(at);
-    if clock.timer.is_some_and(|timer| timer <= at) {
-        return;
-    }
-    arm(at, cx);
+fn digest(value: impl std::hash::Hash) -> u64 {
+    use std::hash::{BuildHasher, BuildHasherDefault};
+    BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default().hash_one(value)
 }
 
-fn arm(at: u64, cx: &mut App) {
-    let clock = cx.default_global::<AvatarClock>();
-    clock.timer = Some(at);
-    clock.generation = clock.generation.wrapping_add(1);
-    let generation = clock.generation;
-    let delay = at.saturating_sub(clock.epoch.elapsed().as_millis() as u64);
-    cx.spawn(async move |cx| {
-        cx.background_executor()
-            .timer(Duration::from_millis(delay))
-            .await;
-        cx.update(|cx| fire(generation, cx));
-    })
-    .detach();
+fn pose_of(live: &Live, ms: u64) -> Pose {
+    zot_mascots::idle_pose(live.mascot, live.mood, ms, live.eyes, live.head)
 }
 
-fn fire(generation: u64, cx: &mut App) {
-    let clock = cx.default_global::<AvatarClock>();
-    if clock.generation != generation {
-        return;
-    }
-    clock.timer = None;
-    // Timers can land a hair early; a view due within a few ms goes now.
-    let now = clock.epoch.elapsed().as_millis() as u64 + 4;
-    let mut due = Vec::new();
-    clock.wakes.retain(|view, at| {
-        let ready = *at <= now;
-        if ready {
-            due.push(*view);
-        }
-        !ready
+/// Pose a mascot being painted, registering it with the sampler.
+fn live_pose(
+    mascot: &'static Mascot,
+    mood: Mood,
+    size: f32,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Pose {
+    let view = window.current_view();
+    let centre = bounds.center();
+    let slot = digest((
+        mascot.id,
+        size.to_bits(),
+        f32::from(centre.x).round() as i32,
+        f32::from(centre.y).round() as i32,
+    ));
+    let window_handle = window.window_handle();
+    let motion = cx.default_global::<Motion>();
+    let ms = now_ms(motion);
+    let live = motion.live.entry((view, slot)).or_insert_with(|| Live {
+        view,
+        window: window_handle,
+        centre,
+        mascot,
+        mood,
+        grid: zot_mascots::grid_for(size),
+        eyes: (0., 0.),
+        head: (0., 0.),
+        sampled: Instant::now(),
+        drawn: 0,
+        asked: None,
     });
-    let next = clock.wakes.values().min().copied();
-    for view in due {
+    live.asked = None;
+    live.mood = mood;
+    let pose = pose_of(live, ms);
+    live.drawn = digest(zot_mascots::raster(mascot, live.grid, pose));
+    if !motion.running {
+        motion.running = true;
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(SAMPLE).await;
+                if !cx.update(sample) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+    pose
+}
+
+/// Re-pose every live mascot; ask a view to repaint only when one of its
+/// mascots would draw differently. Returns whether to keep sampling.
+fn sample(cx: &mut App) -> bool {
+    if cx.reduce_motion() {
+        let motion = cx.default_global::<Motion>();
+        motion.live.clear();
+        motion.running = false;
+        return false;
+    }
+    // Where the pointer is in each window holding a mascot.
+    let windows: Vec<AnyWindowHandle> = {
+        let motion = cx.default_global::<Motion>();
+        let mut windows: Vec<_> = motion.live.values().map(|l| l.window).collect();
+        windows.dedup();
+        windows
+    };
+    let stand_in = cx.default_global::<Motion>().pointer;
+    let mut pointers = HashMap::new();
+    for handle in windows {
+        if let Some(at) = stand_in {
+            pointers.insert(handle.window_id(), Some(Some(at)));
+            continue;
+        }
+        let pointer = handle
+            .update(cx, |_, window, _| {
+                window.is_window_active().then(|| window.mouse_position())
+            })
+            .ok();
+        pointers.insert(handle.window_id(), pointer);
+    }
+    let motion = cx.default_global::<Motion>();
+    let ms = now_ms(motion);
+    let now = Instant::now();
+    let mut repaint = Vec::new();
+    motion.live.retain(|_, live| {
+        let Some(pointer) = pointers.get(&live.window.window_id()).copied().flatten() else {
+            // The window closed.
+            return false;
+        };
+        if live.asked.is_some_and(|at| now - at > GONE_AFTER) {
+            return false;
+        }
+        let target = match pointer {
+            Some(at) => (
+                (f32::from(at.x - live.centre.x) / LOOK_REACH).clamp(-1., 1.),
+                (f32::from(at.y - live.centre.y) / LOOK_REACH).clamp(-1., 1.),
+            ),
+            // An inactive window's mascots drift back to facing forward.
+            None => (0., 0.),
+        };
+        let dt = (now - live.sampled).as_secs_f32().min(0.064) * 1000.;
+        live.sampled = now;
+        let ease = |from: (f32, f32), ms: f32| {
+            let k = 1. - (-dt / ms).exp();
+            (
+                from.0 + (target.0 - from.0) * k,
+                from.1 + (target.1 - from.1) * k,
+            )
+        };
+        live.eyes = ease(live.eyes, zot_mascots::EYES_FOLLOW_MS);
+        live.head = ease(live.head, zot_mascots::HEAD_FOLLOW_MS);
+        let drawn = digest(zot_mascots::raster(
+            live.mascot,
+            live.grid,
+            pose_of(live, ms),
+        ));
+        if drawn != live.drawn && live.asked.is_none() {
+            live.asked = Some(now);
+            repaint.push(live.view);
+        }
+        true
+    });
+    let keep = !motion.live.is_empty();
+    motion.running = keep;
+    repaint.sort_unstable();
+    repaint.dedup();
+    for view in repaint {
         cx.notify(view);
     }
-    if let Some(next) = next {
-        arm(next, cx);
-    }
+    keep
 }
 
-fn paint_robot(pixels: &zot_mascots::Pixels, bounds: Bounds<Pixels>, window: &mut Window) {
+fn paint_cells(
+    cells: &[Option<Cell>],
+    grid: usize,
+    body: u32,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
     let side = f32::from(bounds.size.width.min(bounds.size.height));
-    let cell = side / SPRITE as f32;
+    let scale = window.scale_factor();
     let origin = bounds.origin;
-    // Same-coloured neighbours in a row become one quad: a robot is about
-    // sixty quads rather than two hundred.
-    for (y, row) in pixels.iter().enumerate() {
+    // Cell edges land on whole device pixels, so every pixel stays sharp.
+    let edge = |base: Pixels, i: usize| -> f32 {
+        ((f32::from(base) + side * i as f32 / grid as f32) * scale).round() / scale
+    };
+    for y in 0..grid {
+        let (top, bottom) = (edge(origin.y, y), edge(origin.y, y + 1));
         let mut x = 0;
-        while x < SPRITE {
-            let Some(color) = row[x] else {
+        while x < grid {
+            let Some(cell) = cells[y * grid + x] else {
                 x += 1;
                 continue;
             };
             let start = x;
-            while x < SPRITE && row[x] == Some(color) {
+            while x < grid && cells[y * grid + x] == Some(cell) {
                 x += 1;
             }
+            let (left, right) = (edge(origin.x, start), edge(origin.x, x));
+            let color = match cell {
+                Cell::Body => body,
+                Cell::Eye => zot_mascots::EYE,
+            };
             window.paint_quad(fill(
                 Bounds::new(
-                    point(
-                        origin.x + px(start as f32 * cell),
-                        origin.y + px(y as f32 * cell),
-                    ),
-                    size(px((x - start) as f32 * cell), px(cell)),
+                    point(px(left), px(top)),
+                    size(px(right - left), px(bottom - top)),
                 ),
                 rgb(color),
             ));

@@ -355,7 +355,7 @@ impl Shell {
                     .when(active, |d| d.bg(theme.bg_selected))
                     .when(!active && menu_open, |d| d.bg(theme.element_hover))
                     .when(!active, |d| d.hover(|d| d.bg(theme.element_hover)))
-                    .child(zot_mascot(&zot_avatar(&zot), 16.0))
+                    .child(zot_mascot(&self.zot_face(&zot, cx), 16.0))
                     .child(
                         div()
                             .flex_1()
@@ -1299,7 +1299,7 @@ impl Shell {
             .flex()
             .items_center()
             .gap(px(12.0))
-            .child(zot_mascot(&zot_avatar(zot), 40.0))
+            .child(zot_mascot(&self.zot_face(zot, cx), 40.0))
             .child(
                 div()
                     .flex_1()
