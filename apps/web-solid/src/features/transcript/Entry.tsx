@@ -70,7 +70,7 @@ function UserEntry(props: { entry: SessionMessageEntry; ctx: EntryContext }) {
         <div class="t-user-row">
           <div class="t-bubble">
             <div id={bodyId()} class="t-bubble-text" data-collapsed={collapsible() && !expanded() ? "true" : undefined}>
-              {parsed().text}
+              <Markdown text={parsed().text} live={false} />
             </div>
             <Show when={collapsible()}>
               <button type="button" class="t-bubble-toggle" aria-expanded={expanded()} aria-controls={bodyId()} onClick={() => toggleOpen(foldKey())}>
