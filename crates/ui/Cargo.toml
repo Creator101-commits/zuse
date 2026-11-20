@@ -41,6 +41,10 @@ name = "zapper-panel-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "zapper-queue-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "zapper-fixture"
 required-features = ["browser-fixture"]
 

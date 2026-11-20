@@ -277,7 +277,8 @@ impl Zots {
             CREATE TABLE IF NOT EXISTS zot_binding_versions(chat TEXT NOT NULL, home TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(chat,home,zot));
             CREATE TABLE IF NOT EXISTS zot_releases(chat TEXT NOT NULL, device TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(chat,device,zot));
             CREATE TABLE IF NOT EXISTS zot_worker_holds(zot TEXT NOT NULL, chat TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(zot,chat));
-            CREATE TABLE IF NOT EXISTS zot_targets(zot TEXT NOT NULL, target TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(zot,target));")?;
+            CREATE TABLE IF NOT EXISTS zot_targets(zot TEXT NOT NULL, target TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(zot,target));
+            CREATE TABLE IF NOT EXISTS zot_queue(id TEXT PRIMARY KEY);")?;
         // Holds note the thread's last finished turn once it is seen stopped,
         // so a turn the user starts afterwards releases the hold.
         for column in ["stamped INTEGER NOT NULL DEFAULT 0", "turn TEXT"] {
@@ -400,6 +401,7 @@ impl Zots {
                 [&zot.id],
                 |r| r.get(0),
             )?;
+            mark_queue(&db, &mut zot)?;
             Ok(zot)
         })
         .collect()
@@ -718,7 +720,11 @@ impl Zots {
                     params![worker.chat_id, worker.device_id, zot.id],
                 )
                 .context("worker already belongs to a Zapper")?;
-                zot.workers.push(worker.clone());
+                // The queue position is derived on read, never stored.
+                zot.workers.push(ZotWorker {
+                    queue_position: None,
+                    ..worker.clone()
+                });
                 if matches!(command.action, ZotAction::Delegate { .. }) {
                     ensure!(
                         worker.followups == 0,
@@ -1145,6 +1151,21 @@ impl Zots {
             .query_map([zot], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
+    /// Note that a delegate waits for a free slot. Returns whether it is
+    /// newly queued, so watchers learn about it once.
+    pub fn mark_queued(&self, outbox_id: &str) -> Result<bool> {
+        let added = self
+            .inner
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Zapper storage unavailable"))?
+            .execute("INSERT OR IGNORE INTO zot_queue VALUES(?1)", [outbox_id])?
+            > 0;
+        if added {
+            self.inner.changed.send_modify(|n| *n = n.wrapping_add(1));
+        }
+        Ok(added)
+    }
     pub fn settle(&self, chat: &str) -> Result<()> {
         self.inner
             .db
@@ -1156,6 +1177,31 @@ impl Zots {
             )?;
         Ok(())
     }
+}
+
+/// Delegates beyond `maxConcurrentWorkers` wait in the outbox until a slot
+/// frees, and the supervisor starts them in the order they were delegated.
+/// Their chats don't exist yet, so mark those workers with their place in
+/// that order. Stopped, archived or started delegates leave the queue.
+fn mark_queue(db: &Connection, zot: &mut Zot) -> Result<()> {
+    let mut stmt = db.prepare_cached(
+        "SELECT o.chat FROM zot_outbox o JOIN zot_queue q ON q.id=o.id
+         WHERE o.zot=?1 AND o.phase='pending' ORDER BY o.rowid",
+    )?;
+    let mut queue: Vec<String> = Vec::new();
+    for chat in stmt.query_map([&zot.id], |r| r.get::<_, String>(0))? {
+        let chat = chat?;
+        if !queue.contains(&chat) {
+            queue.push(chat);
+        }
+    }
+    for worker in &mut zot.workers {
+        worker.queue_position = queue
+            .iter()
+            .position(|c| *c == worker.chat_id)
+            .map(|i| i as u32 + 1);
+    }
+    Ok(())
 }
 
 fn valid_id(value: &str) -> Result<()> {
@@ -1498,7 +1544,7 @@ zapper_command makes every change: {{"commandId": a new unique id per command (r
 - commentIssue {{issueId, text, replyTo?}}
 - linkIssuePullRequest {{issueId, url: "https://github.com/owner/repo/pull/N", title}}; unlinkIssuePullRequest {{issueId, url}}
 - linkIssueThread / unlinkIssueThread {{issueId, chatId}}
-- delegate {{issueId, worker: {{chatId: "zot-worker-<commandId>", deviceId, spaceId, objective, followups: 0}}, model: {{harness, model}}, base: a ref such as "origin/main"}}. Pick deviceId, spaceId and model with list_projects, list_harnesses and list_models. Use a cheaper model for mechanical work. Run issues in parallel only when they touch separate parts of the code; otherwise base the next one on the previous branch.
+- delegate {{issueId, worker: {{chatId: "zot-worker-<commandId>", deviceId, spaceId, objective, followups: 0}}, model: {{harness, model}}, base: a ref such as "origin/main"}}. Pick deviceId, spaceId and model with list_projects, list_harnesses and list_models. Use a cheaper model for mechanical work. Run issues in parallel only when they touch separate parts of the code; otherwise base the next one on the previous branch. Beyond maxConcurrentWorkers running threads, a delegated thread is queued: its worker shows queuePosition (1 starts next) and its issue queued, and it starts by itself when a running thread finishes. Don't re-delegate it.
 - messageWorker {{chatId, text, automatic: true}}; stopWorker / archiveWorker / releaseWorker {{chatId}}
 - writeFile {{path, content, expectedVersion}}: the file's current version from zapper_files. Seeded files start at version 1; a new file is 0. Writing INSTRUCTIONS.md also sets the purpose the app shows, from its first paragraph.
 - restoreFile {{path, version, expectedVersion}}: brings an earlier version back as the newest one.
@@ -2099,6 +2145,7 @@ mod tests {
             space_id: "repo".into(),
             objective: "Fix tests".into(),
             followups: 0,
+            queue_position: None,
         }
     }
 
