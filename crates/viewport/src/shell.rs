@@ -785,7 +785,7 @@ impl WorkspaceView {
                                                 .when(!parsed.text.is_empty(), |d|d.child(
                                                     div().max_w(relative(if attribution.is_some(){1.0}else{0.85})).px_4().py_3().rounded_xl()
                                                         .bg(rgb(0x1d1d1d)).text_size(px(if attribution.is_some(){13.}else{14.})).line_height(px(20.))
-                                                        .when_some(attribution.as_ref(),|d,(sender,_)|d.child(crate::zot_issues::sender_header(sender,entry.created_at)))
+                                                        .when_some(attribution.as_ref(),|d,(sender,_)|d.child(if matches!(source,Some(zuse_protocol::slack::MessageSource::Zapper{..})){crate::zot_issues::sender_header_labeled(sender,zuse_protocol::slack::MessageSource::ZAPPER_LABEL)}else{crate::zot_issues::sender_header(sender,entry.created_at)}))
                                                         .child(parsed.text.clone())))
                                                 .when(attribution.is_some(),|d|d.child(crate::zot_issues::sender_footer(parsed.text.clone(),entry.created_at)))
                                                 .children(parsed.attachments.iter().map(|attachment| {

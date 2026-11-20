@@ -950,6 +950,38 @@ impl ChatDocHandle {
         })
     }
 
+    /// Tag a user message with where it came from, once. A message that
+    /// already carries a source (a Slack request) keeps it.
+    pub fn record_message_source(
+        &self,
+        message_id: &str,
+        source: &zuse_protocol::slack::MessageSource,
+    ) -> Result<(), DocError> {
+        let Some(entry) = self
+            .doc
+            .read_entries()?
+            .into_iter()
+            .find(|e| e.id == message_id)
+        else {
+            return Ok(());
+        };
+        if entry
+            .parts
+            .iter()
+            .any(|part| matches!(part, MessagePart::MessageSource { .. }))
+        {
+            return Ok(());
+        }
+        self.doc.append_message_part(
+            message_id,
+            &MessagePart::MessageSource {
+                id: "source".into(),
+                source: source.clone(),
+            },
+        )?;
+        Ok(())
+    }
+
     /// Write a Zuse-authored reply holding one UI block (a slash command's
     /// card), idempotent by id like [`Self::write_user_message`].
     pub fn write_card_reply(
@@ -5336,6 +5368,8 @@ impl DocHost {
         source: Option<&zuse_protocol::slack::MessageSource>,
         sessions: SessionsEngine,
     ) -> Result<(), EngineError> {
+        // Mailboxes relay Slack requests; only the local engine labels Zapper turns.
+        let source = source.filter(|source| source.is_slack());
         let handle = self.open_local(chat_id)?;
         let exclusive = handle.mailbox_admission.lock().await;
         let filesystem = sessions.filesystem_admission().await;

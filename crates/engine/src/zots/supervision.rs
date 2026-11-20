@@ -316,6 +316,10 @@ fn reconcile(
                     docs.request_from_chat_row(&zot.coordinator_chat_id, &notice)
                 {
                     request.plan = false;
+                    // The transcript shows this line instead of every update.
+                    let events: Vec<ZotEvent> =
+                        pending.iter().map(|(_, event)| event.clone()).collect();
+                    zots.record_turn_summary(&id, &turns::turn_summary(&events))?;
                     docs.queue_identified_command(
                         &zot.coordinator_chat_id,
                         SessionCommandPayload::Run {
