@@ -2945,7 +2945,8 @@ impl EngineRpc {
                         return Err(denied());
                     }
                     if operation == zuse_protocol::control::ZOT_COMMAND {
-                        let mut command: zuse_protocol::zots::ZotCommand = parse_params(args)?;
+                        let mut command = zuse_protocol::zots::parse_command(args)
+                            .map_err(RpcError::BadParams)?;
                         if matches!(
                             command.action,
                             zuse_protocol::zots::ZotAction::Create { .. }
@@ -2982,8 +2983,8 @@ impl EngineRpc {
                     if operation != zuse_protocol::control::ZOT_COMMAND {
                         return Err(denied());
                     }
-                    let command: zuse_protocol::zots::ZotCommand =
-                        parse_params(operation_params.clone())?;
+                    let command = zuse_protocol::zots::parse_command(operation_params.clone())
+                        .map_err(RpcError::BadParams)?;
                     if command.zot_id != zot
                         || !matches!(
                             command.action,
