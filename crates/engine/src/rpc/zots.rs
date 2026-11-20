@@ -427,6 +427,23 @@ mod tests {
         )
         .await;
         assert_eq!(files.as_array().unwrap().len(), 4);
+        value(&service,"ZotCommand",serde_json::json!({"commandId":"issue","zotId":"release","action":{"type":"createIssue","issueId":"fix","details":{"title":"Fix it","description":"d","doneCriteria":"c","outOfScope":"","status":"todo","priority":"normal","owner":{"type":"zapper"},"assigned":true,"parent":null,"dueDate":null,"labels":[],"relations":[]}}})).await;
+        // Later coordinator turns carry deltas; the board is a read away.
+        let board = value(
+            &service,
+            zuse_protocol::control::CALL,
+            serde_json::json!({"token":token,"method":"ZotIssue","params":{"zotId":"release"}}),
+        )
+        .await;
+        assert_eq!(board["issues"][0]["code"], "ZAP-1");
+        assert_eq!(board["id"], "release");
+        let by_code = value(
+            &service,
+            zuse_protocol::control::CALL,
+            serde_json::json!({"token":token,"method":"ZotIssue","params":{"zotId":"release","issueId":"ZAP-1"}}),
+        )
+        .await;
+        assert_eq!(by_code["id"], "fix");
         let mut changed = core.zots.get("release").unwrap().config;
         changed.coordinator_model.model = Some("selected-model".into());
         value(&service,"ZotCommand",serde_json::json!({"commandId":"configure","zotId":"release","expectedRevision":null,"action":{"type":"configure","config":changed}})).await;

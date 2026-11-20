@@ -1280,7 +1280,11 @@ mod attribution_tests {
             "cwd": "/tmp", "sandbox": "workspace-write"
         })).unwrap();
         store
-            .prepare_request(&zot.coordinator_chat_id, &mut request)
+            .prepare_request(
+                &zot.coordinator_chat_id,
+                zuse_protocol::HarnessId::ClaudeCode,
+                &mut request,
+            )
             .unwrap();
         let (sender, visible) =
             zuse_protocol::presentation::zot_message::parse(&request.prompt).unwrap();
@@ -1290,8 +1294,13 @@ mod attribution_tests {
             visible,
             "Activity update\nVerification passed; ready for review."
         );
-        assert!(request.prompt.contains("zapper_acknowledge"));
-        assert!(request.prompt.contains("untrusted evidence"));
+        // The standing instructions ride the system prompt, outside the turn.
+        let brief = request.model_options[zuse_providers::claude::SYSTEM_PROMPT_OPTION]
+            .as_str()
+            .unwrap();
+        assert!(brief.contains("zapper_acknowledge"));
+        assert!(brief.contains("untrusted evidence"));
+        assert!(request.prompt.contains("## Board (revision"));
     }
     #[test]
     fn worker_context_keeps_attribution_and_hides_engine_instructions() {
@@ -1307,7 +1316,9 @@ mod attribution_tests {
             .unwrap();
         let zot = store.get("release").unwrap();
         let mut request: zuse_protocol::RunRequest=serde_json::from_value(serde_json::json!({"prompt":zuse_protocol::presentation::zot_message::envelope(&zot,"Implement the issue"),"cwd":"/tmp","sandbox":"workspace-write"})).unwrap();
-        store.prepare_request("worker", &mut request).unwrap();
+        store
+            .prepare_request("worker", zuse_protocol::HarnessId::ClaudeCode, &mut request)
+            .unwrap();
         let (sender, display) =
             zuse_protocol::presentation::zot_message::parse(&request.prompt).unwrap();
         assert_eq!(sender.name, "Release");
@@ -1319,7 +1330,9 @@ mod attribution_tests {
         );
         assert!(!request.prompt.contains("Zot "));
         let once = request.prompt.clone();
-        store.prepare_request("worker", &mut request).unwrap();
+        store
+            .prepare_request("worker", zuse_protocol::HarnessId::ClaudeCode, &mut request)
+            .unwrap();
         assert_eq!(request.prompt, once);
     }
 }

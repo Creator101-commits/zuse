@@ -297,8 +297,19 @@ mod tests {
             serde_json::json!({"prompt": "Ship it", "cwd": "/tmp", "sandbox": "workspace-write"}),
         )
         .unwrap();
-        store.prepare_request(&chat, &mut request).unwrap();
-        assert!(request.prompt.contains("## User message\nShip it"));
-        assert!(request.prompt.contains("## Tools"));
+        store
+            .prepare_request(&chat, zuse_protocol::HarnessId::Codex, &mut request)
+            .unwrap();
+        assert!(request.prompt.ends_with("## User message\nShip it"));
+        assert!(request.prompt.contains("## Hard rules"));
+        // The label stays the user's own text, not the assembled turn.
+        assert_eq!(
+            store
+                .turn_source(&chat, "Ship it", None)
+                .unwrap()
+                .unwrap()
+                .text(),
+            "Ship it"
+        );
     }
 }

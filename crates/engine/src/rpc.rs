@@ -3294,6 +3294,11 @@ impl EngineRpc {
                     .ok_or_else(|| RpcError::BadParams("zotId is required".into()))?;
                 let failure = |e: anyhow::Error| RpcError::Failed(e.to_string());
                 match method {
+                    zuse_protocol::control::ZOT_FILES
+                        if let Some(path) = params.get("path").and_then(|v| v.as_str()) =>
+                    {
+                        RpcReply::value(&zots.file(id, path).map_err(failure)?)
+                    }
                     zuse_protocol::control::ZOT_FILES => RpcReply::value(
                         &zots
                             .files(
@@ -3309,15 +3314,16 @@ impl EngineRpc {
                         RpcReply::value(&zots.events(id).map_err(failure)?)
                     }
                     zuse_protocol::control::ZOT_ISSUE => {
-                        let issue = params
-                            .get("issueId")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| RpcError::BadParams("issueId is required".into()))?;
+                        // Without an issue, the whole board as a coordinator's
+                        // first turn shows it; later turns carry only deltas.
+                        let Some(issue) = params.get("issueId").and_then(|v| v.as_str()) else {
+                            return RpcReply::value(&zots.coordinator_state(id).map_err(failure)?);
+                        };
                         let zot = zots.get(id).map_err(failure)?;
                         RpcReply::value(
                             zot.issues
                                 .iter()
-                                .find(|i| i.id == issue)
+                                .find(|i| i.id == issue || i.code() == issue)
                                 .ok_or_else(|| RpcError::Failed("issue not found".into()))?,
                         )
                     }
