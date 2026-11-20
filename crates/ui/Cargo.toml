@@ -65,6 +65,10 @@ name = "tool-images-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "subagent-pane-fixture"
+required-features = ["appshots-fixture", "browser-fixture"]
+
+[[example]]
 name = "workflow-fixture"
 required-features = ["appshots-fixture", "browser-fixture"]
 

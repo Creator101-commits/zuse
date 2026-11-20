@@ -3820,6 +3820,16 @@ impl Shell {
         self.right_pane_open(cx) && self.horizontal_fit().right
     }
 
+    /// Whether a Zapper coordinator chat's right side shows the Zapper panel.
+    /// Open surface tabs (a subagent chip's transcript) take the side over
+    /// until they close, so the titlebar's surface strip always lists what
+    /// the pane below it shows.
+    fn zot_panel_on_right(&self, cx: &App) -> bool {
+        matches!(self.route, Route::Chat)
+            && self.selected_zot(cx).is_some()
+            && !self.right_pane_shown(cx)
+    }
+
     /// The current chat's terminal flag (per-session, in-memory).
     fn terminal_open(&self, cx: &App) -> bool {
         self.cloud_conversation.is_none() && self.panels.get(&self.panel_key(cx)).terminal_open
@@ -3892,6 +3902,12 @@ impl Shell {
     /// only the explorer's own toggle undocks that portion.
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
         if matches!(self.route, Route::Chat) && self.selected_zot(cx).is_some() {
+            // Surface tabs (a subagent opened from a chip) stand in for the
+            // Zapper panel; the toggle closes them back to it first.
+            if self.right_pane_open(cx) {
+                self.set_surfaces_open(false, cx);
+                return;
+            }
             self.zot_ui.panel_hidden = !self.zot_ui.panel_hidden;
             cx.notify();
             return;
@@ -5118,12 +5134,7 @@ impl Shell {
     ) {
         self.set_surfaces_open(true, cx);
         let doc_id = format!("workflow-agent:{row_id}:{index}");
-        if let Some((&id, _)) = self
-            .subagent_tabs
-            .iter()
-            .find(|(_, tab)| tab.doc_id == doc_id)
-        {
-            self.set_right_active(RightSurface::Subagent(id), cx);
+        if self.focus_open_subagent_tab(&doc_id, cx) {
             return;
         }
         let Some(snapshot) = transcript.read(cx).workflow_agent(&row_id, index) else {
@@ -5189,6 +5200,36 @@ impl Shell {
         self.set_right_active(RightSurface::Subagent(id), cx);
     }
 
+    /// Focus the tab already showing `doc_id`, if any. The tab must sit in
+    /// THIS chat's strip: one left in another chat's strip (the same doc
+    /// reached from a copy or a side chat) moves here, or focusing it would
+    /// select a surface the visible strip doesn't list.
+    fn focus_open_subagent_tab(&mut self, doc_id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self
+            .subagent_tabs
+            .iter()
+            .find_map(|(&id, tab)| (tab.doc_id == doc_id).then_some(id))
+        else {
+            return false;
+        };
+        let surface = RightSurface::Subagent(id);
+        let key = self.panel_key(cx);
+        if !self
+            .right_tabs
+            .get(&key)
+            .is_some_and(|tabs| tabs.contains(&surface))
+        {
+            for (other, tabs) in self.right_tabs.iter_mut() {
+                if *other != key {
+                    tabs.retain(|s| *s != surface);
+                }
+            }
+            self.right_tabs.entry(key).or_default().push(surface);
+        }
+        self.set_right_active(surface, cx);
+        true
+    }
+
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
     /// or open one. `frozen` (subagent done/failed) tries the uploaded
     /// transcript blob first and falls back to the live doc watch; running
@@ -5204,12 +5245,7 @@ impl Shell {
         // The chip lives in the conversation column — the pane it opens into
         // may still be closed.
         self.set_surfaces_open(true, cx);
-        if let Some((&id, _)) = self
-            .subagent_tabs
-            .iter()
-            .find(|(_, tab)| tab.doc_id == doc_id)
-        {
-            self.set_right_active(RightSurface::Subagent(id), cx);
+        if self.focus_open_subagent_tab(&doc_id, cx) {
             return;
         }
         self.subagent_seq += 1;
@@ -16024,8 +16060,8 @@ impl Render for Shell {
                     0.0
                 };
                 // The Zot panel replaces the right pane but takes the same room.
-                let on_zot = on_chat && self.selected_zot(cx).is_some();
-                let right_target_width = if on_zot {
+                let on_zot_panel = on_chat && self.zot_panel_on_right(cx);
+                let right_target_width = if on_zot_panel {
                     if self.zot_ui.panel_hidden {
                         0.0
                     } else {
@@ -16103,7 +16139,7 @@ impl Render for Shell {
                 // never renders it (zuse __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
-                let right_open = on_chat && !on_zot && self.right_pane_shown(cx);
+                let right_open = on_chat && !on_zot_panel && self.right_pane_shown(cx);
                 // Takeover mode derives its width from the viewport, so a
                 // manual drag handle would fight the expanded target.
                 let right_handle = (right_open
@@ -16127,9 +16163,9 @@ impl Render for Shell {
                         .then(|| self.pull_request_pane_handle(cx))
                         .flatten()
                 });
-                let right: AnyElement = if on_zot && self.zot_ui.panel_hidden {
+                let right: AnyElement = if on_zot_panel && self.zot_ui.panel_hidden {
                     Empty.into_any_element()
-                } else if on_zot {
+                } else if on_zot_panel {
                     self.render_zot_inspector(window, cx)
                 } else if on_chat {
                     self.render_right_pane(window, cx)

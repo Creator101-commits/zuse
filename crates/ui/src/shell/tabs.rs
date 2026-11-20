@@ -94,7 +94,7 @@ struct PanelTitlebarWidths {
 
 pub(super) struct TitlebarTrailing {
     fit: HorizontalPanelFit,
-    right_pane_visible: bool,
+    pub(super) right_pane_visible: bool,
     pub(super) takeover: bool,
     row_left: f32,
     row_gap: f32,
@@ -1288,10 +1288,13 @@ impl Shell {
                                 icons::sidebar_glyph(
                                     motion::state_t(
                                         "toggle-changes",
-                                        self.selected_zot(cx)
-                                            .map_or(self.right_pane_open(cx) && fit.right, |_| {
+                                        self.selected_zot(cx).map_or(
+                                            self.right_pane_open(cx) && fit.right,
+                                            |_| {
                                                 !self.zot_ui.panel_hidden
-                                            }),
+                                                    || self.right_pane_open(cx)
+                                            },
+                                        ),
                                         motion::GLYPH_STATE,
                                         self.reduced_motion,
                                     ),

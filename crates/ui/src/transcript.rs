@@ -11744,6 +11744,9 @@ fn chip_diff_stats(tool: &ToolItem) -> Option<(u64, u64)> {
 /// A subagent's row: lifecycle glyph, robot, the task as its title, the
 /// latest output (or status) muted beside it, the model it runs on, and a
 /// chevron on hover when the row opens the subagent's transcript.
+/// A subagent row's inline padding: the hover wash's inset around its content.
+const SUBAGENT_CHIP_PAD_X: f32 = 8.0;
+
 fn subagent_header_row(
     tool: &ToolItem,
     trail: Option<ChipTrail>,
@@ -11813,7 +11816,7 @@ fn subagent_header_row(
         .flex_row()
         .items_center()
         .gap(px(8.0))
-        .px(px(8.0))
+        .px(px(SUBAGENT_CHIP_PAD_X))
         .text_size(px(TOOL_LABEL_SIZE))
         .line_height(px(TOOL_LABEL_LINE_HEIGHT))
         .child(glyph)
@@ -12306,6 +12309,11 @@ fn subagent_chip(
                 .items_center()
                 .overflow_hidden()
                 // A flat content-width line; only hover gives it a wash.
+                // The header row's own 8px pad is the wash's breathing room:
+                // outside the task tree the card hangs that pad into the
+                // gutter, so at rest and on hover the status mark sits flush
+                // with the Thinking and "Ran N commands" rows.
+                .when(tree.is_none(), |card| card.ml(px(-SUBAGENT_CHIP_PAD_X)))
                 .rounded(px(4.0))
                 .cursor_pointer()
                 .hover(|s| s.bg(crate::theme::ink(0.05)))
