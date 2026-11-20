@@ -274,7 +274,19 @@ impl Zots {
             CREATE TABLE IF NOT EXISTS zot_worker_context(chat TEXT PRIMARY KEY, home TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, instructions TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS zot_binding_versions(chat TEXT NOT NULL, home TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(chat,home,zot));
             CREATE TABLE IF NOT EXISTS zot_releases(chat TEXT NOT NULL, device TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(chat,device,zot));
-            CREATE TABLE IF NOT EXISTS zot_worker_holds(zot TEXT NOT NULL, chat TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(zot,chat));")?;
+            CREATE TABLE IF NOT EXISTS zot_worker_holds(zot TEXT NOT NULL, chat TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(zot,chat));
+            CREATE TABLE IF NOT EXISTS zot_targets(zot TEXT NOT NULL, target TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(zot,target));")?;
+        // Holds note the thread's last finished turn once it is seen stopped,
+        // so a turn the user starts afterwards releases the hold.
+        for column in ["stamped INTEGER NOT NULL DEFAULT 0", "turn TEXT"] {
+            if let Err(error) = db.execute(
+                &format!("ALTER TABLE zot_worker_holds ADD COLUMN {column}"),
+                [],
+            ) && !error.to_string().contains("duplicate column")
+            {
+                return Err(error.into());
+            }
+        }
         let token_file = root.join("control-token");
         let token = match std::fs::read_to_string(&token_file) {
             Ok(token) => {
@@ -627,13 +639,8 @@ impl Zots {
             (_, Some(state)) => serde_json::from_str(&state)?,
             (_, None) => bail!("Zapper not found"),
         };
-        if let Some(revision) = command.expected_revision {
-            ensure!(
-                revision == zot.revision,
-                "Zapper revision conflict: expected {revision}, current revision is {}. Re-read the state, then retry with the current revision and a new commandId",
-                zot.revision
-            );
-        }
+        let before = zot.clone();
+        check_revision(&tx, &zot, &command)?;
         issues::apply(&mut zot, &command, &tx, actor, coordinator)?;
         match &command.action {
             ZotAction::CreateIssue { .. }
@@ -739,20 +746,30 @@ impl Zots {
                     .find(|w| w.chat_id == *chat_id)
                     .context("worker not found")?;
                 if *automatic {
-                    let held: bool = tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM zot_worker_holds WHERE zot=?1 AND chat=?2)",
-                        params![zot.id, chat_id],
-                        |r| r.get(0),
-                    )?;
+                    let hold: Option<String> = tx
+                        .query_row(
+                            "SELECT reason FROM zot_worker_holds WHERE zot=?1 AND chat=?2",
+                            params![zot.id, chat_id],
+                            |r| r.get(0),
+                        )
+                        .optional()?;
                     ensure!(
-                        !held,
-                        "worker needs explicit user continuation: the user paused this thread. Do not retry; record a decision asking whether to continue it"
+                        hold.as_deref().map(HoldSource::of) != Some(HoldSource::User),
+                        "worker needs explicit user continuation: the user stopped this thread, so only they can restart it. Don't retry; askUser on its issue (or record a decision) asking whether to continue it. If they continue it in its own chat, this clears once it runs again"
                     );
                     ensure!(
                         worker.followups < zot.config.max_followups,
-                        "automatic follow-up limit reached"
+                        "automatic follow-up limit reached ({} of {}); askUser before sending this thread more work",
+                        worker.followups,
+                        zot.config.max_followups
                     );
                     worker.followups += 1;
+                    // The Zapper may resume a thread that it stopped, or that
+                    // stopped or failed by itself.
+                    tx.execute(
+                        "DELETE FROM zot_worker_holds WHERE zot=?1 AND chat=?2",
+                        params![zot.id, chat_id],
+                    )?;
                 } else {
                     tx.execute(
                         "DELETE FROM zot_worker_holds WHERE zot=?1 AND chat=?2",
@@ -773,8 +790,12 @@ impl Zots {
             }
             ZotAction::StopWorker { chat_id } | ZotAction::ArchiveWorker { chat_id } => {
                 tx.execute(
-                    "INSERT OR REPLACE INTO zot_worker_holds VALUES(?1,?2,'Stopped by user')",
-                    params![zot.id, chat_id],
+                    "INSERT OR REPLACE INTO zot_worker_holds(zot,chat,reason) VALUES(?1,?2,?3)",
+                    params![
+                        zot.id,
+                        chat_id,
+                        if coordinator { HOLD_ZAPPER } else { HOLD_USER }
+                    ],
                 )?;
                 ensure!(
                     zot.workers.iter().any(|w| w.chat_id == *chat_id),
@@ -859,6 +880,7 @@ impl Zots {
                     [&zot.id],
                 )?;
                 tx.execute("DELETE FROM zot_workers WHERE zot=?1", [&zot.id])?;
+                tx.execute("DELETE FROM zot_targets WHERE zot=?1", [&zot.id])?;
                 tx.execute("DELETE FROM zots WHERE id=?1", [&zot.id])?;
             }
         }
@@ -896,6 +918,7 @@ impl Zots {
                 .revision
                 .checked_add(1)
                 .context("Zapper revision exhausted")?;
+            record_changes(&tx, &before, &zot)?;
             tx.execute(
                 "INSERT OR REPLACE INTO zots VALUES(?1,?2)",
                 params![zot.id, serde_json::to_string(&zot)?],
@@ -909,6 +932,67 @@ impl Zots {
         tx.commit()?;
         self.inner.changed.send_modify(|n| *n = n.wrapping_add(1));
         Ok(result)
+    }
+
+    /// Release a held thread that is running again, or that finished a turn
+    /// after it was seen stopped: someone (the user, in its own chat)
+    /// continued it. The hold's interruption and failure reports are
+    /// resolved with it. A hold is first stamped with the thread's last
+    /// finished turn when the thread is seen not working, so a stop that
+    /// hasn't landed yet can't release its own hold. Returns whether the
+    /// hold was released.
+    pub(crate) fn settle_hold(
+        &self,
+        zot: &str,
+        chat: &str,
+        working: bool,
+        last_completed_turn: Option<&str>,
+    ) -> Result<bool> {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Zapper storage unavailable"))?;
+        let tx = db.transaction()?;
+        let hold: Option<(bool, Option<String>)> = tx
+            .query_row(
+                "SELECT stamped,turn FROM zot_worker_holds WHERE zot=?1 AND chat=?2",
+                params![zot, chat],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let released = match hold {
+            None => false,
+            Some((false, _)) => {
+                if !working {
+                    tx.execute(
+                        "UPDATE zot_worker_holds SET stamped=1, turn=?3 WHERE zot=?1 AND chat=?2",
+                        params![zot, chat, last_completed_turn],
+                    )?;
+                }
+                false
+            }
+            Some((true, turn)) => {
+                let resumed = working || turn.as_deref() != last_completed_turn;
+                if resumed {
+                    tx.execute(
+                        "DELETE FROM zot_worker_holds WHERE zot=?1 AND chat=?2",
+                        params![zot, chat],
+                    )?;
+                    tx.execute(
+                        "UPDATE zot_events SET acknowledged=1 WHERE zot=?1 AND worker=?2 AND acknowledged=0 AND kind IN ('interrupted','failed')",
+                        params![zot, chat],
+                    )?;
+                }
+                resumed
+            }
+        };
+        tx.commit()?;
+        drop(db);
+        if released {
+            self.inner.changed.send_modify(|n| *n = n.wrapping_add(1));
+        }
+        Ok(released)
     }
 
     pub fn files(&self, id: &str, history: bool) -> Result<Vec<ZotFile>> {
@@ -1111,6 +1195,136 @@ fn validate_config(config: &ZotConfig, device: &str) -> Result<()> {
     );
     Ok(())
 }
+/// Why a thread is held from automatic follow-ups. Only a pause the user
+/// started needs the user; the Zapper may resume one it caused, or one the
+/// thread caused by stopping or failing on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HoldSource {
+    User,
+    Zapper,
+    Thread,
+}
+pub(crate) const HOLD_USER: &str = "user: Stopped by the user";
+pub(crate) const HOLD_ZAPPER: &str = "zapper: Stopped by the Zapper";
+pub(crate) const HOLD_THREAD_FAILED: &str = "thread: The thread failed";
+pub(crate) const HOLD_THREAD_STOPPED: &str = "thread: The thread stopped before finishing its turn";
+impl HoldSource {
+    /// Holds written before sources were recorded can't say who paused the
+    /// thread, so they keep needing the user.
+    pub(crate) fn of(reason: &str) -> Self {
+        if reason.starts_with("zapper:") {
+            Self::Zapper
+        } else if reason.starts_with("thread:") {
+            Self::Thread
+        } else {
+            Self::User
+        }
+    }
+}
+
+/// `expectedRevision` guards what a command depends on, not the whole Zot:
+/// thread reports and changes to other issues land between a caller's read
+/// and its write all the time. Actions whose order matters stay strict.
+fn check_revision(tx: &rusqlite::Transaction<'_>, zot: &Zot, command: &ZotCommand) -> Result<()> {
+    let Some(expected) = command.expected_revision else {
+        return Ok(());
+    };
+    // Changes are tracked from the first command this engine version saw.
+    tx.execute(
+        "INSERT OR IGNORE INTO zot_targets VALUES(?1,'',?2)",
+        params![zot.id, zot.revision],
+    )?;
+    if expected == zot.revision {
+        return Ok(());
+    }
+    let current = zot.revision;
+    let strict = || {
+        anyhow::anyhow!(
+            "Zapper revision conflict: expected {expected}, current revision is {current}. {} needs the exact current revision. Re-read the state, then retry with expectedRevision {current} and a new commandId",
+            command.action.kind()
+        )
+    };
+    if expected > current {
+        return Err(strict());
+    }
+    let ConflictScope::Targets(targets) = command.action.conflict_scope() else {
+        return Err(strict());
+    };
+    let since: Option<u32> = tx
+        .query_row(
+            "SELECT revision FROM zot_targets WHERE zot=?1 AND target=''",
+            [&zot.id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if since.is_none_or(|since| expected < since) {
+        return Err(strict());
+    }
+    for target in targets {
+        let changed: Option<u32> = tx
+            .query_row(
+                "SELECT revision FROM zot_targets WHERE zot=?1 AND target=?2",
+                params![zot.id, target],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(changed) = changed.filter(|c| *c > expected) {
+            let (kind, id) = target.split_once(':').unwrap_or(("target", &target));
+            let reread = if kind == "issue" {
+                format!("Re-read it with zapper_issue {{issueId: \"{id}\"}}")
+            } else {
+                "Re-read the state".to_owned()
+            };
+            bail!(
+                "Zapper revision conflict: {kind} {id} changed at revision {changed}, after your expectedRevision {expected}. {reread}, then retry with expectedRevision {current} and a new commandId"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Note the revision at which each issue's details and each decision last
+/// changed, for [`check_revision`].
+fn record_changes(tx: &rusqlite::Transaction<'_>, before: &Zot, after: &Zot) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO zot_targets VALUES(?1,'',?2)",
+        params![after.id, before.revision],
+    )?;
+    let mut changed = vec![];
+    for issue in &after.issues {
+        if before
+            .issues
+            .iter()
+            .find(|i| i.id == issue.id)
+            .is_none_or(|old| old.details != issue.details)
+        {
+            changed.push(issue_target(&issue.id));
+        }
+    }
+    for issue in &before.issues {
+        if !after.issues.iter().any(|i| i.id == issue.id) {
+            changed.push(issue_target(&issue.id));
+        }
+    }
+    for decision in &after.decisions {
+        if before
+            .decisions
+            .iter()
+            .find(|d| d.id == decision.id)
+            .is_none_or(|old| old != decision)
+        {
+            changed.push(decision_target(&decision.id));
+        }
+    }
+    for target in changed {
+        tx.execute(
+            "INSERT OR REPLACE INTO zot_targets VALUES(?1,?2,?3)",
+            params![after.id, target, after.revision],
+        )?;
+    }
+    Ok(())
+}
+
 fn write_file(
     tx: &rusqlite::Transaction<'_>,
     zot: &str,
@@ -1288,15 +1502,16 @@ zapper_command makes every change: {{"commandId": a new unique id per command (r
 - restoreFile {{path, version, expectedVersion}}: brings an earlier version back as the newest one.
 - decide {{decision: {{id, workerChatId: chat id or null, question, answer: null}}}}: only for a question that belongs to no issue; prefer askUser.
 Status values: backlog, todo, inProgress, needsYou, blocked, inReview, done, canceled. Priority: urgent, high, normal, low.
+zapper_command returns a compact result (new revision, the changed issue, worker, decision or file, and a summary); add "fullState": true to a command only if you need the whole state back.
 zapper_files {{zotId, history?}} reads your files with versions. zapper_events {{zotId}} lists thread reports and blockers; zapper_acknowledge {{zotId, eventIds}} once handled. Several updates can arrive in one message, each with its event id. zapper_issue {{zotId, issueId}} reads one issue in full.
 For issueChanged events, inspect the issue, do what it needs, then acknowledge. Don't comment just to acknowledge.
 
 ## When a command fails
-- Revision conflict: something changed since you read the state, and the error gives the current revision. Check that the change doesn't affect what you're doing, then retry once with that revision and a new commandId.
+- Revision conflict: what your action depends on (the issue or decision it changes, or the whole Zapper for status and config changes) changed since you read it. Re-read what the error names, then retry once with the revision it gives and a new commandId. Comments, new issues, links, messages and file writes don't conflict on the revision.
 - File version conflict: re-read the file with zapper_files, merge, and write with its current version.
-- "needs explicit user continuation" on messageWorker: the user paused that thread. Don't retry; record a decision asking whether to continue it.
+- "needs explicit user continuation" on messageWorker: the user stopped that thread. Don't retry; askUser on its issue whether to continue it. Threads you stopped, or that stopped or failed by themselves, you can resume with messageWorker.
 - Bad params: compare your action with the shapes above and fix the fields. Don't loop on guesses.
-- A lifecycle refusal ("link the pull request before…", "start a thread with delegate…", "close issues with closeIssue…") names the missing evidence: provide it, don't work around it.
+- A lifecycle refusal ("link the pull request before…", "an issue is inProgress only while a thread works on it…", "close issues with closeIssue…") names the missing evidence: provide it, don't work around it.
 
 ## Your files
 INSTRUCTIONS.md is your purpose and working rules, in your words, and the Purpose section below is its current text. Keep its first sentence your job in plain words; the app shows it as your purpose. When the user changes what they want from you, or you settle on a better way to work with them, rewrite it with writeFile and tell the user in one line what changed. The user sees every version and can restore any, so rewrite it whole rather than appending a log.
@@ -1435,6 +1650,409 @@ mod tests {
                 },
             ))
             .unwrap();
+    }
+    fn at(zot: &str, id: &str, revision: u32, action: ZotAction) -> ZotCommand {
+        ZotCommand {
+            expected_revision: Some(revision),
+            ..command(zot, id, action)
+        }
+    }
+    fn issue_details(title: &str) -> ZotIssueDetails {
+        ZotIssueDetails {
+            title: title.into(),
+            description: "d".into(),
+            assigned: true,
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn revision_checks_only_reject_commands_whose_target_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Zots::open(dir.path(), "local").unwrap();
+        create(&store, "release");
+        for id in ["a", "b"] {
+            store
+                .command(command(
+                    "release",
+                    &format!("create-{id}"),
+                    ZotAction::CreateIssue {
+                        issue_id: id.into(),
+                        details: issue_details(id),
+                    },
+                ))
+                .unwrap();
+        }
+        let read = store.get("release").unwrap().revision;
+        // Unrelated activity moves the revision on.
+        store
+            .command(command(
+                "release",
+                "comment-a",
+                ZotAction::CommentIssue {
+                    issue_id: "a".into(),
+                    text: "progress".into(),
+                    reply_to: None,
+                },
+            ))
+            .unwrap();
+        // A comment changes no details, so editing either issue still works.
+        store
+            .command(at(
+                "release",
+                "edit-b",
+                read,
+                ZotAction::EditIssue {
+                    issue_id: "b".into(),
+                    details: issue_details("b, renamed"),
+                },
+            ))
+            .unwrap();
+        // Editing b again from the same stale read now conflicts, naming b.
+        let err = store
+            .command(at(
+                "release",
+                "edit-b-again",
+                read,
+                ZotAction::EditIssue {
+                    issue_id: "b".into(),
+                    details: issue_details("b, other"),
+                },
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("issue b changed at revision"), "{err}");
+        assert!(err.contains("zapper_issue"), "{err}");
+        // Append-only and self-checking actions commute with everything.
+        for (id, action) in [
+            (
+                "stale-comment",
+                ZotAction::CommentIssue {
+                    issue_id: "b".into(),
+                    text: "note".into(),
+                    reply_to: None,
+                },
+            ),
+            (
+                "stale-create",
+                ZotAction::CreateIssue {
+                    issue_id: "c".into(),
+                    details: issue_details("c"),
+                },
+            ),
+            (
+                "stale-link",
+                ZotAction::LinkIssuePullRequest {
+                    issue_id: "b".into(),
+                    url: "https://github.com/o/r/pull/1".into(),
+                    title: "PR".into(),
+                },
+            ),
+            (
+                "stale-write",
+                ZotAction::WriteFile {
+                    path: "NOTES.md".into(),
+                    content: "notes".into(),
+                    expected_version: 1,
+                },
+            ),
+            (
+                "stale-decide",
+                ZotAction::Decide {
+                    decision: ZotDecision {
+                        id: "ship".into(),
+                        worker_chat_id: None,
+                        question: "Ship?".into(),
+                        answer: None,
+                    },
+                },
+            ),
+        ] {
+            store
+                .command(at("release", id, read, action))
+                .unwrap_or_else(|e| panic!("{id}: {e}"));
+        }
+        // Files keep their own version check.
+        let err = store
+            .command(at(
+                "release",
+                "stale-write-2",
+                read,
+                ZotAction::WriteFile {
+                    path: "NOTES.md".into(),
+                    content: "other".into(),
+                    expected_version: 1,
+                },
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("file version conflict on NOTES.md"), "{err}");
+        // A decision changed since the read conflicts.
+        let err = store
+            .command(at(
+                "release",
+                "stale-decide-2",
+                read,
+                ZotAction::Decide {
+                    decision: ZotDecision {
+                        id: "ship".into(),
+                        worker_chat_id: None,
+                        question: "Ship now?".into(),
+                        answer: None,
+                    },
+                },
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("decision ship changed"), "{err}");
+        // Order-sensitive actions stay strict, and so do future revisions.
+        let current = store.get("release").unwrap().revision;
+        for (id, revision) in [("stale-status", read), ("future-status", current + 1)] {
+            let err = store
+                .command(at(
+                    "release",
+                    id,
+                    revision,
+                    ZotAction::SetStatus {
+                        status: ZotStatus::Paused,
+                    },
+                ))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("needs the exact current revision"), "{err}");
+        }
+        store
+            .command(at(
+                "release",
+                "current-status",
+                current,
+                ZotAction::SetStatus {
+                    status: ZotStatus::Paused,
+                },
+            ))
+            .unwrap();
+    }
+    #[test]
+    fn revisions_from_before_change_tracking_stay_strict() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Zots::open(dir.path(), "local").unwrap();
+        create(&store, "release");
+        store
+            .command(command(
+                "release",
+                "create-a",
+                ZotAction::CreateIssue {
+                    issue_id: "a".into(),
+                    details: issue_details("a"),
+                },
+            ))
+            .unwrap();
+        // As if the Zot predates the targets table.
+        store
+            .inner
+            .db
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM zot_targets", [])
+            .unwrap();
+        let stale = store.get("release").unwrap().revision - 1;
+        let err = store
+            .command(at(
+                "release",
+                "edit-a",
+                stale,
+                ZotAction::EditIssue {
+                    issue_id: "a".into(),
+                    details: issue_details("a2"),
+                },
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("revision conflict"), "{err}");
+    }
+    #[test]
+    fn the_zapper_may_resume_threads_it_or_the_thread_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Zots::open(dir.path(), "local").unwrap();
+        create(&store, "release");
+        store
+            .command(command(
+                "release",
+                "adopt",
+                ZotAction::AdoptWorker { worker: worker() },
+            ))
+            .unwrap();
+        let as_zapper = |id: &str, action: ZotAction| {
+            store.command_as(command("release", id, action), Some("zot-release-0"), true)
+        };
+        let resume = |id: &str| {
+            as_zapper(
+                id,
+                ZotAction::MessageWorker {
+                    chat_id: "worker".into(),
+                    text: "Carry on".into(),
+                    automatic: true,
+                },
+            )
+        };
+        let hold = || -> Option<String> {
+            store
+                .inner
+                .db
+                .lock()
+                .unwrap()
+                .query_row("SELECT reason FROM zot_worker_holds", [], |r| r.get(0))
+                .optional()
+                .unwrap()
+        };
+        as_zapper(
+            "zapper-stop",
+            ZotAction::StopWorker {
+                chat_id: "worker".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(hold().as_deref(), Some(HOLD_ZAPPER));
+        resume("after-zapper-stop").unwrap();
+        assert_eq!(hold(), None);
+        for (n, reason) in [HOLD_THREAD_FAILED, HOLD_THREAD_STOPPED].iter().enumerate() {
+            store
+                .inner
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO zot_worker_holds(zot,chat,reason) VALUES('release','worker',?1)",
+                    [reason],
+                )
+                .unwrap();
+            resume(&format!("after-thread-{n}")).unwrap();
+            assert_eq!(hold(), None);
+        }
+        // The user's own stop, and holds from before sources were recorded,
+        // still need the user.
+        for (id, reason) in [
+            ("user", HOLD_USER),
+            (
+                "legacy",
+                "Worker stopped or failed; user continuation required",
+            ),
+        ] {
+            store
+                .inner
+                .db
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT OR REPLACE INTO zot_worker_holds(zot,chat,reason) VALUES('release','worker',?1)",
+                    [reason],
+                )
+                .unwrap();
+            let err = resume(&format!("after-{id}")).unwrap_err().to_string();
+            assert!(err.contains("only they can restart it"), "{id}: {err}");
+        }
+    }
+    #[test]
+    fn continuing_a_held_thread_in_its_chat_releases_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Zots::open(dir.path(), "local").unwrap();
+        create(&store, "release");
+        store
+            .command(command(
+                "release",
+                "adopt",
+                ZotAction::AdoptWorker { worker: worker() },
+            ))
+            .unwrap();
+        // The user stops the thread from the app while its turn still runs.
+        store
+            .command(command(
+                "release",
+                "user-stop",
+                ZotAction::StopWorker {
+                    chat_id: "worker".into(),
+                },
+            ))
+            .unwrap();
+        store
+            .record_event(&ZotEvent {
+                id: "interrupted-1".into(),
+                zot_id: "release".into(),
+                worker_chat_id: "worker".into(),
+                kind: "interrupted".into(),
+                summary: "Worker was stopped by the user.".into(),
+                acknowledged: false,
+            })
+            .unwrap();
+        let auto = |id: &str| {
+            store.command_as(
+                command(
+                    "release",
+                    id,
+                    ZotAction::MessageWorker {
+                        chat_id: "worker".into(),
+                        text: "Carry on".into(),
+                        automatic: true,
+                    },
+                ),
+                Some("zot-release-0"),
+                true,
+            )
+        };
+        let pending = |store: &Zots| {
+            store
+                .events("release")
+                .unwrap()
+                .iter()
+                .filter(|e| !e.acknowledged && e.kind == "interrupted")
+                .count()
+        };
+        // Still running the stopped turn: the stop hasn't landed, so the
+        // hold stays and isn't stamped.
+        assert!(
+            !store
+                .settle_hold("release", "worker", true, Some("t1"))
+                .unwrap()
+        );
+        // Seen stopped at turn t1.
+        assert!(
+            !store
+                .settle_hold("release", "worker", false, Some("t1"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .settle_hold("release", "worker", false, Some("t1"))
+                .unwrap()
+        );
+        assert!(auto("blocked").is_err());
+        assert_eq!(pending(&store), 1);
+        // The user sends a message in the thread's chat and it runs again.
+        assert!(
+            store
+                .settle_hold("release", "worker", true, Some("t1"))
+                .unwrap()
+        );
+        assert_eq!(pending(&store), 0, "the Needs-you report is resolved");
+        auto("after-user-continued").unwrap();
+        // A turn that started and finished between two looks also counts.
+        store
+            .command(command(
+                "release",
+                "user-stop-2",
+                ZotAction::StopWorker {
+                    chat_id: "worker".into(),
+                },
+            ))
+            .unwrap();
+        store
+            .settle_hold("release", "worker", false, Some("t2"))
+            .unwrap();
+        assert!(
+            store
+                .settle_hold("release", "worker", false, Some("t3"))
+                .unwrap()
+        );
+        auto("after-quick-turn").unwrap();
     }
     pub(super) fn config() -> ZotConfig {
         ZotConfig {
