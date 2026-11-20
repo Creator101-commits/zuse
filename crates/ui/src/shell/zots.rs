@@ -1,7 +1,6 @@
 //! Coordinator chrome; commands use the same engine authority as external clients.
 use super::zot_forms::{Form, Kind, ZotAfter};
 use super::*;
-use zuse_protocol::presentation::zot_mascots;
 use zuse_protocol::presentation::zot_panel::{ZotTab, ZotTabs};
 use zuse_protocol::zots::*;
 
@@ -148,17 +147,7 @@ fn thread_action(
         .into_any_element()
 }
 
-/// A Zapper's profile picture, `size` logical pixels across.
-pub(super) fn zot_mascot(avatar: &ZotAvatar, size: f32) -> gpui::Div {
-    zuse_viewport::zapper_avatar::zapper_avatar(avatar, size)
-}
-
-pub(super) fn zot_avatar(zot: &Zot) -> ZotAvatar {
-    zot.config
-        .avatar
-        .clone()
-        .unwrap_or_else(|| zot_mascots::default_avatar(&zot.id))
-}
+pub(super) use super::zot_avatar::{zot_avatar, zot_mascot};
 
 pub(super) const ZOT_PANEL_WIDTH: f32 = 520.0;
 

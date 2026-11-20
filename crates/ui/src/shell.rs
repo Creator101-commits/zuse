@@ -114,6 +114,7 @@ mod thread_search;
 mod usage_dashboard;
 mod workspace_layout;
 mod workspace_storage;
+mod zot_avatar;
 mod zot_forms;
 mod zots;
 use side_chats::SideChatTab;
