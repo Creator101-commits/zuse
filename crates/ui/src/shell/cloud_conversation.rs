@@ -184,6 +184,8 @@ impl CloudConversation {
             cx.subscribe(&composer, |this: &mut Self, _, event, cx| match event {
                 ComposerEvent::CloudLaunchChanged => this.refresh_history(cx),
                 ComposerEvent::CloudForegroundAdmitted => this.foreground_admitted(cx),
+                ComposerEvent::CloudStatusRetry => this.retry_failed_computer(cx),
+                ComposerEvent::CloudStatusDelete => this.delete_failed_computer(cx),
                 ComposerEvent::CloudSleepRequested => this.sleep(cx),
                 ComposerEvent::CloudWakeRequested => this.wake_for_upload(cx),
                 ComposerEvent::CloudComputerRecreating { recreation } => {
@@ -382,6 +384,9 @@ impl CloudConversation {
         // Only issues (a failed stage, a message that needs checking) reach
         // the status line; startup phases are the environment card's.
         let status = activity::status_line(computer.as_ref(), agent.as_ref());
+        // A computer stage that failed (the server's failed or
+        // needs-attention status) offers Retry and Delete on that line.
+        let failed = computer.as_ref().is_some_and(|stage| !stage.busy);
         let line = if computer.as_ref().is_some_and(|stage| stage.busy) {
             Some(SharedString::from("Waiting for computer…"))
         } else {
@@ -389,8 +394,10 @@ impl CloudConversation {
                 .filter(|activity| activity.busy)
                 .map(|activity| SharedString::from(activity.label))
         };
-        self.composer
-            .update(cx, |composer, cx| composer.set_cloud_status(status, cx));
+        self.composer.update(cx, |composer, cx| {
+            composer.set_cloud_status(status, cx);
+            composer.set_cloud_status_actions(failed, cx);
+        });
         self.transcript.update(cx, |transcript, cx| {
             transcript.set_external_activity(line, cx)
         });
@@ -986,6 +993,8 @@ impl Shell {
         let Some(prompt) = self.composer.read(cx).cloud_launch_prompt() else {
             return div().into_any_element();
         };
+        // A failed start says why on the status line; nothing spins here.
+        let working = self.composer.read(cx).cloud_launch_working();
         let width = crate::settings::transcript_width(cx);
         let clearance = (self.bottom_stack.get() - self.terminal_geometry.get().height).max(0.0)
             + Theme::TRANSCRIPT_FADE_BAND
@@ -1025,27 +1034,29 @@ impl Shell {
                                     .child(prompt),
                             ),
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(Theme::SPACE_SM))
-                                .pt(px(Theme::SPACE_LG))
-                                .child(crate::loaders::mini_glyph_spinner(
-                                    "cloud-launch-working",
-                                    2.5,
-                                    theme.loader_glyph(),
-                                    cx.entity_id(),
-                                    cx,
-                                ))
-                                .child(
-                                    div()
-                                        .text_size(crate::typography::text_xs())
-                                        .text_color(theme.text_muted)
-                                        .child("Waiting for computer…"),
-                                ),
-                        ),
+                        .when(working, |column| {
+                            column.child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(Theme::SPACE_SM))
+                                    .pt(px(Theme::SPACE_LG))
+                                    .child(crate::loaders::mini_glyph_spinner(
+                                        "cloud-launch-working",
+                                        2.5,
+                                        theme.loader_glyph(),
+                                        cx.entity_id(),
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(crate::typography::text_xs())
+                                            .text_color(theme.text_muted)
+                                            .child("Waiting for computer…"),
+                                    ),
+                            )
+                        }),
                 ),
             )
             .into_any_element()
@@ -1132,6 +1143,27 @@ impl Shell {
             self.track_current_cloud_canvas(cx);
         }
         let session = target.initial_session.clone();
+        let view = self.new_cloud_conversation_view(target, row, launch, cx);
+        // A tab still creating a chat keeps it; this one opens beside it.
+        self.ensure_free_cloud_tab(cx);
+        self.subscribe_cloud_conversation(&view, cx);
+        self.cloud_tabs.set_current(view.clone(), cx);
+        self.cloud_conversation = Some(view);
+        self.active_chat = session;
+        self.state
+            .update(cx, |state, cx| state.select_chat(None, cx));
+        self.set_route(Route::Chat, cx);
+        cx.notify();
+    }
+    /// A cloud conversation view for `target`, its row enriched with the
+    /// repository's name from the account's project list.
+    pub(super) fn new_cloud_conversation_view(
+        &mut self,
+        target: CloudTarget,
+        row: Value,
+        launch: Value,
+        cx: &mut Context<Self>,
+    ) -> Entity<CloudConversation> {
         // The computer record names its project only by id; carry the
         // repository's name in from the account's project list.
         let mut row = row;
@@ -1158,15 +1190,7 @@ impl Shell {
                 }
             }
         }
-        let view = cx.new(|cx| CloudConversation::new(target, row, launch, self.boot.clone(), cx));
-        self.subscribe_cloud_conversation(&view, cx);
-        self.cloud_tabs.set_current(view.clone(), cx);
-        self.cloud_conversation = Some(view);
-        self.active_chat = session;
-        self.state
-            .update(cx, |state, cx| state.select_chat(None, cx));
-        self.set_route(Route::Chat, cx);
-        cx.notify();
+        cx.new(|cx| CloudConversation::new(target, row, launch, self.boot.clone(), cx))
     }
 }
 
@@ -2335,7 +2359,7 @@ mod tests {
         let (controller_state,sidebar,composer)=window.update(cx,|shell,_,cx| {
             let controller_state=shell.state.entity_id();let sidebar=shell.sidebar_pane.entity_id();let composer=shell.composer.entity_id();
             // Exercise the production composer event subscription, not a root replacement.
-            shell.composer.update(cx,|_,cx|cx.emit(ComposerEvent::CloudAdmitted {
+            shell.composer.update(cx,|c,cx|cx.emit(ComposerEvent::CloudAdmitted {key:c.current_key.clone(),
                 workspace:json!({"workspaceId":"task","initialSessionId":"session","commandDeliveryMode":"server-admitted-v2","commandAdmissionVersion":2}),
                 account:"owner".into(),organization:None,
                 launch:json!({"firstMessage":"One admitted message","agent":"codex","model":"fixture"}),

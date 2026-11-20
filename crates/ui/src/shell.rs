@@ -1588,6 +1588,14 @@ fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
     (center - height * 0.5, height)
 }
 
+/// Whether the outlet still shows the transcript of a chat being left: the
+/// dock is mid-way back to the new-chat canvas. A cloud chat being created
+/// keeps the composer docked with its own launch outlet (the first message),
+/// so it is never treated as a departing transcript.
+fn departing_transcript(has_selection: bool, cloud_starting: bool, transcript: f32) -> bool {
+    !has_selection && !cloud_starting && transcript > 0.0
+}
+
 fn bottom_stack_measurement_matches(
     measured_has_composer: bool,
     expected_has_composer: bool,
@@ -2740,6 +2748,7 @@ impl Shell {
             let transcript = transcript.clone();
             move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::CloudAdmitted {
+                    key,
                     workspace,
                     account,
                     organization,
@@ -2770,17 +2779,27 @@ impl Shell {
                             workspace: id.into(),
                             initial_session: session.into(),
                         };
-                        this.open_cloud_conversation(target, workspace.clone(), launch.clone(), cx);
+                        this.open_admitted_cloud_chat(
+                            key,
+                            target,
+                            workspace.clone(),
+                            launch.clone(),
+                            cx,
+                        );
                     }
                 }
                 ComposerEvent::CloudLaunchChanged => {
+                    // The draft key a new chat launched under is its tab's.
+                    this.track_current_cloud_canvas(cx);
                     cx.notify();
                 }
                 ComposerEvent::ResumeCloud { .. }
                 | ComposerEvent::CloudSleepRequested
                 | ComposerEvent::CloudWakeRequested
                 | ComposerEvent::CloudComputerRecreating { .. }
-                | ComposerEvent::CloudForegroundAdmitted => {}
+                | ComposerEvent::CloudForegroundAdmitted
+                | ComposerEvent::CloudStatusRetry
+                | ComposerEvent::CloudStatusDelete => {}
                 ComposerEvent::WorkspaceCommand(command) => {
                     this.pending_workspace_command = Some(*command);
                     cx.notify();
@@ -13285,7 +13304,10 @@ impl Shell {
         // Content outlet: selected chat → transcript; nothing selected → the
         // centered new-thread composition; no spaces at all → the onboarding
         // card. New-chat mode mints the chat id on first send.
-        let departing_transcript = !has_selection && dock_frame.transcript() > 0.0;
+        // A new cloud chat being created docks the composer too, but its
+        // outlet is the launch prompt, never a departing (empty) transcript.
+        let departing_transcript =
+            departing_transcript(has_selection, cloud_starting, dock_frame.transcript());
         if !has_selection && !departing_transcript {
             self.transcript
                 .update(cx, |transcript, cx| transcript.finish_route_exit(cx));
@@ -16423,6 +16445,16 @@ impl Render for Shell {
 
 #[cfg(test)]
 mod tests {
+    /// A new cloud chat's first message shows the moment it is sent: the
+    /// docked composer of a chat being created never swaps its launch
+    /// outlet for an empty departing transcript.
+    #[test]
+    fn a_cloud_chat_being_created_is_never_a_departing_transcript() {
+        assert!(super::departing_transcript(false, false, 0.5));
+        assert!(!super::departing_transcript(false, true, 1.0));
+        assert!(!super::departing_transcript(true, false, 1.0));
+        assert!(!super::departing_transcript(false, false, 0.0));
+    }
     use super::*;
 
     pub(super) fn chat_with_path(

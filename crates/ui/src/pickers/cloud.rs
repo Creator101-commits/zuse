@@ -573,6 +573,10 @@ impl Pickers {
             .then(|| self.cloud.error.clone())
             .flatten()
     }
+    /// Every cloud repository the picker offers, unfiltered.
+    pub(super) fn cloud_project_list(&self) -> &[Value] {
+        &self.cloud.rows
+    }
     pub(super) fn filtered_cloud_projects(&self, cx: &App) -> Vec<Value> {
         let query = self.search.read(cx).text().to_lowercase();
         self.cloud
@@ -949,16 +953,14 @@ impl Pickers {
             .as_ref()
             .map(|p| p["projectId"].clone());
         let base = self.filtered_project_rows(cx).len() + 1;
+        let labels = self.state.read(cx).project_labels(&self.cloud.rows);
         let mut view = div().flex().flex_col();
         for (i, project) in self.filtered_cloud_projects(cx).into_iter().enumerate() {
             let chosen = selected.as_ref() == Some(&project["projectId"]);
             view = view.child(
                 zuse_viewport::creation_style::option(
                     ("cloud-project", i),
-                    project["displayName"]
-                        .as_str()
-                        .unwrap_or("Repository")
-                        .to_owned(),
+                    cloud_project_label(&project, &labels),
                     "folder",
                     chosen,
                 )
@@ -1001,11 +1003,9 @@ impl Pickers {
             .filter(|row| availability::launchable(row))
             .cloned()
             .collect();
+        let labels = self.state.read(cx).project_labels(&self.cloud.rows);
         for (i, row) in rows.into_iter().enumerate() {
-            let name = row["displayName"]
-                .as_str()
-                .unwrap_or("Repository")
-                .to_owned();
+            let name = cloud_project_label(&row, &labels);
             view = view.child(
                 zuse_viewport::creation_style::option(
                     ("cloud-choose-repository", i),
@@ -1628,4 +1628,14 @@ mod project_selection_tests {
             .unwrap();
         cx.run_until_parked();
     }
+}
+
+/// A cloud repository's name in a list: short, or `owner/repo` when another
+/// repository shares it.
+fn cloud_project_label(project: &Value, labels: &crate::state::ProjectLabels) -> String {
+    project["projectId"]
+        .as_str()
+        .and_then(|id| labels.cloud.get(id))
+        .cloned()
+        .unwrap_or_else(|| zuse_protocol::presentation::cloud_project_short_name(project))
 }

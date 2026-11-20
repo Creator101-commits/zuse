@@ -41,12 +41,82 @@ pub(super) struct Launch {
     /// The cloud computer's stage, set by the conversation that owns this
     /// composer and shown in the tray's single status line.
     status: Option<(String, bool)>,
+    /// The conversation's computer needs attention: its status line offers
+    /// Retry and Delete.
+    status_actions: bool,
+    /// Why a parked launch failed, shown when its tab is in front again.
+    pub(super) failure: Option<SharedString>,
+    /// When the new chat's first message was sent.
+    started_at: Option<std::time::Instant>,
 }
 impl Launch {
     pub(super) fn admitted(&self) -> bool {
         self.accepted.is_some()
     }
+    /// A new chat is being created (or failed to be and waits for Retry or
+    /// Delete).
+    pub(super) fn pending(&self) -> bool {
+        self.request.is_some() || self.task.is_some()
+    }
+    /// Move the new-chat launch out, leaving the rest (a bound cloud chat's
+    /// state) in place.
+    pub(super) fn take_launch(&mut self) -> Launch {
+        Launch {
+            task: self.task.take(),
+            message: self.message.take(),
+            request: self.request.take(),
+            accepted: self.accepted.take(),
+            issue: self.issue.take(),
+            staged: std::mem::take(&mut self.staged),
+            failure: self.failure.take(),
+            started_at: self.started_at.take(),
+            owner: self.owner.clone(),
+            organization: self.organization.clone(),
+            ..Default::default()
+        }
+    }
+    pub(super) fn put_launch(&mut self, launch: Launch) {
+        self.task = launch.task;
+        self.message = launch.message;
+        self.request = launch.request;
+        self.accepted = launch.accepted;
+        self.issue = launch.issue;
+        self.staged = launch.staged;
+        self.failure = launch.failure;
+        self.started_at = launch.started_at;
+    }
 }
+/// A new cloud chat being created in some tab: what its sidebar row and tab
+/// show before the server confirms it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CloudLaunchSummary {
+    pub key: String,
+    pub project_id: String,
+    pub first_message: String,
+    pub harness: Option<HarnessId>,
+    pub workspace: Option<String>,
+    pub failed: bool,
+    pub started_at: Option<std::time::Instant>,
+}
+/// A computer stage as the short status line shows it.
+fn short_stage(message: &str) -> &str {
+    match message {
+        "Starting computer" | "Starting computer…" => "Starting computer…",
+        "Preparing cloud computer…" => "Preparing computer…",
+        other => other,
+    }
+}
+/// How long the server has to confirm a new cloud chat before its tab shows
+/// it as failed with Retry and Delete.
+pub(crate) const CLOUD_CREATE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
+pub(crate) const CLOUD_CREATE_TIMEOUT: &str =
+    "Cloud didn't confirm this chat in time. Retry checks the same request.";
+/// How long an accepted computer has to become ready before its tab shows a
+/// failed state instead of waiting forever.
+pub(crate) const CLOUD_READY_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(20 * 60);
+pub(crate) const CLOUD_READY_TIMEOUT: &str =
+    "The computer didn't start in time. Retry to check it again.";
 struct NativeTask {
     target: crate::state::CloudTarget,
     wake: bool,
@@ -821,35 +891,119 @@ impl Composer {
     pub(crate) fn cloud_status(&self) -> Option<&(String, bool)> {
         self.cloud.status.as_ref()
     }
+    /// The conversation's computer needs attention: offer Retry and Delete
+    /// on its status line.
+    pub(crate) fn set_cloud_status_actions(&mut self, actions: bool, cx: &mut Context<Self>) {
+        if self.cloud.status_actions != actions {
+            self.cloud.status_actions = actions;
+            cx.notify();
+        }
+    }
     /// The one status line above the composer while a cloud computer starts:
-    /// a new chat's launch, then the conversation's computer stage.
+    /// a new chat's launch, then the conversation's computer stage. A spinner
+    /// and a short label while it works; a failed state with Retry and
+    /// Delete when it can't go on.
     pub(super) fn cloud_status_row(
         &self,
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> Option<super::tray::TrayPill> {
-        let (label, busy) = match self.cloud_creation_activity(cx) {
-            Some((label, busy)) => (label.to_owned(), busy),
-            None => self.cloud.status.clone()?,
-        };
+        if let Some((label, busy)) = self.cloud_creation_activity(cx) {
+            let pill = super::tray::TrayPill::new("native-cloud-status", label.to_owned());
+            if busy {
+                return Some(pill.icon_element(crate::loaders::mini_mono_spinner(
+                    "native-cloud-status-spinner",
+                    2.,
+                    theme.text_muted,
+                    cx.entity_id(),
+                    cx,
+                )));
+            }
+            return Some(
+                pill.glyph(crate::icons::DITHER_CLOUD)
+                    .tone(super::tray::TrayTone::Danger)
+                    .action(
+                        super::tray::tray_text_action("retry-cloud-launch", "Retry", None, theme)
+                            .debug_selector(|| "retry-cloud-launch".into())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let text = this.input.read(cx).text().to_owned();
+                                this.send_cloud(text, cx);
+                            })),
+                    )
+                    .action(
+                        super::tray::tray_text_action("delete-cloud-launch", "Delete", None, theme)
+                            .debug_selector(|| "delete-cloud-launch".into())
+                            .on_click(cx.listener(|this, _, _, cx| this.discard_cloud_launch(cx))),
+                    ),
+            );
+        }
+        let (label, busy) = self.cloud.status.clone()?;
         let pill = super::tray::TrayPill::new("native-cloud-status", label);
-        Some(if busy {
-            pill.icon_element(crate::loaders::mini_mono_spinner(
+        if busy {
+            return Some(pill.icon_element(crate::loaders::mini_mono_spinner(
                 "native-cloud-status-spinner",
                 2.,
                 theme.text_muted,
                 cx.entity_id(),
                 cx,
-            ))
-        } else {
-            pill.glyph(crate::icons::DITHER_CLOUD)
-        })
+            )));
+        }
+        let pill = pill.glyph(crate::icons::DITHER_CLOUD);
+        if !self.cloud.status_actions {
+            return Some(pill);
+        }
+        Some(
+            pill.tone(super::tray::TrayTone::Danger)
+                .action(
+                    super::tray::tray_text_action("retry-cloud-computer", "Retry", None, theme)
+                        .debug_selector(|| "retry-cloud-computer".into())
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::CloudStatusRetry)),
+                        ),
+                )
+                .action(
+                    super::tray::tray_text_action("delete-cloud-computer", "Delete", None, theme)
+                        .debug_selector(|| "delete-cloud-computer".into())
+                        .on_click(
+                            cx.listener(|_, _, _, cx| cx.emit(ComposerEvent::CloudStatusDelete)),
+                        ),
+                ),
+        )
     }
-    pub(super) fn cloud_creation_activity(&self, cx: &App) -> Option<(&str, bool)> {
+    /// The new chat's status line: its stage while it is created, or why it
+    /// stopped. `busy` spins.
+    pub(super) fn cloud_creation_activity(&self, cx: &App) -> Option<(String, bool)> {
         if self.cloud.request.is_none() || self.state.read(cx).selected_chat.is_some() {
             return None;
         }
-        Some((self.cloud.message.as_deref().unwrap_or(if self.cloud.task.is_some() {"Starting computer"} else if self.cloud.admitted() {"Cloud startup needs attention. Your message is queued."} else {"Cloud startup needs attention. Your message is saved here; delivery is unconfirmed."}), self.cloud.task.is_some()))
+        if self.cloud.task.is_some() {
+            let label = self
+                .cloud
+                .message
+                .as_deref()
+                .map(short_stage)
+                .unwrap_or("Starting computer…");
+            return Some((label.to_owned(), true));
+        }
+        let failure = self
+            .failure
+            .as_ref()
+            .filter(|_| {
+                self.failure_key
+                    .as_ref()
+                    .is_none_or(|key| *key == self.current_key)
+            })
+            .map(|failure| failure.to_string());
+        Some((
+            failure.unwrap_or_else(|| {
+                if self.cloud.admitted() {
+                    "Cloud startup needs attention. Your message is queued.".into()
+                } else {
+                    "Cloud startup needs attention. Your message is saved here.".into()
+                }
+            }),
+            false,
+        ))
     }
     pub(crate) fn cloud_activity(&self) -> Option<(&str, bool)> {
         if self.cloud_reupload_in_flight() {
@@ -929,6 +1083,10 @@ impl Composer {
             .as_str()
             .filter(|text| !text.trim().is_empty())
             .map(str::to_owned)
+    }
+    /// The new chat is still being created (not failed).
+    pub(crate) fn cloud_launch_working(&self) -> bool {
+        self.cloud.request.is_some() && self.cloud.task.is_some()
     }
     pub(crate) fn cloud_launch_pending(&self, cx: &App) -> bool {
         self.cloud.request.is_some() && self.state.read(cx).selected_chat.is_none()
@@ -1283,6 +1441,10 @@ impl Composer {
                 SandboxLevel::Auto => "auto",
                 SandboxLevel::DangerFullAccess => "full-access",
             };
+            // The launch belongs to this tab: give the draft its own key so
+            // the composer can serve other tabs while the chat is created.
+            self.ensure_cloud_canvas_key(cx);
+            self.cloud.started_at = Some(std::time::Instant::now());
             self.cloud.request = Some(
                 json!({"runtimeMode":runtime_mode,"agentConnectionId":connection,"projectId":project["projectId"],"providerId":project["providerId"],"sizeId":size,"baseRef":base_ref,"branch":branch,"agent":agent,"model":model,"reasoning":config.reasoning,"modelOptions":config.model_options,"idempotencyKey":uuid::Uuid::new_v4().to_string(),"firstMessage":text,"expectedAccountId":subject,"expectedOrganizationId":organization,"attachmentTransfers":staged.iter().map(|a|json!({"uploadId":a.id,"fileName":a.name})).collect::<Vec<_>>()}),
             );
@@ -1317,6 +1479,9 @@ impl Composer {
         );
         self.failure = None;
         let launch_controller = controller.clone();
+        // The launch belongs to this tab's draft: progress and the outcome land
+        // on it even after the user moves to another tab or chat.
+        let key = self.current_key.clone();
         self.cloud.task = Some(cx.spawn(async move |this, cx| {
             if accepted.is_none() {
                 for attachment in &staged {
@@ -1330,7 +1495,9 @@ impl Composer {
                     )
                     .await
                     {
-                        let _ = this.update(cx, |this, cx| this.cloud_failure(error, cx));
+                        let _ = this.update(cx, |this, cx| {
+                            this.on_launch(&key, cx, |this, cx| this.cloud_failure(error, cx))
+                        });
                         return;
                     }
                 }
@@ -1350,18 +1517,27 @@ impl Composer {
                     }
                 }
             });
-            let result = create.await;
+            // A server that never answers must not hold the tab: past the
+            // deadline the launch shows as failed with Retry and Delete.
+            let deadline = cx.background_executor().timer(CLOUD_CREATE_DEADLINE);
+            let result = match futures::future::select(create, deadline).await {
+                futures::future::Either::Left((result, _)) => Some(result),
+                futures::future::Either::Right(_) => None,
+            };
             let workspace = match result {
-                Ok(Ok(value)) => value,
+                Some(Ok(Ok(value))) => value,
                 _ => {
                     let message = match result {
-                        Ok(Err(error)) => error.to_string(),
+                        Some(Ok(Err(error))) => error.to_string(),
+                        None => CLOUD_CREATE_TIMEOUT.into(),
                         _ => {
                             "Cloud request interrupted. Retry the same request to check acceptance."
                                 .into()
                         }
                     };
-                    let _ = this.update(cx, |this, cx| this.cloud_create_failure(message, cx));
+                    let _ = this.update(cx, |this, cx| {
+                        this.on_launch(&key, cx, |this, cx| this.cloud_create_failure(message, cx))
+                    });
                     return;
                 }
             };
@@ -1375,24 +1551,30 @@ impl Composer {
                 .to_owned();
             if id.is_empty() || initial.is_empty() {
                 let _ = this.update(cx, |this, cx| {
-                    this.cloud_failure("Invalid cloud launch response".into(), cx)
+                    this.on_launch(&key, cx, |this, cx| {
+                        this.cloud_failure("Invalid cloud launch response".into(), cx)
+                    })
                 });
                 return;
             }
-            if workspace["commandDeliveryMode"]=="server-admitted-v2"&&workspace["commandAdmissionVersion"]==2{
-                let _=this.update(cx,|this,cx|{
-                    let launch = this.cloud.request.take().unwrap_or_default();
-                    this.cloud.accepted=None;this.cloud.staged.clear();this.cloud.issue=None;this.cloud.task=None;this.cloud.message=None;
-                    this.pickers.update(cx,|p,cx|p.finish_cloud_launch(cx));
-                    cx.emit(ComposerEvent::CloudAdmitted { workspace, account: subject, organization, launch });
-                    cx.emit(ComposerEvent::CloudLaunchChanged);cx.notify();
-                });return;
+            if workspace["commandDeliveryMode"] == "server-admitted-v2"
+                && workspace["commandAdmissionVersion"] == 2
+            {
+                let _ = this.update(cx, |this, cx| {
+                    this.on_launch(&key, cx, |this, cx| {
+                        this.finish_admitted_launch(workspace, subject, organization, cx)
+                    })
+                });
+                return;
             }
             if this
                 .update(cx, |this, cx| {
-                    this.cloud.accepted = Some(workspace);
-                    this.cloud.message = Some("Starting computer".into());
-                    cx.notify();
+                    this.on_launch(&key, cx, |this, cx| {
+                        this.cloud.accepted = Some(workspace);
+                        this.cloud.message = Some("Starting computer".into());
+                        cx.emit(ComposerEvent::CloudLaunchChanged);
+                        cx.notify();
+                    })
                 })
                 .is_err()
             {
@@ -1400,7 +1582,8 @@ impl Composer {
             }
             let root = controller.clone();
             let workspace_id = id.clone();
-            let open_subject=subject.clone();let open_organization=organization.clone();
+            let open_subject = subject.clone();
+            let open_organization = organization.clone();
             let open = gpui_tokio::Tokio::spawn(cx, async move {
                 root.client()
                     .subscribe_scoped(
@@ -1413,60 +1596,67 @@ impl Composer {
                 Ok(Ok(updates)) => updates,
                 _ => {
                     let _ = this.update(cx, |this, cx| {
-                        this.cloud_failure(
-                            "Cloud connection interrupted. Retry to reopen the accepted workspace."
-                                .into(),
-                            cx,
-                        )
+                        this.on_launch(&key, cx, |this, cx| {
+                            this.cloud_failure(
+                                "Cloud connection interrupted. Retry to reopen the accepted workspace."
+                                    .into(),
+                                cx,
+                            )
+                        })
                     });
                     return;
                 }
             };
-            while let Some(value) = updates.recv().await {
-                if value["state"] == "ready" {
-                    let target = crate::state::CloudTarget {
-                        controller,
-                        subject,
-                        organization,
-                        workspace: id,
-                        initial_session: initial,
-                    };
-                    let _ = this.update(cx, |this, cx| {
-                        this.cloud.message = None;
-                        let launch = this.cloud.request.take().unwrap_or_default();
-                        let workspace = this.cloud.accepted.take().unwrap_or_default();
-                        this.cloud.issue = None;
-                        this.cloud.staged.clear();
-                        this.cloud.task = None;
-                        this.pickers
-                            .update(cx, |pickers, cx| pickers.finish_cloud_launch(cx));
-                        cx.emit(ComposerEvent::CloudLaunchChanged);
-                        cx.emit(ComposerEvent::CloudAdmitted {
-                            workspace,
-                            account: target.subject,
-                            organization: target.organization,
-                            launch,
+            // A computer that never becomes ready ends in a failed state too.
+            let ready_by = std::time::Instant::now() + CLOUD_READY_DEADLINE;
+            loop {
+                let remaining = ready_by.saturating_duration_since(std::time::Instant::now());
+                let next = futures::future::select(
+                    Box::pin(updates.recv()),
+                    cx.background_executor().timer(remaining),
+                )
+                .await;
+                let value = match next {
+                    futures::future::Either::Left((Some(value), _)) => value,
+                    futures::future::Either::Left((None, _)) => break,
+                    futures::future::Either::Right(_) => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.on_launch(&key, cx, |this, cx| {
+                                this.cloud_failure(CLOUD_READY_TIMEOUT.into(), cx)
+                            })
                         });
-                        cx.notify();
+                        return;
+                    }
+                };
+                if value["state"] == "ready" {
+                    let _ = this.update(cx, |this, cx| {
+                        this.on_launch(&key, cx, |this, cx| {
+                            let workspace = this.cloud.accepted.clone().unwrap_or_default();
+                            this.finish_admitted_launch(workspace, subject, organization, cx)
+                        })
                     });
                     return;
                 }
                 if matches!(value["state"].as_str(), Some("blocked" | "failed")) {
                     let _ = this.update(cx, |this, cx| {
-                        this.cloud_failure(
-                            value["message"]
-                                .as_str()
-                                .unwrap_or("Cloud startup failed")
-                                .into(),
-                            cx,
-                        )
+                        this.on_launch(&key, cx, |this, cx| {
+                            this.cloud_failure(
+                                value["message"]
+                                    .as_str()
+                                    .unwrap_or("Cloud startup failed")
+                                    .into(),
+                                cx,
+                            )
+                        })
                     });
                     return;
                 }
                 if this
                     .update(cx, |this, cx| {
-                        this.cloud.message = value["message"].as_str().map(str::to_owned);
-                        cx.notify();
+                        this.on_launch(&key, cx, |this, cx| {
+                            this.cloud.message = value["message"].as_str().map(str::to_owned);
+                            cx.notify();
+                        })
                     })
                     .is_err()
                 {
@@ -1474,18 +1664,219 @@ impl Composer {
                 }
             }
             let _ = this.update(cx, |this, cx| {
-                this.cloud_failure(
-                    "Cloud startup connection closed. Retry to reopen the accepted workspace."
-                        .into(),
-                    cx,
-                )
+                this.on_launch(&key, cx, |this, cx| {
+                    this.cloud_failure(
+                        "Cloud startup connection closed. Retry to reopen the accepted workspace."
+                            .into(),
+                        cx,
+                    )
+                })
             });
         }));
+        cx.emit(ComposerEvent::CloudLaunchChanged);
         cx.notify();
         true
     }
+    /// The server admitted the new chat: hand it to the shell, which opens
+    /// it in the tab that sent it.
+    fn finish_admitted_launch(
+        &mut self,
+        workspace: Value,
+        account: String,
+        organization: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let launch = self.cloud.request.take().unwrap_or_default();
+        self.cloud.accepted = None;
+        self.cloud.staged.clear();
+        self.cloud.issue = None;
+        self.cloud.task = None;
+        self.cloud.message = None;
+        self.cloud.failure = None;
+        if !self.parked_launch_run {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.finish_cloud_launch(cx));
+        }
+        cx.emit(ComposerEvent::CloudAdmitted {
+            key: self.current_key.clone(),
+            workspace,
+            account,
+            organization,
+            launch,
+        });
+        cx.emit(ComposerEvent::CloudLaunchChanged);
+        cx.notify();
+    }
+    /// Run `update` against the launch that `key`'s tab sent. While that tab
+    /// is in front this is the composer's own launch; otherwise the parked
+    /// launch is swapped in for the update and parked again after, so the
+    /// tab in front keeps its own draft, pickers and errors.
+    pub(super) fn on_launch(
+        &mut self,
+        key: &str,
+        cx: &mut Context<Self>,
+        update: impl FnOnce(&mut Self, &mut Context<Self>),
+    ) {
+        if self.current_key == key {
+            update(self, cx);
+            return;
+        }
+        let Some(parked) = self.parked_launches.remove(key) else {
+            // The tab was closed and its launch discarded.
+            return;
+        };
+        let active = self.cloud.take_launch();
+        let failure = (self.failure.take(), self.failure_key.take());
+        let current = std::mem::replace(&mut self.current_key, key.to_owned());
+        self.cloud.put_launch(parked);
+        self.parked_launch_run = true;
+        update(self, cx);
+        self.parked_launch_run = false;
+        let mut done = self.cloud.take_launch();
+        if let Some(error) = self.failure.take() {
+            done.failure = Some(error);
+        }
+        self.current_key = current;
+        if done.pending() {
+            self.parked_launches.insert(key.to_owned(), done);
+        }
+        self.cloud.put_launch(active);
+        (self.failure, self.failure_key) = failure;
+        cx.emit(ComposerEvent::CloudLaunchChanged);
+        cx.notify();
+    }
+    /// Navigation moved the composer from `from` to `to`: a pending launch
+    /// stays with its tab, and the one waiting for `to` comes back.
+    pub(super) fn swap_cloud_launch(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        if self.cloud.pending() {
+            let mut launch = self.cloud.take_launch();
+            if self.failure_key.as_deref() == Some(from) {
+                launch.failure = self.failure.take();
+                self.failure_key = None;
+            }
+            self.parked_launches.insert(from.to_owned(), launch);
+            self.pickers
+                .update(cx, |pickers, cx| pickers.freeze_cloud_launch(false, cx));
+        }
+        if let Some(mut launch) = self.parked_launches.remove(to) {
+            if let Some(error) = launch.failure.take() {
+                self.failure = Some(error);
+                self.failure_key = Some(to.to_owned());
+            }
+            self.cloud.put_launch(launch);
+            // The pickers freeze again once the tab's own choices are back
+            // (see `refreeze_cloud_launch`).
+        }
+    }
+    /// The tab with a pending launch is in front again with its choices
+    /// restored: lock them while the chat is being created.
+    pub(crate) fn refreeze_cloud_launch(&mut self, cx: &mut Context<Self>) {
+        if self.cloud.pending() {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.freeze_cloud_launch(true, cx));
+        }
+    }
+    /// Whether the tab drafted under `key` is creating a cloud chat.
+    pub(crate) fn has_cloud_launch(&self, key: &str) -> bool {
+        if key == self.current_key {
+            self.cloud.pending()
+        } else {
+            self.parked_launches.contains_key(key)
+        }
+    }
+    /// The pending launch of the tab drafted under `key`, for its sidebar
+    /// row and tab label.
+    pub(crate) fn cloud_launch_summary(&self, key: &str) -> Option<CloudLaunchSummary> {
+        let launch = if key == self.current_key {
+            &self.cloud
+        } else {
+            self.parked_launches.get(key)?
+        };
+        let request = launch.request.as_ref()?;
+        Some(CloudLaunchSummary {
+            key: key.to_owned(),
+            project_id: request["projectId"].as_str().unwrap_or_default().to_owned(),
+            first_message: request["firstMessage"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            harness: serde_json::from_value(request["agent"].clone()).ok(),
+            workspace: launch.accepted.as_ref().and_then(|row| {
+                row["workspaceId"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+            }),
+            failed: launch.task.is_none(),
+            started_at: launch.started_at,
+        })
+    }
+    /// Every pending launch, the one in front first.
+    pub(crate) fn cloud_launch_summaries(&self) -> Vec<CloudLaunchSummary> {
+        std::iter::once(self.current_key.as_str())
+            .chain(self.parked_launches.keys().map(String::as_str))
+            .filter_map(|key| self.cloud_launch_summary(key))
+            .collect()
+    }
+    /// Delete the failed (or stuck) chat this tab is creating: an accepted
+    /// computer is archived, and the first message returns to the draft.
+    pub(crate) fn discard_cloud_launch(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.cloud.request.take() else {
+            return;
+        };
+        let accepted = self.cloud.accepted.take();
+        self.cloud.task = None;
+        self.cloud.message = None;
+        self.cloud.issue = None;
+        self.cloud.failure = None;
+        let staged = std::mem::take(&mut self.cloud.staged);
+        if self
+            .failure_key
+            .as_ref()
+            .is_none_or(|key| *key == self.current_key)
+        {
+            self.failure = None;
+            self.failure_key = None;
+        }
+        self.pickers
+            .update(cx, |pickers, cx| pickers.freeze_cloud_launch(false, cx));
+        if self.input.read(cx).text().is_empty() {
+            let text = request["firstMessage"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            self.restore_rejected_draft(text, staged, cx);
+        }
+        if let (Some(workspace), Some(engine)) = (
+            accepted
+                .as_ref()
+                .and_then(|row| row["workspaceId"].as_str()),
+            self.state.read(cx).engine().cloned(),
+        ) {
+            let params = json!({"workspaceId":workspace,
+                "expectedAccountId":request["expectedAccountId"],
+                "expectedOrganizationId":request["expectedOrganizationId"],
+                "commandId":uuid::Uuid::new_v4().to_string()});
+            let controller = engine.controller();
+            gpui_tokio::Tokio::spawn(cx, async move {
+                if let Err(error) = controller
+                    .client()
+                    .call_scoped(methods::CLOUD_ARCHIVE, params)
+                    .await
+                {
+                    tracing::warn!(%error, "archiving a discarded cloud launch failed");
+                }
+            })
+            .detach();
+        }
+        cx.emit(ComposerEvent::CloudLaunchChanged);
+        cx.notify();
+    }
     fn cloud_create_failure(&mut self, message: String, cx: &mut Context<Self>) {
-        if self.cloud.accepted.is_none()
+        // A parked tab keeps its request: Retry there gets the same answer
+        // and handles it in front of the user.
+        if !self.parked_launch_run
+            && self.cloud.accepted.is_none()
             && zuse_engine::cloud::definitive_create_rejection(&message).is_some()
         {
             if let Some(request) = self.cloud.request.take() {
@@ -1545,11 +1936,17 @@ impl Composer {
         self.failure_key = None;
         cx.notify();
     }
-    fn cloud_failure(&mut self, message: String, cx: &mut Context<Self>) {
+    pub(super) fn cloud_failure(&mut self, message: String, cx: &mut Context<Self>) {
         self.cloud.task = None;
         self.cloud.message = None;
         self.failure = Some(message.into());
-        self.failure_key = None;
+        // A new chat's failure stays on its own tab.
+        self.failure_key = self
+            .cloud
+            .request
+            .is_some()
+            .then(|| self.current_key.clone());
+        cx.emit(ComposerEvent::CloudLaunchChanged);
         cx.notify();
     }
 }

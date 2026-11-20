@@ -5925,6 +5925,10 @@ pub enum ComposerEvent {
     CloudLaunchChanged,
     /// Only a verified foreground Run receipt may reattach execution passively.
     CloudForegroundAdmitted,
+    /// The conversation's computer needs attention and Retry was pressed.
+    CloudStatusRetry,
+    /// The conversation's computer needs attention and Delete was pressed.
+    CloudStatusDelete,
     CloudSleepRequested,
     /// A message with files needs its computer awake before they upload.
     CloudWakeRequested,
@@ -5933,8 +5937,10 @@ pub enum ComposerEvent {
     CloudComputerRecreating {
         recreation: serde_json::Value,
     },
-    /// An accepted task selects the current native conversation surface.
+    /// An accepted task opens in the tab that created it (drafted under
+    /// `key`), which may no longer be in front.
     CloudAdmitted {
+        key: String,
         workspace: serde_json::Value,
         account: String,
         organization: Option<String>,
@@ -6630,6 +6636,13 @@ struct AttachmentDestination {
 }
 pub struct Composer {
     cloud: cloud::Launch,
+    /// New cloud chats still being created in tabs that are not in front,
+    /// by their draft key. Each tab owns its launch; the composer serves
+    /// the tab in front.
+    parked_launches: HashMap<String, cloud::Launch>,
+    /// A parked launch is swapped in for an update (see `on_launch`): the
+    /// pickers and draft belong to the tab in front and stay untouched.
+    parked_launch_run: bool,
     pub(crate) state: Entity<AppState>,
     pub(crate) input: Entity<ComposerInput>,
     /// Draft displaced while a queued message occupies the composer.
@@ -7134,12 +7147,9 @@ impl Composer {
             cx.notify();
             return false;
         }
-        if self.cloud.request.is_some() || self.cloud.task.is_some() {
-            self.failure=Some("This tab has a pending task creation. Check or retry its original request here before changing tabs. Your draft and request are preserved.".into());
-            self.failure_key = Some(self.current_key.clone());
-            cx.notify();
-            return false;
-        }
+        // A pending cloud chat creation belongs to its own tab and never
+        // holds navigation: it is parked with its tab (see
+        // `swap_cloud_launch`).
         true
     }
     pub(crate) fn ensure_cloud_canvas_key(&mut self, cx: &mut Context<Self>) -> String {
@@ -7179,8 +7189,13 @@ impl Composer {
         cx.notify();
     }
     pub(crate) fn discard_cloud_canvas_keys(&mut self, keys: &[String], cx: &mut Context<Self>) {
-        self.cloud = Default::default();
+        // A closed tab's pending chat creation goes with it.
+        self.parked_launches.retain(|key, _| !keys.contains(key));
         let active = keys.contains(&self.current_key);
+        if active {
+            self.pickers
+                .update(cx, |pickers, cx| pickers.freeze_cloud_launch(false, cx));
+        }
         let scoped = self
             .cloud_canvas_key
             .as_ref()
@@ -7225,6 +7240,7 @@ impl Composer {
         self.picker_task = None;
         self.discard_cloud_canvas_keys(keys, cx);
         self.cloud = Default::default();
+        self.parked_launches.clear();
         self.cloud_canvas_scope = None;
         self.pickers
             .update(cx, |p, cx| p.revoke_cloud_canvas_scope(cx));
@@ -7518,6 +7534,8 @@ impl Composer {
             advance_task: None,
             send_task: None,
             cloud: Default::default(),
+            parked_launches: HashMap::new(),
+            parked_launch_run: false,
             unarchive_task: None,
             unarchiving: None,
             interrupting: HashSet::new(),
@@ -9871,6 +9889,8 @@ impl Composer {
                 }
             }
             let draft = self.drafts.get(&key).cloned().unwrap_or_default();
+            let from = std::mem::take(&mut self.current_key);
+            self.swap_cloud_launch(&from, &key, cx);
             self.current_key = key;
             self.recall.reset();
             self.escape_presses.reset();
@@ -19697,12 +19717,105 @@ mod cloud_canvas_tests {
             assert!(c.drafts.is_empty());
         });
     }
+    /// A pending cloud chat creation belongs to its tab: navigating away
+    /// parks it with its request and draft, other tabs work normally (no
+    /// frozen pickers, sending allowed), and coming back restores it.
     #[gpui::test]
-    fn uncertain_admission_blocks_navigation_without_changing_original_request(
+    fn pending_cloud_launch_stays_with_its_tab_and_never_blocks_others(
         cx: &mut gpui::TestAppContext,
     ) {
         let state = cx.new(|_| crate::state::AppState::new());
         let composer = cx.new(|cx| Composer::new(state, cx));
-        composer.update(cx,|c,cx|{c.set_cloud_canvas_key(Some("cloud-canvas:pending".into()),cx);c.input.update(cx,|input,cx|input.set_text("Retained draft",cx));let request=serde_json::json!({"idempotencyKey":"same-key","projectId":"original-project","providerId":"e2b","firstMessage":"Original pending task"});c.cloud.request=Some(request.clone());assert!(!c.cloud_canvas_navigation_ready(cx));assert_eq!(c.cloud.request.as_ref(),Some(&request));assert_eq!(c.current_key,"cloud-canvas:pending");assert_eq!(c.input.read(cx).text(),"Retained draft");assert!(c.failure.as_ref().unwrap().contains("original request"));});
+        composer.update(cx, |c, cx| {
+            c.set_cloud_canvas_key(Some("cloud-canvas:a".into()), cx);
+            let request = serde_json::json!({"idempotencyKey":"same-key","projectId":"original-project",
+                "providerId":"e2b","firstMessage":"Original pending task","agent":"mock"});
+            c.cloud.request = Some(request.clone());
+            c.pickers
+                .update(cx, |p, cx| p.freeze_cloud_launch(true, cx));
+            c.failure = Some("Cloud didn't confirm this chat in time.".into());
+            c.failure_key = Some("cloud-canvas:a".into());
+            assert!(c.cloud_canvas_navigation_ready(cx), "a pending launch never holds navigation");
+            // Tab B: a fresh draft, nothing pending, nothing frozen.
+            c.set_cloud_canvas_key(Some("cloud-canvas:b".into()), cx);
+            assert!(c.cloud.request.is_none());
+            assert!(!c.cloud_launch_pending(cx));
+            assert!(!c.pickers.read(cx).cloud_launch_frozen(), "B's model picker opens");
+            assert!(c.visible_failure().is_none(), "A's failure stays on A");
+            assert!(c.has_cloud_launch("cloud-canvas:a"));
+            assert!(!c.has_cloud_launch("cloud-canvas:b"));
+            let launches = c.cloud_launch_summaries();
+            assert_eq!(launches.len(), 1);
+            assert_eq!(launches[0].first_message, "Original pending task");
+            assert_eq!(launches[0].harness, Some(zuse_protocol::HarnessId::Mock));
+            // Back to A: its request and failure return; its choices lock
+            // again once restored.
+            c.set_cloud_canvas_key(Some("cloud-canvas:a".into()), cx);
+            assert_eq!(c.cloud.request.as_ref(), Some(&request));
+            assert!(c.visible_failure().unwrap().contains("in time"));
+            c.refreeze_cloud_launch(cx);
+            assert!(c.pickers.read(cx).cloud_launch_frozen());
+            // Delete discards it and gives the message back to the draft.
+            c.discard_cloud_launch(cx);
+            assert!(c.cloud.request.is_none());
+            assert!(!c.pickers.read(cx).cloud_launch_frozen());
+            assert_eq!(c.input.read(cx).text(), "Original pending task");
+            assert!(c.cloud_launch_summaries().is_empty());
+        });
+    }
+    /// The new chat's status line: a spinner and a short stage while it is
+    /// created; the server's reason (with Retry and Delete) once it failed.
+    #[gpui::test]
+    fn cloud_launch_status_line_spins_then_shows_failure(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| crate::state::AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |c, cx| {
+            c.set_cloud_canvas_key(Some("cloud-canvas:a".into()), cx);
+            c.cloud.request = Some(serde_json::json!({"firstMessage":"Fix it","projectId":"p"}));
+            c.cloud.task = Some(gpui::Task::ready(()));
+            c.cloud.message = Some("Preparing cloud computer…".into());
+            assert_eq!(
+                c.cloud_creation_activity(cx),
+                Some(("Preparing computer…".into(), true))
+            );
+            c.cloud_failure("Computer start needs attention".into(), cx);
+            assert_eq!(
+                c.cloud_creation_activity(cx),
+                Some(("Computer start needs attention".into(), false))
+            );
+            assert!(
+                c.cloud_launch_pending(cx),
+                "the failed chat stays with Retry and Delete"
+            );
+            assert_eq!(c.failure_key.as_deref(), Some("cloud-canvas:a"));
+        });
+    }
+    /// A launch update arriving while its tab is in the background lands on
+    /// that tab, never on the one in front.
+    #[gpui::test]
+    fn background_launch_updates_land_on_their_own_tab(cx: &mut gpui::TestAppContext) {
+        let state = cx.new(|_| crate::state::AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |c, cx| {
+            c.set_cloud_canvas_key(Some("cloud-canvas:a".into()), cx);
+            c.cloud.request = Some(serde_json::json!({"firstMessage":"In A","projectId":"p"}));
+            c.set_cloud_canvas_key(Some("cloud-canvas:b".into()), cx);
+            c.input
+                .update(cx, |input, cx| input.set_text("B's draft", cx));
+            c.on_launch("cloud-canvas:a", cx, |this, cx| {
+                this.cloud_failure("Cloud startup failed".into(), cx)
+            });
+            assert!(
+                c.visible_failure().is_none(),
+                "B shows nothing of A's failure"
+            );
+            assert_eq!(c.input.read(cx).text(), "B's draft");
+            assert!(c.cloud.request.is_none());
+            let a = c.cloud_launch_summary("cloud-canvas:a").unwrap();
+            assert!(a.failed);
+            c.set_cloud_canvas_key(Some("cloud-canvas:a".into()), cx);
+            assert_eq!(c.visible_failure().as_deref(), Some("Cloud startup failed"));
+            assert!(c.cloud_launch_pending(cx));
+        });
     }
 }

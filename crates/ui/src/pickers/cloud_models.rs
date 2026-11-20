@@ -106,7 +106,7 @@ impl Pickers {
         cx.notify();
     }
 
-    pub(super) fn cloud_launch_frozen(&self) -> bool {
+    pub(crate) fn cloud_launch_frozen(&self) -> bool {
         self.cloud.frozen && !self.is_settings_model()
     }
 

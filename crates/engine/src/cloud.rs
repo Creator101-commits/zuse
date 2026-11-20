@@ -1560,7 +1560,19 @@ impl CloudApi {
                         &[],
                     )
                     .await?;
-                let mut rows: Vec<Workspace> = serde_json::from_value(value["workspaces"].clone())?;
+                // One row this build can't read never hides the others.
+                let mut rows: Vec<Workspace> = value["workspaces"]
+                    .as_array()
+                    .ok_or_else(|| anyhow::anyhow!("Invalid cloud workspace list."))?
+                    .iter()
+                    .filter_map(|row| match serde_json::from_value(row.clone()) {
+                        Ok(row) => Some(row),
+                        Err(error) => {
+                            tracing::warn!(%error, "skipping an unreadable cloud workspace row");
+                            None
+                        }
+                    })
+                    .collect();
                 for row in &mut rows {
                     if organization.is_none() {
                         self.local_cleanup(&account, row, false);

@@ -1,6 +1,97 @@
 //! Display grouping only. A cloud task keeps its own account and computer identity.
-use super::*;
 use crate::Space;
+
+/// A repository as `host/owner/repo`, lowercase, from any spelling of it: a
+/// remote URL (https or ssh, with or without `.git`) or an identity. `None`
+/// for anything that is not a repository location (a local-only identity
+/// such as `commit:<sha>` or `local:<hash>`).
+pub fn repository_key(spelling: &str) -> Option<String> {
+    let mut text = spelling.trim();
+    for scheme in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(rest) = text.strip_prefix(scheme) {
+            text = rest;
+            break;
+        }
+    }
+    // `git@github.com:owner/repo` and `user@host/owner/repo`.
+    if let Some((user, rest)) = text.split_once('@')
+        && !user.contains('/')
+    {
+        text = rest;
+    }
+    let text = text.replacen(':', "/", 1);
+    let text = text.trim_end_matches('/');
+    let text = text.strip_suffix(".git").unwrap_or(text);
+    let parts: Vec<&str> = text.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() < 3 || !parts[0].contains('.') {
+        return None;
+    }
+    Some(parts.join("/").to_ascii_lowercase())
+}
+
+/// `owner/repo` for a repository spelling, in its own case.
+pub fn repository_owner_and_name(spelling: &str) -> Option<String> {
+    repository_key(spelling)?;
+    let text = spelling.trim().trim_end_matches('/');
+    let text = text.strip_suffix(".git").unwrap_or(text);
+    let mut parts = text.rsplit(['/', ':']).filter(|part| !part.is_empty());
+    let repo = parts.next()?;
+    let owner = parts.next()?;
+    Some(format!("{owner}/{repo}"))
+}
+
+/// One project as a list shows it: its short name and, when known, the
+/// repository it is a checkout of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectLabelInput {
+    pub name: String,
+    pub repository: Option<String>,
+}
+
+/// Labels for a list of projects: each keeps its short name unless another
+/// project of a different repository has the same one; then every
+/// repository-backed project of that name is labelled `owner/repo`
+/// ("opcodehq/zuse" and "swarajbachu/zuse" instead of two "zuse"). Pure.
+pub fn project_labels(projects: &[ProjectLabelInput]) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+    let mut repositories: HashMap<String, HashSet<Option<String>>> = HashMap::new();
+    for project in projects {
+        repositories
+            .entry(project.name.to_lowercase())
+            .or_default()
+            .insert(project.repository.as_deref().and_then(repository_key));
+    }
+    projects
+        .iter()
+        .map(|project| {
+            let collides = repositories
+                .get(&project.name.to_lowercase())
+                .is_some_and(|set| set.len() > 1);
+            collides
+                .then(|| {
+                    project
+                        .repository
+                        .as_deref()
+                        .and_then(repository_owner_and_name)
+                })
+                .flatten()
+                .unwrap_or_else(|| project.name.clone())
+        })
+        .collect()
+}
+
+/// The short name of a cloud project: its repository name, not the
+/// `owner/repo` path some display names carry.
+pub fn cloud_project_short_name(project: &serde_json::Value) -> String {
+    project["displayName"]
+        .as_str()
+        .filter(|name| !name.trim().is_empty())
+        .or(project["repositoryIdentity"].as_str())
+        .and_then(|name| name.trim_end_matches('/').rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Cloud project")
+        .to_owned()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloudProjectGroup {
@@ -18,18 +109,21 @@ pub fn cloud_project_group(
     let identity = project["repositoryIdentity"]
         .as_str()
         .filter(|id| !id.is_empty());
-    let matched = identity.and_then(|identity| {
-        spaces.iter().find(|space| {
-            space
-                .remote_repository
-                .as_deref()
-                .is_some_and(|remote| remote.eq_ignore_ascii_case(identity))
-                || space
-                    .repository_id
-                    .as_deref()
-                    .is_some_and(|repository| repository.eq_ignore_ascii_case(identity))
+    // Linked by repository (the checkout's origin remote against the cloud
+    // repository), never by a name two repositories can share.
+    let wanted = identity.and_then(repository_key);
+    let matches = |space: &&Space| {
+        wanted.as_ref().is_some_and(|wanted| {
+            [
+                space.remote_repository.as_deref(),
+                space.repository_id.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|spelling| repository_key(spelling).as_ref() == Some(wanted))
         })
-    });
+    };
+    let matched = spaces.iter().find(matches);
     let representative = matched.map(|space| crate::view::representative_space(spaces, space));
     Some(CloudProjectGroup {
         key: matched
@@ -37,14 +131,7 @@ pub fn cloud_project_group(
             .unwrap_or_else(|| format!("cloud-project:{project_id}")),
         name: representative
             .map(|space| space.display_name().to_owned())
-            .unwrap_or_else(|| {
-                project["displayName"]
-                    .as_str()
-                    .filter(|name| !name.trim().is_empty())
-                    .or(identity.and_then(|id| id.rsplit('/').next()))
-                    .unwrap_or("Cloud project")
-                    .to_owned()
-            }),
+            .unwrap_or_else(|| cloud_project_short_name(project)),
         project_id: project_id.to_owned(),
         local_space: representative.map(|space| space.id.clone()),
     })
@@ -54,6 +141,57 @@ pub fn cloud_project_group(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn repository_spellings_reduce_to_one_key() {
+        for spelling in [
+            "https://github.com/opcodehq/zuse.git",
+            "git@github.com:opcodehq/zuse.git",
+            "ssh://git@github.com/OpcodeHQ/zuse",
+            "github.com/opcodehq/zuse",
+            "https://github.com/opcodehq/zuse/",
+        ] {
+            assert_eq!(
+                repository_key(spelling).as_deref(),
+                Some("github.com/opcodehq/zuse"),
+                "{spelling}"
+            );
+        }
+        assert_eq!(repository_key("commit:abc"), None);
+        assert_eq!(repository_key("zuse"), None);
+        assert_eq!(
+            repository_owner_and_name("git@github.com:swarajbachu/zuse.git").as_deref(),
+            Some("swarajbachu/zuse")
+        );
+    }
+
+    #[test]
+    fn only_colliding_project_names_show_their_owner() {
+        let input = |name: &str, repository: Option<&str>| ProjectLabelInput {
+            name: name.into(),
+            repository: repository.map(str::to_owned),
+        };
+        let labels = project_labels(&[
+            input("zuse", Some("https://github.com/opcodehq/zuse.git")),
+            input("zuse", Some("github.com/swarajbachu/zuse")),
+            input("zuse-review", Some("github.com/opcodehq/zuse-review")),
+            input("legion", None),
+            // The same repository listed twice is not a collision.
+            input("zkit", Some("github.com/opcodehq/zkit")),
+            input("zkit", Some("git@github.com:opcodehq/zkit.git")),
+        ]);
+        assert_eq!(
+            labels,
+            [
+                "opcodehq/zuse",
+                "swarajbachu/zuse",
+                "zuse-review",
+                "legion",
+                "zkit",
+                "zkit"
+            ]
+        );
+    }
 
     #[test]
     fn cloud_tasks_join_the_local_repository_group_without_changing_checkout_identity() {

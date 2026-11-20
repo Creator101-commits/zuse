@@ -2964,16 +2964,18 @@ impl Pickers {
     /// for their representative. The device chip then picks which checkout.
     fn project_rows(&self, cx: &App) -> Vec<ProjectRow> {
         let state = self.state.read(cx);
+        let labels = state.project_labels(self.cloud_project_list());
         let mut rows: Vec<ProjectRow> = Vec::new();
         for space in &state.spaces {
             let key = zuse_protocol::view::project_key(space);
             if rows.iter().any(|row| row.key == key) {
                 continue;
             }
-            rows.push(ProjectRow {
-                key,
-                name: state.representative_space(space).display_name().to_string(),
-            });
+            let name =
+                labels.local.get(&key).cloned().unwrap_or_else(|| {
+                    state.representative_space(space).display_name().to_string()
+                });
+            rows.push(ProjectRow { key, name });
         }
         rows.sort_by_key(|row| (row.name.to_lowercase(), row.key.clone()));
         rows
