@@ -1,0 +1,12 @@
+{
+	"name": "@zuse/analytics",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		"./public-site": "./src/public-site.ts"
+	},
+	"dependencies": {
+		"posthog-js": "^1.406.2"
+	}
+}
