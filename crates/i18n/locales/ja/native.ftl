@@ -1239,7 +1239,7 @@ native-release_channel_description = Stable receives tested releases. Preview re
 native-whats_new_title = Zuse { $version }
 
 # Context: "What's new" dialog, counts of changes in the release by kind. $added, $changed, $fixed (number).
-native-whats_new_summary = 新機能 { $added } · 改善 { $changed } · 修正 { $fixed }
+native-whats_new_summary = 新機能 { $added } · 更新 { $changed } · 修正 { $fixed }
 
 # Context: "What's new" dialog primary button; closes it and hides the sidebar card for this version.
 native-whats_new_got_it = OK
