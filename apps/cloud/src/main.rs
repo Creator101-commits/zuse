@@ -1072,7 +1072,16 @@ async fn main() -> Result<()> {
                 !registry.configured_ids().is_empty(),
                 "Worker requires at least one configured managed provider"
             );
+            let preflight = zuse_cloud::providers::registry::preflight_errors();
+            for error in &preflight {
+                tracing::error!(error, "Provider configuration preflight failed");
+            }
             if check {
+                anyhow::ensure!(
+                    preflight.is_empty(),
+                    "Worker configuration invalid: {}",
+                    preflight.join("; ")
+                );
                 println!(
                     "Worker configuration and allocation/lifecycle schema verified; no jobs claimed"
                 );
@@ -1243,6 +1252,7 @@ async fn main() -> Result<()> {
                     }
                 };
             let mut grant_cleanup_at = 0;
+            let mut runtime_update_expiry_at = 0;
             let allocation_cancel = tokio_util::sync::CancellationToken::new();
             let allocation_kick = Arc::new(tokio::sync::Notify::new());
             let allocation_task = if once {
@@ -1360,6 +1370,19 @@ async fn main() -> Result<()> {
                         }
                     }
                     grant_cleanup_at = now_ms() + MAINTENANCE_MS;
+                }
+                if now_ms() >= runtime_update_expiry_at {
+                    // Deadline for in-flight runtime updates: never
+                    // "Downloading" forever on an online computer.
+                    match runtime.expire_runtime_updates(now_ms()).await {
+                        Ok(0) => {}
+                        Ok(expired) => tracing::warn!(expired, "Runtime updates timed out"),
+                        Err(error) => {
+                            tracing::warn!(code = error.code, "Runtime update expiry deferred")
+                        }
+                    }
+                    runtime_update_expiry_at =
+                        now_ms() + zuse_cloud::runtime::runtime_updates::EXPIRY_SWEEP_MS;
                 }
                 if now_ms() >= idle_sleep_at {
                     match runtime.idle_sleep_once(now_ms()).await {
@@ -1563,6 +1586,7 @@ async fn main() -> Result<()> {
                         due.as_ref().and_then(WorkerDue::earliest),
                         Some(idle_stages_at),
                         Some(grant_cleanup_at),
+                        Some(runtime_update_expiry_at),
                         Some(idle_sleep_at),
                         Some(asset_cleanup_at),
                     ]);

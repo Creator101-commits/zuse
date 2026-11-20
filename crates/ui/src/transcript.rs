@@ -1159,6 +1159,10 @@ pub enum RowKind {
         files: Arc<Vec<SharedString>>,
         /// Optimistic echo not yet confirmed by a doc frame.
         pending: bool,
+        /// A coordinator turn the Zapper engine assembled: `text` is its
+        /// short version and this is everything the agent received, shown
+        /// only behind "Show full prompt".
+        full_prompt: Option<SharedString>,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -1426,6 +1430,28 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
 #[cfg(test)]
 thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
+/// The whole prompt behind a Zapper coordinator turn, when the entry is one.
+/// Slack requests and ordinary messages show their text as before.
+fn zapper_full_prompt(
+    source: Option<&zuse_protocol::slack::MessageSource>,
+    raw: &str,
+) -> Option<SharedString> {
+    match source {
+        Some(zuse_protocol::slack::MessageSource::Zapper { .. }) if !raw.trim().is_empty() => {
+            Some(raw.to_owned().into())
+        }
+        _ => None,
+    }
+}
+
+fn zapper_prompt_label(open: bool) -> &'static str {
+    if open {
+        "Hide full prompt"
+    } else {
+        "Show full prompt"
+    }
+}
+
 /// Build the block rows of one (already continuation-joined) entry.
 ///
 /// `parse` maps `(part_key, text)` to a block tree — the entity supplies
@@ -1462,6 +1488,7 @@ pub fn rows_for_entry(
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+        let full_prompt = zapper_full_prompt(source.as_ref(), &raw);
         let raw = source.as_ref().map(|s| s.text().to_owned()).unwrap_or(raw);
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
@@ -1530,8 +1557,14 @@ pub fn rows_for_entry(
             id: entry.id.clone().into(),
             version: if source.is_some() {
                 fnv1a(
-                    &serde_json::to_vec(&(raw.as_str(), &source, pending, turn_start))
-                        .unwrap_or_default(),
+                    &serde_json::to_vec(&(
+                        raw.as_str(),
+                        &source,
+                        pending,
+                        turn_start,
+                        full_prompt.as_ref().map(|full| full.len()),
+                    ))
+                    .unwrap_or_default(),
                 )
             } else {
                 (raw.len() as u64) << 1 | pending as u64 | ((!turn_start) as u64) << 62
@@ -1545,6 +1578,7 @@ pub fn rows_for_entry(
                 badges: Arc::new(badges),
                 files: Arc::new(files),
                 pending,
+                full_prompt,
             },
             entry_id,
             // User rows always carry the strip (chat-view.tsx: whenever
@@ -3714,6 +3748,9 @@ pub struct Transcript {
     /// keyed by row id. Render-local like `folds` — never part of the row
     /// fingerprint, so toggling one costs a repaint, not a rebuild.
     user_folds: HashMap<SharedString, FoldState>,
+    /// Zapper coordinator turns whose full prompt is shown, by row id.
+    /// Collapsed by default; render-local, never part of the row fingerprint.
+    zapper_prompts_open: HashSet<SharedString>,
     /// Full laid-out text heights for long user bubbles. The text's paint
     /// canvas writes these cells without notifying or mutating the transcript;
     /// click handlers read them as exact endpoints for the RESIZE tween. This
@@ -4194,6 +4231,7 @@ impl Transcript {
             bulk_tool_details: None,
             find: None,
             user_folds: HashMap::new(),
+            zapper_prompts_open: HashSet::new(),
             user_heights: HashMap::new(),
             user_hold_task: None,
             user_hold_token: 0,
@@ -7720,6 +7758,74 @@ impl Transcript {
             .into_any_element()
     }
 
+    /// "Show full prompt" under a Zapper coordinator turn, and the prompt
+    /// itself once opened. Collapsed by default.
+    fn render_zapper_prompt(
+        &mut self,
+        row_id: &SharedString,
+        row_ix: usize,
+        full: SharedString,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.zapper_prompts_open.contains(row_id);
+        let key = row_id.clone();
+        let glyph = if open {
+            crate::icons::ALT_ARROW_UP
+        } else {
+            crate::icons::ALT_ARROW_DOWN
+        };
+        let toggle = div()
+            .id(SharedString::from(format!("{row_id}-full-prompt")))
+            .group("zapper-prompt-toggle")
+            .role(gpui::Role::Button)
+            .aria_label(zapper_prompt_label(open))
+            .aria_expanded(open)
+            .flex()
+            .items_center()
+            .gap(px(5.0))
+            .text_size(crate::typography::ui_rems(12.))
+            .text_color(theme.text_muted)
+            .cursor_pointer()
+            .hover(|s| s.text_color(theme.text))
+            .child(zapper_prompt_label(open))
+            .child(
+                crate::icons::icon(glyph)
+                    .size(px(11.0))
+                    .text_color(theme.text_muted)
+                    .group_hover("zapper-prompt-toggle", |s| s.text_color(theme.text)),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.zapper_prompts_open.remove(&key) {
+                    this.zapper_prompts_open.insert(key.clone());
+                }
+                this.list.remeasure_items(row_ix..row_ix + 1);
+                cx.notify();
+            }));
+        div()
+            .pt(px(6.0))
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(6.0))
+            .child(toggle)
+            .when(open, |d| {
+                d.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .pt(px(6.0))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .text_size(crate::typography::ui_rems(12.))
+                        .line_height(crate::typography::ui_rems(18.))
+                        .text_color(theme.text_muted)
+                        .child(full),
+                )
+            })
+            .into_any_element()
+    }
+
     /// A plain text link aligned with the message's left edge, following the
     /// continuation ellipsis when collapsed. No pill, border, or button wash.
     fn render_user_expander(
@@ -9032,7 +9138,9 @@ impl Transcript {
                 badges,
                 files,
                 pending,
+                full_prompt,
             } => {
+                let full_prompt = full_prompt.clone();
                 let attachments = attachments.clone();
                 let badges = badges.clone();
                 let files = files.clone();
@@ -9120,10 +9228,17 @@ impl Transcript {
                                         .text_color(theme.text)
                                         .when(pending, |el| el.opacity(0.65))
                                         .when_some(sender.as_ref(), |d, sender| {
-                                            d.child(zuse_viewport::zot_issues::sender_header(
-                                                sender,
-                                                row.timestamp.unwrap_or_default(),
-                                            ))
+                                            d.child(if full_prompt.is_some() {
+                                                zuse_viewport::zot_issues::sender_header_labeled(
+                                                    sender,
+                                                    zuse_protocol::slack::MessageSource::ZAPPER_LABEL,
+                                                )
+                                            } else {
+                                                zuse_viewport::zot_issues::sender_header(
+                                                    sender,
+                                                    row.timestamp.unwrap_or_default(),
+                                                )
+                                            })
                                         })
                                         .child(self.render_user_body(
                                             &row.id,
@@ -9133,7 +9248,12 @@ impl Transcript {
                                             &theme,
                                             window,
                                             cx,
-                                        )),
+                                        ))
+                                        .when_some(full_prompt.clone(), |d, full| {
+                                            d.child(self.render_zapper_prompt(
+                                                &row.id, ix, full, &theme, cx,
+                                            ))
+                                        }),
                                 ),
                         );
                     }
@@ -11143,6 +11263,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Todo { .. } => crate::icons::TOOL_TODO,
         call if is_agent_call(call) => crate::icons::TOOL_AGENT,
         ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::TOOL_AGENT,
+        call if zuse_protocol::view::is_zapper_call(call) => crate::icons::TOOL_ZAPPER,
         ToolCall::Mcp { .. } => crate::icons::WIDGET,
         ToolCall::Unknown { .. } => crate::icons::TOOL_GENERIC,
     }
@@ -12736,6 +12857,60 @@ impl Render for Transcript {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zapper_tool_calls_get_the_zapper_icon() {
+        let mcp = |server: &str, tool: &str| ToolCall::Mcp {
+            server: server.into(),
+            tool: tool.into(),
+            input: None,
+        };
+        for tool in [
+            "zapper_command",
+            "zapper_events",
+            "zapper_files",
+            "zapper_issue",
+            "zapper_acknowledge",
+            "zot_command",
+            "zot_events",
+            "zot_files",
+            "zot_acknowledge",
+        ] {
+            assert_eq!(
+                tool_icon_path(&mcp("zuse", tool)),
+                crate::icons::TOOL_ZAPPER
+            );
+            assert_eq!(
+                tool_icon_path(&mcp("other", tool)),
+                crate::icons::TOOL_ZAPPER
+            );
+            let prefixed = ToolCall::Unknown {
+                name: format!("mcp__zuse__{tool}"),
+                input: None,
+            };
+            assert_eq!(tool_icon_path(&prefixed), crate::icons::TOOL_ZAPPER);
+        }
+        // Other MCP tools and plain unknown tools are unchanged.
+        assert_eq!(
+            tool_icon_path(&mcp("zuse", "list_chats")),
+            crate::icons::WIDGET
+        );
+        let other = ToolCall::Unknown {
+            name: "zapper_command".into(),
+            input: None,
+        };
+        assert_eq!(tool_icon_path(&other), crate::icons::TOOL_GENERIC);
+    }
+
+    #[test]
+    fn zapper_chip_title_uses_the_action_type() {
+        let call = ToolCall::Mcp {
+            server: "zuse".into(),
+            tool: "zapper_command".into(),
+            input: Some(serde_json::json!({ "action": { "type": "createIssue" } })),
+        };
+        assert_eq!(tool_chip_content(&call), ("Zapper", "createIssue".into()));
+    }
+
     use super::*;
 
     #[test]
@@ -19329,6 +19504,23 @@ impl Transcript {
         cx.notify();
     }
 
+    /// Open every Zapper turn's full prompt, as clicking "Show full prompt" would.
+    pub fn fixture_open_zapper_prompts(&mut self, cx: &mut Context<Self>) {
+        for row in &self.rows {
+            if matches!(
+                row.kind,
+                RowKind::User {
+                    full_prompt: Some(_),
+                    ..
+                }
+            ) {
+                self.zapper_prompts_open.insert(row.id.clone());
+            }
+        }
+        self.list.remeasure();
+        cx.notify();
+    }
+
     /// Open the first user message's images in the lightbox at `index`, as a
     /// thumbnail click would. False while they are still loading.
     pub fn fixture_open_user_gallery(
@@ -19414,5 +19606,71 @@ mod slack_tests {
         assert_eq!(sender.name, "Ada Lovelace in #engineering · Slack");
         assert!(!sender.activity);
         assert!(!text.contains("prior Slack thread"));
+    }
+
+    fn zapper_entry(source: Option<serde_json::Value>) -> SessionMessageEntry {
+        let mut parts = vec![
+            serde_json::json!({"kind":"text","id":"t0","text":"You are Release, a Zapper…\n\n## User message\nShip the notes"}),
+        ];
+        if let Some(source) = source {
+            parts.push(serde_json::json!({"kind":"messageSource","id":"source","source":source}));
+        }
+        serde_json::from_value(serde_json::json!({"id":"turn","role":"user","parts":parts,"createdAt":1,"deviceId":"d"})).unwrap()
+    }
+
+    #[test]
+    fn zapper_turns_show_their_summary_with_the_prompt_behind_a_disclosure() {
+        let entry = zapper_entry(Some(serde_json::json!({
+            "_tag": "zapper",
+            "text": "2 thread reports · ZAP-7 changed",
+            "sender": {"zotId": "release", "chatId": "coord", "name": "Release", "avatar": null},
+        })));
+        let rows = rows_for_entry(&entry, false, false, &mut |_, _| {
+            panic!("User messages do not parse assistant markdown")
+        });
+        assert_eq!(rows.len(), 1);
+        let RowKind::User {
+            text,
+            sender: Some(sender),
+            full_prompt: Some(full),
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("Zapper turn row missing its sender or full prompt")
+        };
+        assert_eq!(text.as_ref(), "2 thread reports · ZAP-7 changed");
+        assert_eq!(sender.name, "Release");
+        assert!(!sender.activity, "a compact bubble, not an activity notice");
+        assert!(full.contains("You are Release, a Zapper"));
+        assert!(!text.contains("You are Release"));
+        assert_eq!(zapper_prompt_label(false), "Show full prompt");
+    }
+
+    #[test]
+    fn untagged_and_slack_messages_render_as_before() {
+        let rows = rows_for_entry(&zapper_entry(None), false, false, &mut |_, _| {
+            panic!("User messages do not parse assistant markdown")
+        });
+        let RowKind::User {
+            text,
+            sender,
+            full_prompt,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("user row missing")
+        };
+        assert!(text.contains("You are Release, a Zapper"));
+        assert!(sender.is_none());
+        assert!(full_prompt.is_none());
+
+        let slack = zapper_entry(Some(serde_json::json!({"_tag":"slack","text":"Fix it"})));
+        let rows = rows_for_entry(&slack, false, false, &mut |_, _| {
+            panic!("User messages do not parse assistant markdown")
+        });
+        let RowKind::User { full_prompt, .. } = &rows[0].kind else {
+            panic!("user row missing")
+        };
+        assert!(full_prompt.is_none());
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use zuse_protocol::zots::{ZotAction, ZotCommand};
+use zuse_protocol::zots::ZotAction;
 
 impl EngineRpc {
     pub(super) async fn zot_command(
@@ -8,7 +8,7 @@ impl EngineRpc {
     ) -> Result<RpcReply, RpcError> {
         let actor = params["_zotActor"].as_str().map(str::to_owned);
         let worker = params["_zotWorkerChatId"].as_str().map(str::to_owned);
-        let command: ZotCommand = parse_params(params)?;
+        let command = zuse_protocol::zots::parse_command(params).map_err(RpcError::BadParams)?;
         let zots = self
             .zots
             .as_ref()

@@ -49,6 +49,22 @@ impl Shell {
             .overflow_hidden()
     }
 
+    /// The right-hand inset card's edge: the conversation card's radius and
+    /// hairline. The chat's right pane, the pull request pane and the Zapper
+    /// panel all wear it.
+    pub(super) fn inset_pane_card<E: Styled>(card: E) -> E {
+        card.rounded(px(layout::RADIUS))
+            .border_1()
+            .border_color(crate::theme::hairline(0.05))
+    }
+
+    /// The gutter around a right-hand inset card: above, below and on the
+    /// window side. The board's own right gutter is the seam on its left, so
+    /// there is one gap there, not two.
+    pub(super) fn inset_pane_frame<E: Styled>(frame: E, gutter: f32) -> E {
+        frame.py(px(gutter)).pr(px(gutter))
+    }
+
     pub(super) fn workspace_sidebar_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let width = self.sidebar_now();
         if self.workspace_gutter() == 0. || width < 1. {

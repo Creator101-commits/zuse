@@ -1,4 +1,6 @@
 //! A known rejected create requires an explicit authorized retry of its original intent.
+//! So does a first start that passed its deadline without a provider machine:
+//! both stop visibly (status `cloud_provider_rejected`, Retry and Delete).
 use super::*;
 use crate::access::{Access, Permission};
 use serde::Deserialize;
@@ -31,29 +33,60 @@ pub(crate) fn metadata(row: &Value) -> Value {
         && row["provider_sandbox_id"].is_null()
         && !blocked(row);
     if available {
-        json!({"operationId":marker["operationId"],"state":"rejected","errorCode":"cloud_provider_rejected","retryAvailable":true,"rejectedAt":marker["rejectedAt"]})
+        json!({"operationId":marker["operationId"],"state":"rejected","errorCode":"cloud_provider_rejected","reason":marker["reason"].as_str().unwrap_or("rejected"),"retryAvailable":true,"rejectedAt":marker["rejectedAt"]})
     } else {
         Value::Null
     }
 }
+/// The create journal of an operation that has no provider machine identity.
+/// `unknown`/`pending` only ever stop visibly after the start deadline; a
+/// Retry then still reconciles the exact name before any new create.
 fn receipt_state(receipt: Option<&Value>, name: &str) -> Option<&'static str> {
     match receipt {
         None => Some("not-submitted"),
-        Some(r)
-            if r["machine_name"] == name
-                && r["outcome"] == "rejected"
-                && r["machine_id"].is_null() =>
-        {
-            Some("rejected")
+        Some(r) if r["machine_name"] == name && r["machine_id"].is_null() => {
+            match r["outcome"].as_str() {
+                Some("rejected") => Some("rejected"),
+                Some("unknown") => Some("unknown"),
+                Some("pending") => Some("pending"),
+                _ => None,
+            }
         }
         _ => None,
     }
+}
+/// When the current start began: the original request, or the latest
+/// authorized Retry of it.
+fn start_began(row: &Value, op: &Value) -> i64 {
+    let permit = &row["request_config"]["rustAllocationDispatchAuthorization"];
+    let retried = (permit["operationId"] == op["operation_id"])
+        .then(|| permit["approvedAt"].as_i64())
+        .flatten()
+        .unwrap_or(0);
+    op["created_at"].as_i64().unwrap_or(0).max(retried)
 }
 impl RuntimeControl {
     pub(super) async fn stop_rejected_allocation(
         &self,
         job: &jobs::Job,
         now: i64,
+    ) -> Result<bool, ApiError> {
+        self.stop_allocation(job, now, false).await
+    }
+    /// Stops a first start that has had no provider machine for
+    /// `ALLOCATION_START_DEADLINE_MS`, whatever its last error was.
+    pub(super) async fn stop_overdue_allocation(
+        &self,
+        job: &jobs::Job,
+        now: i64,
+    ) -> Result<bool, ApiError> {
+        self.stop_allocation(job, now, true).await
+    }
+    async fn stop_allocation(
+        &self,
+        job: &jobs::Job,
+        now: i64,
+        overdue: bool,
     ) -> Result<bool, ApiError> {
         let journal_exists: bool = crate::db::schema::present(
             &self.pool,
@@ -76,9 +109,16 @@ impl RuntimeControl {
         let op:Option<Value>=sqlx::query_scalar("SELECT to_jsonb(a) FROM zuse_rust_allocations a WHERE operation_id=$1 AND workspace_id=$2 AND generation=$3 FOR UPDATE")
             .bind(job.payload["operationId"].as_str()).bind(&job.resource_id).bind(generation).fetch_optional(&mut *tx).await?;
         let Some(op) = op else { return Ok(false) };
-        if op["phase"] != "creating"
+        let phase_ok = op["phase"] == "creating" || (overdue && op["phase"] == "planned");
+        if !phase_ok
             || !op["machine_id"].is_null()
             || row["request_config"]["rustAllocationOperationId"] != op["operation_id"]
+        {
+            return Ok(false);
+        }
+        if overdue
+            && now.saturating_sub(start_began(&row, &op))
+                < super::effects::ALLOCATION_START_DEADLINE_MS
         {
             return Ok(false);
         }
@@ -88,16 +128,21 @@ impl RuntimeControl {
         else {
             return Ok(false);
         };
+        if !overdue && !matches!(create_state, "not-submitted" | "rejected") {
+            return Ok(false);
+        }
         let changed=sqlx::query("UPDATE zuse_rust_jobs SET state='failed',last_error_code='cloud_provider_rejected',lease_token=NULL,lease_expires_at=NULL,updated_at=$3 WHERE job_id=$1 AND lease_token=$2 AND state='running' AND lease_expires_at>$3 AND resource_generation=$4")
             .bind(&job.id).bind(&job.lease_token).bind(now).bind(generation).execute(&mut *tx).await?;
         if changed.rows_affected() != 1 {
             return Ok(false);
         }
         let mut config = row["request_config"].clone();
-        config["rustAllocationRejection"] = json!({"version":1,"operationId":op["operation_id"],"generation":generation,"artifactId":op["snapshot_id"],"machineName":op["machine_name"],"storageIncarnationId":op["storage_incarnation_id"],"rejectedAt":now,"createReceiptState":create_state});
+        config["rustAllocationRejection"] = json!({"version":1,"operationId":op["operation_id"],"generation":generation,"artifactId":op["snapshot_id"],"machineName":op["machine_name"],"storageIncarnationId":op["storage_incarnation_id"],"rejectedAt":now,"createReceiptState":create_state,"reason":if overdue {"deadline"} else {"rejected"}});
         sqlx::query("UPDATE api_cloud_workspaces SET status_code='cloud_provider_rejected',request_config=$2,revision=revision+1,updated_at=GREATEST(updated_at+1,$3) WHERE workspace_id=$1")
             .bind(&job.resource_id).bind(config).bind(now).execute(&mut *tx).await?;
         tx.commit().await?;
+        tracing::warn!(workspace=%job.resource_id, operation=op["operation_id"].as_str().unwrap_or(""),
+            create_state, overdue, "Cloud allocation stopped; Retry or Delete required");
         Ok(true)
     }
     #[tracing::instrument(name="cloud_allocation_stage", skip_all, fields(workspace=%job.resource_id, operation="begin_dispatch"))]
@@ -105,6 +150,7 @@ impl RuntimeControl {
         &self,
         job: &jobs::Job,
         operation: &Value,
+        absent_confirmed: bool,
     ) -> Result<(), ApiError> {
         let mut tx = self.pool.begin().await?;
         let (row, generation, lease_until, observed_operation, capacity_observation) = if let Some(
@@ -203,7 +249,23 @@ impl RuntimeControl {
         if prior_rejected && !has_permit {
             return Err(ApiError::unavailable("cloud_provider_rejected"));
         }
-        if journal.is_some() && !prior_rejected {
+        // An uncertain create (lost response, or a worker that died after the
+        // dispatch claim) that is still not visible by its exact name after the
+        // resolution window was never accepted: dispatch it again under the
+        // same name. A late original then conflicts on that name and is
+        // adopted by the next reconciliation instead of duplicating.
+        let unresolved_since = journal
+            .as_ref()
+            .filter(|j| {
+                matches!(j["outcome"].as_str(), Some("unknown" | "pending"))
+                    && j["machine_id"].is_null()
+            })
+            .and_then(|j| j["updated_at"].as_i64());
+        let resolved_absent = absent_confirmed
+            && unresolved_since.is_some_and(|since| {
+                since <= now.saturating_sub(super::effects::UNRESOLVED_CREATE_WINDOW_MS)
+            });
+        if journal.is_some() && !prior_rejected && !resolved_absent {
             return Err(ApiError::unavailable(
                 "cloud_provider_allocation_outcome_unknown",
             ));
@@ -219,6 +281,13 @@ impl RuntimeControl {
             .await?;
         if prior_rejected {
             sqlx::query("UPDATE zuse_rust_provider_creates SET outcome='pending',updated_at=$2 WHERE operation_id=$1 AND outcome='rejected' AND machine_id IS NULL").bind(current["operation_id"].as_str()).bind(now).execute(&mut *tx).await?;
+        } else if resolved_absent {
+            let changed=sqlx::query("UPDATE zuse_rust_provider_creates SET outcome='pending',updated_at=$2 WHERE operation_id=$1 AND outcome IN ('unknown','pending') AND machine_id IS NULL AND updated_at=$3").bind(current["operation_id"].as_str()).bind(now).bind(unresolved_since).execute(&mut *tx).await?;
+            if changed.rows_affected() != 1 {
+                return Err(ApiError::conflict("cloud_allocation_fenced"));
+            }
+            tracing::warn!(workspace=%job.resource_id, operation=current["operation_id"].as_str().unwrap_or(""),
+                "Uncertain provider create not found by name after the resolution window; dispatching again");
         } else {
             sqlx::query("INSERT INTO zuse_rust_provider_creates(operation_id,workspace_id,machine_name,outcome,updated_at) VALUES($1,$2,$3,'pending',$4)")
                 .bind(current["operation_id"].as_str()).bind(&job.resource_id).bind(current["machine_name"].as_str()).bind(now).execute(&mut *tx).await?;
@@ -292,7 +361,7 @@ impl RuntimeControl {
         }
         if metadata(&row).is_null()
             || !source_matches(&row, &op, &config["rustAllocationRejection"])
-            || op["phase"] != "creating"
+            || !matches!(op["phase"].as_str(), Some("creating" | "planned"))
             || !op["machine_id"].is_null()
             || !row["runtime_credential_hash"].is_null()
             || !config["rustStorageEnrollment"].is_null()
@@ -321,7 +390,7 @@ impl RuntimeControl {
         config["rustAllocationRetries"] = ledger;
         let receipt = json!({"version":1,"priorProviderReceipt":receipt,"commandId":input.command_id,"workspaceId":id,"operationId":operation,"actorId":access.actor.account_id,"generation":generation,"artifactId":op["snapshot_id"],"machineName":op["machine_name"],"storageIncarnationId":op["storage_incarnation_id"],"state":"accepted","requestedAt":now});
         config["rustAllocationRetries"][&input.command_id] = receipt.clone();
-        config["rustAllocationDispatchAuthorization"] = json!({"version":1,"state":"approved","commandId":input.command_id,"operationId":operation,"generation":generation,"artifactId":op["snapshot_id"],"machineName":op["machine_name"],"storageIncarnationId":op["storage_incarnation_id"],"expectedReceipt":receipt["priorProviderReceipt"]});
+        config["rustAllocationDispatchAuthorization"] = json!({"version":1,"state":"approved","commandId":input.command_id,"operationId":operation,"generation":generation,"artifactId":op["snapshot_id"],"machineName":op["machine_name"],"storageIncarnationId":op["storage_incarnation_id"],"expectedReceipt":receipt["priorProviderReceipt"],"approvedAt":now});
         config
             .as_object_mut()
             .ok_or_else(|| ApiError::conflict("cloud_allocation_retry_fenced"))?

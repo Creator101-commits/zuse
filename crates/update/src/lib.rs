@@ -42,6 +42,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
 
+pub mod changelog;
 mod linux;
 mod release;
 pub use release::{ReleaseChannel, initialize_channel, load_channel, save_channel};

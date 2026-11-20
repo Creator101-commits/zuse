@@ -1,0 +1,110 @@
+"use client";
+import { IconFileDiff, IconMessageCircle } from "@tabler/icons-react";
+import {
+	useWebsiteMessages,
+	WebsiteRichMessage,
+} from "@zuse/i18n/website/react";
+import { motion, useReducedMotion } from "motion/react";
+import { cn } from "@/components/tpl/agenforce/lib/utils";
+
+const TILES = [
+	"auth.ts",
+	"+ guard retry",
+	"- stale state",
+	"test.ts",
+	"+ regression",
+	"16 passed",
+	"review",
+	"2 comments",
+	"resolved",
+];
+
+export const SkeletonTwo = () => {
+	const { message: t } = useWebsiteMessages();
+	const reduceMotion = useReducedMotion();
+	const tiles = TILES.map((tile) => ({
+		tile,
+		label:
+			tile === "16 passed"
+				? t("showcase:tests_passed")
+				: tile === "review"
+					? t("showcase:review")
+					: tile === "2 comments"
+						? t("showcase:two_comments")
+						: tile === "resolved"
+							? t("showcase:resolved")
+							: tile,
+	}));
+	return (
+		<div className="flex h-full w-full flex-1 flex-col items-center justify-center gap-3 px-8">
+			<div className="grid w-full max-w-md grid-cols-4 gap-2">
+				{tiles.slice(0, 4).map(({ tile, label }, index) => (
+					<DiffTile
+						key={tile}
+						tile={tile}
+						label={label}
+						index={index}
+						reduceMotion={reduceMotion}
+					/>
+				))}
+			</div>
+			<div className="grid w-full max-w-lg grid-cols-5 gap-2">
+				{tiles.slice(4).map(({ tile, label }, index) => (
+					<DiffTile
+						key={tile}
+						tile={tile}
+						label={label}
+						index={index + 4}
+						reduceMotion={reduceMotion}
+					/>
+				))}
+			</div>
+			<div className="border-border bg-card flex w-full max-w-sm items-start gap-2 rounded-xl border p-3 shadow-xl">
+				<IconMessageCircle className="text-primary mt-0.5 size-4 shrink-0" />
+				<p className="text-muted-foreground text-[10px] leading-4">
+					<WebsiteRichMessage
+						id="showcase:reviewer_retry_only_after_the_persisted_checkout_state_is_restored"
+						values={{}}
+						components={{
+							part0: <span className="text-heading font-medium" />,
+						}}
+					/>
+				</p>
+			</div>
+		</div>
+	);
+};
+
+function DiffTile({
+	label,
+	tile,
+	index,
+	reduceMotion,
+}: {
+	tile: string;
+	label: string;
+	index: number;
+	reduceMotion: boolean | null;
+}) {
+	const positive =
+		tile.startsWith("+") || tile.includes("passed") || tile === "resolved";
+	const negative = tile.startsWith("-");
+	return (
+		<div className="border-border relative aspect-square rounded-xl border border-dashed p-px">
+			<motion.div
+				initial={false}
+				whileInView={{ opacity: 1, scale: 1 }}
+				transition={{ duration: 0.24, delay: reduceMotion ? 0 : index * 0.045 }}
+				className={cn(
+					"bg-card relative z-10 flex h-full w-full items-center justify-center rounded-[11px] p-1 text-center font-mono text-[8px] shadow-sm",
+					positive && "bg-primary/10 text-primary",
+					negative && "bg-red-500/10 text-red-500",
+					!positive && !negative && "text-muted-foreground",
+				)}
+			>
+				{index === 0 ? <IconFileDiff className="size-4" /> : label}
+			</motion.div>
+			<div className="absolute inset-0 rounded-xl bg-[image:repeating-linear-gradient(315deg,var(--color-border)_0,var(--color-border)_1px,transparent_0,transparent_50%)] bg-[size:5px_5px]" />
+		</div>
+	);
+}

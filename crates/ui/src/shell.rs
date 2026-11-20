@@ -125,6 +125,7 @@ mod cloud_tabs;
 mod tabs;
 mod top_bar;
 mod voice_stage;
+mod whats_new;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -156,6 +157,7 @@ actions!(
         OpenModelPicker,
         NewSession,
         OpenSettings,
+        ShowWhatsNew,
         OpenDevices,
         OpenCloudSettings,
         OpenBilling,
@@ -2373,6 +2375,8 @@ pub struct Shell {
     chat_rename: Option<ChatRename>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// Open "What's new" dialog: the bundled changelog release it shows.
+    whats_new: Option<usize>,
     deleting_chat: bool,
     cloud_delete_commands: std::collections::HashMap<String, String>,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
@@ -3036,6 +3040,7 @@ impl Shell {
             slack_links: Default::default(),
             chat_rename: None,
             delete_confirm: None,
+            whats_new: None,
             deleting_chat: false,
             cloud_delete_commands: std::collections::HashMap::new(),
             discard_working_tree: None,
@@ -10992,6 +10997,7 @@ impl Shell {
         .fade_overflow_y(&self.sidebar_scroll);
 
         let github_star_banner = self.render_github_star_banner(theme, cx);
+        let whats_new_card = self.render_whats_new_card(theme, cx);
 
         div()
             .w(px(
@@ -11017,6 +11023,8 @@ impl Shell {
             // "Star on GitHub" banner until dismissed (persisted), above the
             // footer, below the lists. App updates live in the footer itself.
             .when_some(github_star_banner, |el, banner| el.child(banner))
+            // The running release's notes, until dismissed (persisted per version).
+            .when_some(whats_new_card, |el, card| el.child(card))
             .child(
                 div()
                     .px(px(8.))
@@ -12390,6 +12398,10 @@ impl Shell {
             cx.notify();
             return true;
         }
+        if self.whats_new.take().is_some() {
+            cx.notify();
+            return true;
+        }
         if self.sync_flow.has_visible_overlay()
             || self.delete_space_confirm.is_some()
             || self.chat_menu.get().is_some()
@@ -12955,6 +12967,9 @@ impl Shell {
         }
         if let Some(update) = self.render_update_prompt(viewport, cx) {
             overlays.push(update);
+        }
+        if let Some(whats_new) = self.render_whats_new_dialog(viewport, cx) {
+            overlays.push(whats_new);
         }
 
         overlays
@@ -14115,11 +14130,7 @@ impl Shell {
             // In takeover the panel's left edge IS the sidebar seam, which
             // already carries the sidebar tone's right hairline — a second
             // border there doubled up (user report).
-            .when(inset, |el| {
-                el.rounded(px(zuse_viewport::workspace_style::RADIUS))
-                    .border_1()
-                    .border_color(crate::theme::hairline(0.05))
-            })
+            .when(inset, Self::inset_pane_card)
             .when(!inset && !self.right_pane_expanded, |el| {
                 el.border_l_1().border_color(theme.border)
             })
@@ -14158,7 +14169,7 @@ impl Shell {
             div()
                 .h_full()
                 .relative()
-                .when(inset, |el| el.py(px(gutter)).pr(px(gutter)))
+                .when(inset, |el| Self::inset_pane_frame(el, gutter))
                 .child(panel)
                 .into_any_element(),
         )
@@ -15882,6 +15893,7 @@ impl Render for Shell {
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
+            .on_action(cx.listener(|this, _: &ShowWhatsNew, _, cx| this.show_whats_new(cx)))
             .on_action(cx.listener(|this, _: &OpenDevices, _, cx| {
                 this.open_settings(SettingsSection::Devices, cx)
             }))

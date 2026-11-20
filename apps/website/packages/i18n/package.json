@@ -1,0 +1,20 @@
+{
+	"name": "@zuse/i18n",
+	"version": "0.0.0",
+	"private": true,
+	"type": "module",
+	"exports": {
+		"./registry": "./src/registry.ts",
+		"./website/react": "./src/website/react.tsx",
+		"./website/server": "./src/website/server.ts",
+		"./website/types": "./src/generated/website.ts",
+		"./detection": "./src/detection.ts"
+	},
+	"dependencies": {
+		"i18next": "^25.4.0",
+		"react-i18next": "^15.7.0"
+	},
+	"peerDependencies": {
+		"react": "^19"
+	}
+}
