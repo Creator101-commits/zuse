@@ -139,6 +139,10 @@ impl IssuePanel {
             .and_then(|id| self.zot.issues.iter().find(|i| i.id == *id))
             .map(ZotIssue::code)
     }
+    /// The issue on show, by id. Hosts that open issues as tabs follow it.
+    pub fn selected_id(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
     pub fn show_issue(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected = Some(id);
         self.editor = None;
