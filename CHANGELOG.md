@@ -7,6 +7,25 @@
 - Add opt-in Slack cloud tasks with threaded status/results, sender/channel attribution, and a workspace/repository connection flow in Cloud settings. Server credentials stay encrypted; enablement requires the Slack migration and a rebuilt compatible runtime image.
 - Link a chat or a Zapper to a Slack channel from its right-click menu. Finished replies post into a Slack thread, your replies in that thread come back to the chat, and Zappers post under their own name and avatar. Their worker threads get their own threads in the same channel. Requires the new Slack migration and re-authorizing the Slack app for its added scopes.
 
+## 0.27.2 - 2026-11-20
+
+### Added
+
+- Cloud first run: your cloud image builds by itself once repositories are connected (no setup script needed) and rebuilds when repositories change, with one progress row in Setup, First chat and Overview.
+- The workspace menu offers Worktree, Local and Cloud. A new chat in a project backed by a cloud repository opens on Cloud; picking Cloud for a local project uses the matching cloud repository and connects it if needed.
+- The First chat step picks a repository and opens a Cloud chat with a short guide and one-click prompts.
+- Add repository opens a searchable palette: repositories grouped by GitHub account with avatars and update times, multi-select from the keyboard, connected repositories marked, and quick links to manage GitHub access, install on another account or refresh.
+- GitHub connect finishes automatically: the confirmation page opens Zuse, which confirms only the connection it started.
+
+### Changed
+
+- Coding agent connections: one row per agent with a single action, sign-in inside the row (device code with copy and an Open sign-in page link, Claude setup token, or API key), and a menu for adding accounts or disconnecting.
+- Update status is an icon button in the sidebar footer instead of a separate row.
+
+### Fixed
+
+- History search matches commit SHAs by prefix instead of fuzzy-matching every commit's SHA.
+
 ## 0.27.1 - 2026-11-19
 
 ### Added
