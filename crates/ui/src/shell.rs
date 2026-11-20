@@ -14079,11 +14079,7 @@ impl Shell {
             // In takeover the panel's left edge IS the sidebar seam, which
             // already carries the sidebar tone's right hairline — a second
             // border there doubled up (user report).
-            .when(inset, |el| {
-                el.rounded(px(zuse_viewport::workspace_style::RADIUS))
-                    .border_1()
-                    .border_color(crate::theme::hairline(0.05))
-            })
+            .when(inset, Self::inset_pane_card)
             .when(!inset && !self.right_pane_expanded, |el| {
                 el.border_l_1().border_color(theme.border)
             })
@@ -14122,7 +14118,7 @@ impl Shell {
             div()
                 .h_full()
                 .relative()
-                .when(inset, |el| el.py(px(gutter)).pr(px(gutter)))
+                .when(inset, |el| Self::inset_pane_frame(el, gutter))
                 .child(panel)
                 .into_any_element(),
         )

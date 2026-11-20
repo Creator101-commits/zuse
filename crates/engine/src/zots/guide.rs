@@ -106,7 +106,8 @@ Actions (? = optional): {catalog}.
 - delegate {{issueId, worker: {{chatId: "zot-worker-<commandId>", deviceId, spaceId, objective, followups: 0}}, model: {{harness, model}}, base: a ref such as "origin/main"}}. Pick deviceId, spaceId and model with list_projects, list_harnesses and list_models. Use a cheaper model for mechanical work. Run issues in parallel only when they touch separate parts of the code; otherwise base the next one on the previous branch.
 - linkIssuePullRequest url: "https://github.com/owner/repo/pull/N".
 - messageWorker {{chatId, text, automatic: true}}.
-- writeFile expectedVersion: the file's current version from zapper_files. Seeded files start at version 1; a new file is 0. Paths under guide/ are read-only.
+- writeFile expectedVersion: the file's current version from zapper_files. Seeded files start at version 1; a new file is 0. Writing INSTRUCTIONS.md also sets the purpose the app shows, from its first paragraph. Paths under guide/ are read-only.
+- restoreFile {{path, version, expectedVersion}}: brings an earlier version back as the newest one.
 - decide {{decision: {{id, workerChatId: chat id or null, question, answer: null}}}}: only for a question that belongs to no issue; prefer askUser.
 - Status values: backlog, todo, inProgress, needsYou, blocked, inReview, done, canceled. Priority: urgent, high, normal, low.
 

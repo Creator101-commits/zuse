@@ -223,6 +223,12 @@ fn summary(zot: &Zot, board: &Board) -> String {
     )
 }
 
+/// The brief as it stands, purpose doc included.
+fn brief(zot: &Zot, files: &[ZotFile]) -> String {
+    let soul = files.iter().find(|f| f.path == PURPOSE_FILE);
+    coordinator_brief(zot, &purpose_section(zot, soul))
+}
+
 /// Builds the turn for `message`.
 pub(super) fn compose(
     zot: &Zot,
@@ -232,7 +238,7 @@ pub(super) fn compose(
     files: &[ZotFile],
     message: &str,
 ) -> Turn {
-    let brief = coordinator_brief(zot);
+    let brief = brief(zot, files);
     let hook = takes_system_prompt(harness) && brief.len() <= SYSTEM_PROMPT_MAX;
     let key = format!(
         "{}:{:x}",
@@ -422,7 +428,7 @@ mod tests {
         let brief = system_prompt(&first).unwrap();
         assert!(brief.contains("## Hard rules"));
         assert!(brief.contains("guide/commands.md (zapper-commands)"));
-        assert!(brief.contains("## Purpose\nCoordinate the release"));
+        assert!(brief.contains("## Purpose (INSTRUCTIONS.md, version 1)\nCoordinate the release"));
         assert!(!first.prompt.contains("## Hard rules"));
         assert!(first.prompt.starts_with("## Board (revision"));
         assert!(first.prompt.contains("NOTES.md v1"));
@@ -631,8 +637,10 @@ mod tests {
                 .unwrap();
         }
         let zot = store.get("release").unwrap();
-        let brief = coordinator_brief(&zot);
-        let purpose = zot.config.purpose.trim().len();
+        let files = store.files("release", false).unwrap();
+        let soul = files.iter().find(|f| f.path == PURPOSE_FILE);
+        let purpose = purpose_section(&zot, soul).len();
+        let brief = brief(&zot, &files);
         assert!(brief.len() - purpose < 3 * 1024, "{}", brief.len());
         let first = turn(&store, HarnessId::ClaudeCode, "Start");
         assert!(first.prompt.contains("- 18 more: zapper_issue {zotId}"));
@@ -668,7 +676,8 @@ mod tests {
                 .contains(&zuse_protocol::zots::action_catalog())
         );
         for guide in guide::guides() {
-            assert!(coordinator_brief(&store.get("release").unwrap()).contains(guide.path));
+            let files = store.files("release", false).unwrap();
+            assert!(brief(&store.get("release").unwrap(), &files).contains(guide.path));
             assert!(store.file("release", guide.path).is_ok());
         }
         assert!(store.file("release", "guide/missing.md").is_err());

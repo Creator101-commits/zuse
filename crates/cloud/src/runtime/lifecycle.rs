@@ -149,6 +149,18 @@ impl RetainedProvider for Boxd {
 fn provider_error(_: ProviderError) -> ApiError {
     ApiError::unavailable("cloud_retained_provider_failed")
 }
+/// The original allocation has not produced an enrolled computer yet, and no
+/// lifecycle operation or archive owns the workspace.
+fn first_start_pending(row: &Value) -> bool {
+    let config = &row["request_config"];
+    !deleted(row)
+        && row["desired_state"] == "ready"
+        && matches!(row["state"].as_str(), Some("queued" | "provisioning"))
+        && config["rustAllocationOperationId"].is_string()
+        && !storage_enrolled(row)
+        && config["rustLifecycleOperation"].is_null()
+        && config["recoveryArchive"].is_null()
+}
 pub(super) fn deleted(row: &Value) -> bool {
     row["desired_state"] == "deleted"
         || matches!(row["state"].as_str(), Some("deleting" | "deleted"))
@@ -251,6 +263,17 @@ impl RuntimeControl {
         }
         if super::recreation::leases_blocked(&row) {
             return Err(ApiError::conflict("computer_recreation_in_progress"));
+        }
+        // A first start that never enrolled storage has nothing to retain:
+        // archiving it cancels the start (including a stuck or failed one)
+        // and removes any machine it may have created, through deletion. A
+        // replay after that deletion began returns the same deletion.
+        if action == Action::Archive
+            && (first_start_pending(&row)
+                || row["request_config"]["rustDeleteOperation"].is_object())
+        {
+            tx.rollback().await?;
+            return self.delete_workspace(id, access, Some(&command), now).await;
         }
         if self
             .recovery_action(&mut tx, &row, action, &command, now)
