@@ -1959,6 +1959,8 @@ mod tests {
                 );
             }
         }
+        assert!(description.contains("restoreFile {path, version, expectedVersion}"));
+        assert!(description.contains("INSTRUCTIONS.md"));
         assert!(description.contains("fullState"));
         assert!(schema["properties"]["fullState"].is_object());
         assert!(schema["properties"]["action"]["anyOf"].is_array());
