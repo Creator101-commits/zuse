@@ -640,9 +640,7 @@ impl Shell {
             .size_full()
             .flex()
             .flex_col()
-            .rounded(px(zuse_viewport::workspace_style::RADIUS))
-            .border_1()
-            .border_color(crate::theme::hairline(0.05))
+            .map(Self::inset_pane_card)
             .bg(theme.panel_bg())
             .overflow_hidden()
             // The titlebar is a glass overlay over the full-height content
@@ -651,13 +649,10 @@ impl Shell {
                 Theme::TITLEBAR_HEIGHT - zuse_viewport::workspace_style::GUTTER
             ))
             .child(content);
-        // Same insets as the chat's right pane: the board's own right gutter
-        // is the seam, so the pane adds none on its left (one 4px gap, not 8).
-        let panel = div()
-            .size_full()
-            .py(px(zuse_viewport::workspace_style::GUTTER))
-            .pr(px(zuse_viewport::workspace_style::GUTTER))
-            .child(panel);
+        // Same insets as the chat's right pane.
+        let panel =
+            Self::inset_pane_frame(div().size_full(), zuse_viewport::workspace_style::GUTTER)
+                .child(panel);
         let transition = self.active_tween_endpoints(self.pull_request_pane.tween);
         let content_width = stable_panel_content_width(target, transition).max(visible);
         div()
