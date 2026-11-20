@@ -201,6 +201,7 @@ icon_assets![
     (TOOL_WEB, "tool-web"),
     (TOOL_TODO, "tool-todo"),
     (TOOL_GENERIC, "tool-generic"),
+    (TOOL_ZAPPER, "tool-zapper"),
     (BELL, "bell"),
     (VOLUME_LOUD, "volume-loud"),
     (MICROPHONE, "microphone"),

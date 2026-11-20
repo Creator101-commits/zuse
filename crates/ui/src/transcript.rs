@@ -11263,6 +11263,7 @@ fn tool_icon_path(call: &ToolCall) -> &'static str {
         ToolCall::Todo { .. } => crate::icons::TOOL_TODO,
         call if is_agent_call(call) => crate::icons::TOOL_AGENT,
         ToolCall::Unknown { name, .. } if name == "Wait for agents" => crate::icons::TOOL_AGENT,
+        call if zuse_protocol::view::is_zapper_call(call) => crate::icons::TOOL_ZAPPER,
         ToolCall::Mcp { .. } => crate::icons::WIDGET,
         ToolCall::Unknown { .. } => crate::icons::TOOL_GENERIC,
     }
@@ -12848,6 +12849,60 @@ impl Render for Transcript {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn zapper_tool_calls_get_the_zapper_icon() {
+        let mcp = |server: &str, tool: &str| ToolCall::Mcp {
+            server: server.into(),
+            tool: tool.into(),
+            input: None,
+        };
+        for tool in [
+            "zapper_command",
+            "zapper_events",
+            "zapper_files",
+            "zapper_issue",
+            "zapper_acknowledge",
+            "zot_command",
+            "zot_events",
+            "zot_files",
+            "zot_acknowledge",
+        ] {
+            assert_eq!(
+                tool_icon_path(&mcp("zuse", tool)),
+                crate::icons::TOOL_ZAPPER
+            );
+            assert_eq!(
+                tool_icon_path(&mcp("other", tool)),
+                crate::icons::TOOL_ZAPPER
+            );
+            let prefixed = ToolCall::Unknown {
+                name: format!("mcp__zuse__{tool}"),
+                input: None,
+            };
+            assert_eq!(tool_icon_path(&prefixed), crate::icons::TOOL_ZAPPER);
+        }
+        // Other MCP tools and plain unknown tools are unchanged.
+        assert_eq!(
+            tool_icon_path(&mcp("zuse", "list_chats")),
+            crate::icons::WIDGET
+        );
+        let other = ToolCall::Unknown {
+            name: "zapper_command".into(),
+            input: None,
+        };
+        assert_eq!(tool_icon_path(&other), crate::icons::TOOL_GENERIC);
+    }
+
+    #[test]
+    fn zapper_chip_title_uses_the_action_type() {
+        let call = ToolCall::Mcp {
+            server: "zuse".into(),
+            tool: "zapper_command".into(),
+            input: Some(serde_json::json!({ "action": { "type": "createIssue" } })),
+        };
+        assert_eq!(tool_chip_content(&call), ("Zapper", "createIssue".into()));
+    }
+
     use super::*;
 
     #[test]
