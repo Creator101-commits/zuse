@@ -111,6 +111,10 @@ fn text_box(input: Entity<ComposerInput>, min_height: f32, cx: &App) -> gpui::Di
 /// Space between a field's label and its control, everywhere on the form.
 const LABEL_GAP: f32 = 8.0;
 const PURPOSE_HINT: &str = "Leave blank and it will ask you after it starts.";
+/// Compact one-line repository rows; the list shows about seven before it
+/// scrolls, the last one cut in half as a hint.
+const REPO_ROW_HEIGHT: f32 = 30.0;
+const REPO_LIST_HEIGHT: f32 = 4.0 + 7.5 * (REPO_ROW_HEIGHT + 1.0);
 const MAX_WORKERS: std::ops::RangeInclusive<u32> = 1..=32;
 const MAX_FOLLOWUPS: std::ops::RangeInclusive<u32> = 0..=32;
 
@@ -150,21 +154,29 @@ fn field_heading(
 struct RepoChoice {
     space_id: String,
     device_id: String,
+    /// `owner/repo` when the project has a hosted remote, else its name.
     name: String,
     path: String,
+    /// Whether `name` came from the remote rather than the folder.
+    hosted: bool,
     /// Set when the projects span more than one device.
     device: Option<String>,
 }
 
-fn space_name(space: &zuse_protocol::Space) -> String {
-    space.name.clone().unwrap_or_else(|| {
-        space
-            .path
-            .rsplit('/')
-            .find(|part| !part.is_empty())
-            .unwrap_or(&space.path)
-            .to_owned()
-    })
+/// `owner/repo` from a stamped remote (`host/owner/repo`).
+fn remote_name(remote: &str) -> Option<String> {
+    let (_host, path) = remote.trim_end_matches(".git").split_once('/')?;
+    let mut segments = path.split('/').filter(|s| !s.is_empty());
+    let owner = segments.next()?;
+    let repo = segments.next()?;
+    Some(format!("{owner}/{repo}"))
+}
+
+fn space_name(space: &zuse_protocol::Space) -> (String, bool) {
+    match space.remote_repository.as_deref().and_then(remote_name) {
+        Some(name) => (name, true),
+        None => (space.display_name().to_owned(), false),
+    }
 }
 
 fn repo_choices(
@@ -178,18 +190,22 @@ fn repo_choices(
     });
     spaces
         .iter()
-        .map(|space| RepoChoice {
-            space_id: space.id.clone(),
-            device_id: space.device_id.clone(),
-            name: space_name(space),
-            path: space.path.clone(),
-            device: several.then(|| {
-                devices
-                    .iter()
-                    .find(|d| d.id == space.device_id)
-                    .map(|d| d.name.clone())
-                    .unwrap_or_else(|| space.device_id.clone())
-            }),
+        .map(|space| {
+            let (name, hosted) = space_name(space);
+            RepoChoice {
+                space_id: space.id.clone(),
+                device_id: space.device_id.clone(),
+                name,
+                path: space.path.clone(),
+                hosted,
+                device: several.then(|| {
+                    devices
+                        .iter()
+                        .find(|d| d.id == space.device_id)
+                        .map(|d| d.name.clone())
+                        .unwrap_or_else(|| space.device_id.clone())
+                }),
+            }
         })
         .collect()
 }
@@ -268,7 +284,12 @@ fn chip(
             d.border_color(theme.border_strong)
                 .bg(theme.element_active)
                 .text_color(theme.text_strong)
-                .child(icon(icons::CHECK).size(px(11.0)))
+                .child(
+                    icon(icons::CHECK)
+                        .size(px(11.0))
+                        .flex_none()
+                        .text_color(theme.text_strong),
+                )
         })
         .when(!active, |d| {
             d.border_color(theme.border)
@@ -1127,62 +1148,72 @@ impl Shell {
                 .child(hint(theme, "Try part of the name or folder path."))
                 .into_any_element()
         } else {
+            let spaces = self.state.read(cx).spaces.clone();
             let mut rows = div()
                 .id("zot-repo-list")
                 .role(gpui::Role::List)
-                .max_h(px(284.0))
+                .max_h(px(REPO_LIST_HEIGHT))
+                .p(px(4.0))
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
                 .overflow_y_scroll()
                 .track_scroll(&scroll);
             for (index, choice) in visible.into_iter().enumerate() {
                 let checked = selected.iter().any(|r| r.space_id == choice.space_id);
                 let highlighted = active == Some(index);
-                let detail = match &choice.device {
-                    Some(device) => format!("{device} · {}", choice.path),
-                    None => choice.path.clone(),
+                // The path only when the name alone may not say which
+                // checkout it is; the device when there are several.
+                let detail = match (&choice.device, choice.hosted) {
+                    (Some(device), _) => Some(device.clone()),
+                    (None, false) => Some(choice.path.clone()),
+                    (None, true) => None,
                 };
+                let space = spaces.iter().find(|s| s.id == choice.space_id);
+                let artwork = div()
+                    .size(px(16.0))
+                    .flex_none()
+                    .rounded(px(4.0))
+                    .overflow_hidden()
+                    .child(self.project_artwork(space, false, cx));
                 rows = rows.child(
                     div()
                         .id(SharedString::from(format!("zot-repo-{}", choice.space_id)))
                         .role(gpui::Role::CheckBox)
                         .aria_label(SharedString::from(choice.name.clone()))
                         .aria_selected(checked)
+                        .h(px(REPO_ROW_HEIGHT))
+                        .flex_none()
                         .flex()
                         .items_center()
-                        .gap(px(10.0))
-                        .px(px(12.0))
-                        .py(px(8.0))
+                        .gap(px(8.0))
+                        .px(px(8.0))
+                        .rounded(px(6.0))
                         .cursor_pointer()
                         .when(highlighted, |d| d.bg(theme.element_hover))
                         .hover(|d| d.bg(theme.element_hover))
-                        .when(index > 0, |d| {
-                            d.border_t_1().border_color(widgets::row_divider(theme))
-                        })
+                        .child(artwork)
                         .child(
-                            icon(icons::FOLDER)
-                                .size(px(15.0))
+                            div()
                                 .flex_none()
-                                .text_color(theme.text_muted),
+                                .max_w(px(320.0))
+                                .truncate()
+                                .text_size(crate::typography::text_sm())
+                                .text_color(if checked {
+                                    theme.text_strong
+                                } else {
+                                    theme.text
+                                })
+                                .child(choice.name.clone()),
                         )
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(crate::typography::text_sm())
-                                        .text_color(theme.text_strong)
-                                        .child(choice.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(crate::typography::ui_rems(11.5))
-                                        .text_color(theme.text_faint)
-                                        .child(detail),
-                                ),
+                                .truncate()
+                                .text_size(crate::typography::text_xs())
+                                .text_color(theme.text_faint)
+                                .children(detail),
                         )
                         .child(widgets::select_check(theme, checked))
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1843,8 +1874,11 @@ mod tests {
     fn choices() -> Vec<RepoChoice> {
         let mut renamed = space("site", "local", "/Users/sam/code/www");
         renamed.name = Some("Marketing Site".into());
+        let mut hosted = space("zuse", "local", "/Users/sam/code/zuse-checkout");
+        hosted.remote_repository = Some("github.com/swarajbachu/zuse".into());
         repo_choices(
             &[
+                hosted,
                 space("web", "local", "/Users/sam/code/acme-web"),
                 space("api", "local", "/Users/sam/code/acme-api"),
                 renamed,
@@ -1878,21 +1912,37 @@ mod tests {
     fn repository_search_matches_path() {
         assert_eq!(names("/users/sam/code/www"), ["Marketing Site"]);
         assert_eq!(names("srv/repos"), ["Infra"]);
-        assert_eq!(names("sam/code").len(), 3);
+        assert_eq!(names("sam/code").len(), 4);
+        // A hosted project is still found by its folder.
+        assert_eq!(names("zuse-checkout"), ["swarajbachu/zuse"]);
     }
 
     #[test]
     fn repository_search_empty_query_lists_all_and_misses_list_none() {
-        assert_eq!(names("  ").len(), 4);
+        assert_eq!(names("  ").len(), 5);
         assert!(names("nothing-here").is_empty());
+    }
+
+    #[test]
+    fn hosted_projects_are_named_owner_slash_repo() {
+        assert_eq!(names("SWARAJ"), ["swarajbachu/zuse"]);
+        assert_eq!(names("bachu/zu"), ["swarajbachu/zuse"]);
+        let all = choices();
+        assert!(all[0].hosted);
+        assert!(!all[1].hosted);
+        assert_eq!(
+            remote_name("github.com/acme/app.git").as_deref(),
+            Some("acme/app")
+        );
+        assert_eq!(remote_name("github.com/acme"), None);
     }
 
     #[test]
     fn repository_choices_name_devices_only_when_several() {
         let all = choices();
-        assert_eq!(all[3].name, "Infra");
-        assert_eq!(all[3].device.as_deref(), Some("Build server"));
-        assert_eq!(all[0].device.as_deref(), Some("Studio Mac"));
+        assert_eq!(all[4].name, "Infra");
+        assert_eq!(all[4].device.as_deref(), Some("Build server"));
+        assert_eq!(all[1].device.as_deref(), Some("Studio Mac"));
         let one = repo_choices(
             &[space("web", "local", "/a/web")],
             &[device("local", "Mac")],
@@ -1904,8 +1954,8 @@ mod tests {
     fn repositories_toggle_on_and_off() {
         let all = choices();
         let mut selected = vec![];
-        assert!(toggle_repository(&mut selected, &all[1]));
-        assert!(toggle_repository(&mut selected, &all[3]));
+        assert!(toggle_repository(&mut selected, &all[2]));
+        assert!(toggle_repository(&mut selected, &all[4]));
         assert_eq!(
             selected,
             vec![
@@ -1919,7 +1969,7 @@ mod tests {
                 },
             ]
         );
-        assert!(!toggle_repository(&mut selected, &all[1]));
+        assert!(!toggle_repository(&mut selected, &all[2]));
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].space_id, "infra");
     }

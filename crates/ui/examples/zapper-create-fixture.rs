@@ -89,20 +89,53 @@ fn main() -> anyhow::Result<()> {
                 s.chats_synced = true;
                 s.spaces_synced = true;
                 s.selected_space = Some("web".into());
-                let space = |id: &str, device: &str, path: &str| {
+                let space = |id: &str, device: &str, path: &str, remote: Option<&str>| {
                     serde_json::from_value(serde_json::json!({
                         "id": id, "deviceId": device, "path": path,
+                        "remoteRepository": remote,
                         "createdAt": "2026-09-08T00:00:00Z"
                     }))
                     .unwrap()
                 };
                 s.spaces = vec![
-                    space("web", "local", "/Users/sam/code/acme-web"),
-                    space("api", "local", "/Users/sam/code/acme-api"),
-                    space("docs", "local", "/Users/sam/code/acme-docs"),
-                    space("mobile", "local", "/Users/sam/code/acme-mobile"),
-                    space("infra", "remote", "/srv/repos/infra"),
-                    space("billing", "remote", "/srv/repos/billing-worker"),
+                    space(
+                        "web",
+                        "local",
+                        "/Users/sam/code/acme-web",
+                        Some("github.com/acme/web"),
+                    ),
+                    space(
+                        "api",
+                        "local",
+                        "/Users/sam/code/acme-api",
+                        Some("github.com/acme/api"),
+                    ),
+                    space(
+                        "docs",
+                        "local",
+                        "/Users/sam/code/acme-docs",
+                        Some("github.com/acme/docs"),
+                    ),
+                    space(
+                        "mobile",
+                        "local",
+                        "/Users/sam/code/acme-mobile",
+                        Some("github.com/acme/mobile"),
+                    ),
+                    space("notes", "local", "/Users/sam/notes", None),
+                    space(
+                        "infra",
+                        "remote",
+                        "/srv/repos/infra",
+                        Some("github.com/acme/infra"),
+                    ),
+                    space(
+                        "billing",
+                        "remote",
+                        "/srv/repos/billing-worker",
+                        Some("github.com/acme/billing-worker"),
+                    ),
+                    space("scratch", "remote", "/srv/scratch", None),
                 ];
                 s
             });
@@ -180,7 +213,7 @@ fn main() -> anyhow::Result<()> {
                         .await
                         .unwrap();
                 }
-                let _ = cx.update(|cx| cx.quit());
+                cx.update(|cx| cx.quit());
             })
             .detach();
             state.update(cx, |_, cx| cx.notify());
