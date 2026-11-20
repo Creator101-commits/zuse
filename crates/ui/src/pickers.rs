@@ -3001,12 +3001,17 @@ impl Pickers {
             let Some(id) = project["projectId"].as_str() else {
                 return NO_ACTIVE_ROW;
             };
-            return self
+            if let Some(index) = self
                 .filtered_cloud_projects(cx)
                 .iter()
                 .position(|row| row["projectId"].as_str() == Some(id))
-                .map(|index| self.filtered_project_rows(cx).len() + index + 1)
-                .unwrap_or(NO_ACTIVE_ROW);
+            {
+                return self.filtered_project_rows(cx).len() + index + 1;
+            }
+            // A linked repository is its local project's row.
+            if state.selected_space_row().is_none() {
+                return NO_ACTIVE_ROW;
+            }
         }
         if state.no_project {
             0
@@ -7734,6 +7739,67 @@ mod tests {
                 .unwrap();
             cx.run_until_parked();
         }
+    }
+
+    /// A local project linked to a Cloud repository is one picker row;
+    /// only repositories without a local checkout get rows of their own,
+    /// and colliding names read as `owner/repo`.
+    #[gpui::test]
+    fn linked_cloud_repository_is_one_project_row(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::dark()));
+        let handle = cx.add_window(|_, cx| {
+            let state = cx.new(|_| {
+                let mut state = AppState::new();
+                state.spaces =
+                    vec![serde_json::from_value(serde_json::json!({
+                    "id":"zuse","deviceId":"mac","path":"/Users/owner/Developer/startups/zuse",
+                    "remoteRepository":"https://github.com/opcodehq/zuse.git",
+                    "createdAt":"2026-11-01T00:00:00Z"
+                }))
+                .unwrap()];
+                state.selected_space = Some("zuse".into());
+                state
+            });
+            let mut pickers = Pickers::new(state, cx);
+            let project = |id: &str, repo: &str| {
+                serde_json::json!({"projectId":id,"displayName":repo.rsplit('/').next(),
+                    "repositoryIdentity":format!("github.com/{repo}")})
+            };
+            pickers.cloud.set_project_rows_for_test(vec![
+                project("linked", "opcodehq/zuse"),
+                project("fork", "swarajbachu/zuse"),
+                project("review", "opcodehq/zuse-review"),
+            ]);
+            pickers
+        });
+        handle
+            .update(cx, |pickers, _, cx| {
+                let local: Vec<String> = pickers
+                    .project_rows(cx)
+                    .into_iter()
+                    .map(|row| row.name)
+                    .collect();
+                assert_eq!(local, ["opcodehq/zuse"]);
+                let cloud: Vec<String> = pickers
+                    .filtered_cloud_projects(cx)
+                    .iter()
+                    .map(|row| row["projectId"].as_str().unwrap().to_owned())
+                    .collect();
+                assert_eq!(
+                    cloud,
+                    ["fork", "review"],
+                    "the linked repository has no second row"
+                );
+                // Cloud chosen for the linked repository highlights its one row.
+                pickers.state.update(cx, |state, _| {
+                    state.cloud_project = Some(serde_json::json!({"projectId":"linked"}))
+                });
+                assert_eq!(pickers.selected_space_menu_index(cx), 1);
+            })
+            .unwrap();
+        handle
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
     }
 
     #[gpui::test]
