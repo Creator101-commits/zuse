@@ -23,9 +23,6 @@ const PRESSURE: (u16, &str) = (4104, "workspace gateway backpressure");
 #[cfg(test)]
 #[path = "gateway/command_hint_tests.rs"]
 mod command_hint_tests;
-#[cfg(test)]
-#[path = "gateway/native_acceptance.rs"]
-mod native_acceptance;
 
 #[derive(Clone)]
 pub struct Grant {
