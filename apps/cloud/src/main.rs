@@ -1072,7 +1072,16 @@ async fn main() -> Result<()> {
                 !registry.configured_ids().is_empty(),
                 "Worker requires at least one configured managed provider"
             );
+            let preflight = zuse_cloud::providers::registry::preflight_errors();
+            for error in &preflight {
+                tracing::error!(error, "Provider configuration preflight failed");
+            }
             if check {
+                anyhow::ensure!(
+                    preflight.is_empty(),
+                    "Worker configuration invalid: {}",
+                    preflight.join("; ")
+                );
                 println!(
                     "Worker configuration and allocation/lifecycle schema verified; no jobs claimed"
                 );
