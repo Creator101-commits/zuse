@@ -1220,6 +1220,7 @@ impl AgentAccounts {
             HarnessId::Cursor => self.detect_cursor().map(|d| d.account_key),
             HarnessId::Grok => self.detect_grok().map(|d| d.account_key),
             HarnessId::Devin => self.detect_devin().map(|d| d.account_key),
+            HarnessId::Antigravity => self.detect_antigravity().await.map(|login| login.method),
             HarnessId::Opencode | HarnessId::Pi => self
                 .detect_keyed_entry(harness, store_key?)
                 .await
@@ -1332,6 +1333,19 @@ impl AgentAccounts {
                 self.remove_grok_entry(&map_key)?;
             }
             HarnessId::Devin => remove_if_exists(&self.inner.config.devin_credentials_file)?,
+            HarnessId::Antigravity => {
+                self.acp_harness(harness)
+                    .unwrap()
+                    .sign_out()
+                    .await
+                    .map_err(|error| EngineError::Other(error.to_string()))?;
+                if self.detect_antigravity().await.is_some() {
+                    return Err(EngineError::Other(
+                        "Antigravity reported sign-out, but a login is still saved. Try again."
+                            .into(),
+                    ));
+                }
+            }
             HarnessId::Opencode | HarnessId::Pi => {
                 let key = store_key
                     .ok_or_else(|| EngineError::Other("That login names no provider.".into()))?;
@@ -4820,13 +4834,48 @@ mod login_tests {
         let rows = listed(&accounts.list(true).await.unwrap());
         assert_eq!(rows.len(), 1);
         assert!(rows[0].active && !rows[0].switchable);
-        // The live login can't be forgotten out from under the agent.
+        // A failed logout keeps the account connected. Never invoke a real server in this test.
+        accounts.override_cli(HarnessId::Antigravity, tmp.path().join("missing-server"));
         assert!(
             accounts
                 .forget(HarnessId::Antigravity, &rows[0].id)
                 .await
                 .is_err()
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let token = config
+                .antigravity_home
+                .as_ref()
+                .unwrap()
+                .join("antigravity-acp/acp_token.json");
+            let server = tmp.path().join("logout-server");
+            std::fs::write(
+                &server,
+                format!(
+                    r#"#!/bin/sh
+while read -r line; do
+  id=$(printf '%s' "$line" | sed 's/.*"id":\([0-9]*\).*/\1/')
+  case "$line" in
+    *'"method":"logout"'*) rm -- '{}' ;;
+  esac
+  printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+done
+"#,
+                    token.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
+            accounts.override_cli(HarnessId::Antigravity, server);
+            let after = accounts
+                .forget(HarnessId::Antigravity, &rows[0].id)
+                .await
+                .unwrap();
+            assert!(listed(&after).is_empty());
+            assert!(!token.exists());
+        }
     }
 
     /// A stand-in for Anthropic's token endpoint: accepts one code and

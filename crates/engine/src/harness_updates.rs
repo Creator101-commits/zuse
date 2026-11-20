@@ -467,6 +467,14 @@ impl Drop for UpdateIntentGuard {
     }
 }
 
+fn default_update_policy(harness: HarnessId) -> HarnessUpdatePolicy {
+    if harness == HarnessId::Antigravity {
+        HarnessUpdatePolicy::AutoWhenIdle
+    } else {
+        HarnessUpdatePolicy::default()
+    }
+}
+
 impl HarnessUpdateCoordinator {
     pub fn new(data_dir: &Path, registry: Arc<HarnessRegistry>) -> Self {
         let prefs_path = data_dir.join("harness-update-prefs.json");
@@ -485,7 +493,11 @@ impl HarnessUpdateCoordinator {
             .iter()
             .copied()
             .map(|harness| {
-                let policy = prefs.policies.get(&harness).copied().unwrap_or_default();
+                let policy = prefs
+                    .policies
+                    .get(&harness)
+                    .copied()
+                    .unwrap_or_else(|| default_update_policy(harness));
                 let phase = if enabled.contains(&harness) && policy != HarnessUpdatePolicy::Off {
                     HarnessUpdatePhase::Checking
                 } else {
@@ -1414,7 +1426,7 @@ impl HarnessUpdateCoordinator {
             .policies
             .get(&harness)
             .copied()
-            .unwrap_or_default()
+            .unwrap_or_else(|| default_update_policy(harness))
     }
 
     fn status(&self, harness: HarnessId) -> HarnessUpdateStatus {
@@ -2692,6 +2704,36 @@ esac
         registry.register(Arc::new(ExecutableHarness(executable, HarnessId::Grok)));
         let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry);
         (temp, coordinator)
+    }
+
+    #[test]
+    fn antigravity_updates_automatically_unless_the_user_selected_a_policy() {
+        use zuse_protocol::HarnessUpdatePolicy;
+        let temp = tempfile::tempdir().unwrap();
+        let registry = Arc::new(HarnessRegistry::new());
+        registry.register(Arc::new(ExecutableHarness(
+            temp.path().join("agent"),
+            HarnessId::Antigravity,
+        )));
+        let coordinator = super::HarnessUpdateCoordinator::new(temp.path(), registry.clone());
+        assert_eq!(
+            coordinator.status(HarnessId::Antigravity).policy,
+            HarnessUpdatePolicy::AutoWhenIdle
+        );
+        assert_eq!(
+            coordinator.policy(HarnessId::Antigravity),
+            HarnessUpdatePolicy::AutoWhenIdle
+        );
+        coordinator.set_policy(HarnessId::Antigravity, HarnessUpdatePolicy::Off);
+        let reloaded = super::HarnessUpdateCoordinator::new(temp.path(), registry);
+        assert_eq!(
+            reloaded.policy(HarnessId::Antigravity),
+            HarnessUpdatePolicy::Off
+        );
+        assert_eq!(
+            reloaded.status(HarnessId::Antigravity).policy,
+            HarnessUpdatePolicy::Off
+        );
     }
 
     #[test]

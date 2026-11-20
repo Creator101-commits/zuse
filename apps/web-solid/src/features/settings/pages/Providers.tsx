@@ -529,11 +529,11 @@ function AccountRow(props: { account: AgentAccount; blocked: boolean; onRemove: 
         <Show when={busy()}>
           <InlineSpinner label="Working" />
         </Show>
-        <Show when={a().switchable && !busy()}>
+        <Show when={(a().switchable || a().harness === "antigravity") && !busy()}>
           <Menu
             placement="bottom-end"
             items={[
-              ...(a().active ? [] : [{ label: "Switch to this account", disabled: props.blocked, onSelect: () => void accountAction(a(), "switch") }]),
+              ...(a().active || !a().switchable ? [] : [{ label: "Switch to this account", disabled: props.blocked, onSelect: () => void accountAction(a(), "switch") }]),
               { label: "Remove account", danger: true, disabled: props.blocked, onSelect: props.onRemove },
             ]}
             trigger={(triggerProps) => (
