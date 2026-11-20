@@ -55,6 +55,22 @@ pub(super) fn resolve_cloud_harness(
         .or(remembered)
 }
 
+/// Whether the agent has replied (with text) after the latest user message.
+fn latest_message_answered(transcript: &[zuse_model::SessionMessageEntry]) -> bool {
+    let Some(last_user) = transcript
+        .iter()
+        .rposition(|entry| entry.role == zuse_model::MessageRole::User)
+    else {
+        return false;
+    };
+    transcript[last_user + 1..].iter().any(|entry| {
+        entry.role == zuse_model::MessageRole::Assistant
+            && entry.parts.iter().any(|part| {
+                matches!(part, zuse_model::MessagePart::Text { text, .. } if !text.trim().is_empty())
+            })
+    })
+}
+
 pub(super) struct CloudConversation {
     pub(super) target: CloudTarget,
     pub(super) state: Entity<AppState>,
@@ -301,8 +317,17 @@ impl CloudConversation {
                     .find(|entry| entry.role == zuse_model::MessageRole::User)
                     .map(|entry| entry.id.as_str())
             });
-        let response_started = initial_id
-            .is_some_and(|id| zuse_viewport::cloud_response_started(&state.transcript, id));
+        // The computer may record the first message under its own id: a reply
+        // to the transcript's first user message counts as well.
+        let first_user = state
+            .transcript
+            .iter()
+            .find(|entry| entry.role == zuse_model::MessageRole::User)
+            .map(|entry| entry.id.as_str());
+        let response_started = [initial_id, first_user]
+            .into_iter()
+            .flatten()
+            .any(|id| zuse_viewport::cloud_response_started(&state.transcript, id));
         let initial = !response_started
             && (self.first_message.is_some()
                 || launch.is_some_and(|row| {
@@ -387,7 +412,10 @@ impl CloudConversation {
         // A computer stage that failed (the server's failed or
         // needs-attention status) offers Retry and Delete on that line.
         let failed = computer.as_ref().is_some_and(|stage| !stage.busy);
-        let line = if computer.as_ref().is_some_and(|stage| stage.busy) {
+        // Once the agent answered the latest message, the computer is clearly
+        // up: no waiting line.
+        let answered = latest_message_answered(&self.state.read(cx).transcript);
+        let line = if !answered && computer.as_ref().is_some_and(|stage| stage.busy) {
             Some(SharedString::from("Waiting for computer…"))
         } else {
             agent
@@ -1941,6 +1969,94 @@ mod tests {
             assert!(view.activity(cx).is_none(),"revocation is terminal, not a new computer starting");
             assert!(view.error.as_deref().unwrap().contains("Cloud access changed"));
 
+        });
+    }
+    /// The owner's "yoo" sequence: the first message shows at once as the
+    /// launch's stand-in with "Waiting for computer…"; when the computer is
+    /// ready and its transcript has the message (under its own id) and the
+    /// reply, the stand-in and the waiting line are gone: one user bubble.
+    #[gpui::test]
+    fn first_message_reconciles_to_one_bubble_without_a_stale_waiting_line(
+        cx: &mut TestAppContext,
+    ) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(initialize);
+        let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            std::sync::Arc::new(PendingController),
+        ));
+        let view = cx.new(|cx| {
+            CloudConversation::new(
+                CloudTarget {
+                    controller,
+                    subject: "owner".into(),
+                    organization: None,
+                    workspace: "task".into(),
+                    initial_session: "session".into(),
+                },
+                json!({"workspaceId":"task","state":"provisioning","statusCode":"allocating"}),
+                json!({"firstMessage":"yoo"}),
+                boot(dir.path()),
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.sync_progress(cx);
+            let echo = view.launch_echo_id();
+            assert!(
+                view.state
+                    .read(cx)
+                    .pending_echoes()
+                    .iter()
+                    .any(|e| e.id == echo),
+                "the first message shows at once"
+            );
+            assert!(view.computer_activity(cx).is_some_and(|stage| stage.busy));
+            // Ready; history and the live transcript arrive together.
+            view.computer.metadata = json!({"workspaceId":"task","state":"ready"});
+            view.admissions = json!([{"commandId":"launch:task","messageId":"admitted-first",
+                "text":"yoo","executionState":"completed"}]);
+            let entry = |id: &str, role, text: &str| zuse_model::SessionMessageEntry {
+                id: id.into(),
+                role,
+                parts: vec![zuse_model::MessagePart::Text {
+                    id: format!("text:{id}"),
+                    text: text.into(),
+                }],
+                created_at: 1,
+                device_id: String::new(),
+                status: None,
+                continuation_of: None,
+                duration_ms: None,
+            };
+            view.state.update(cx, |state, _| {
+                state.apply_transcript(vec![
+                    entry("runtime-user", zuse_model::MessageRole::User, "yoo"),
+                    entry(
+                        "runtime-reply",
+                        zuse_model::MessageRole::Assistant,
+                        "Yoo! What are we working on?",
+                    ),
+                ])
+            });
+            view.sync_progress(cx);
+            let state = view.state.read(cx);
+            assert!(
+                state.pending_echoes().is_empty(),
+                "the stand-in is replaced"
+            );
+            let users = state
+                .transcript
+                .iter()
+                .filter(|e| e.role == zuse_model::MessageRole::User)
+                .count();
+            assert_eq!(users, 1, "exactly one user bubble");
+            assert!(latest_message_answered(&state.transcript));
+            assert!(
+                !view.computer_activity(cx).is_some_and(|stage| stage.busy),
+                "no stale waiting line"
+            );
         });
     }
     struct OlderHistoryController {

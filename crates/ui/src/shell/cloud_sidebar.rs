@@ -383,7 +383,7 @@ impl Shell {
 }
 
 /// Sidebar ids of new chats still being created: `cloud:launch:<draft key>`.
-const PENDING_LAUNCH_PREFIX: &str = "launch:";
+pub(super) const PENDING_LAUNCH_PREFIX: &str = "launch:";
 /// The sidebar row of a new chat before the server lists it: its first
 /// message as the title, starting (or failed) like a starting computer.
 fn pending_launch_row(launch: &crate::composer::cloud::CloudLaunchSummary, now: i64) -> Value {

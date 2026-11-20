@@ -9360,7 +9360,10 @@ impl Shell {
         let cloud = id.starts_with(CLOUD_ROW_PREFIX);
         // Archived organization tasks have no restore list yet (Settings →
         // Archived lists personal computers), so they are not offered.
-        let cloud_locked = cloud && self.state.read(cx).cloud_organization_id().is_some();
+        // A chat still being created has no computer to archive yet.
+        let cloud_locked = cloud
+            && (self.state.read(cx).cloud_organization_id().is_some()
+                || id[CLOUD_ROW_PREFIX.len()..].starts_with(cloud_sidebar::PENDING_LAUNCH_PREFIX));
         // Cloud rows wear a small cloud beside their age, green while the
         // computer is up (the catalog's own state; nothing is polled).
         let cloud_online = id

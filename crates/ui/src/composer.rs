@@ -7189,12 +7189,27 @@ impl Composer {
         cx.notify();
     }
     pub(crate) fn discard_cloud_canvas_keys(&mut self, keys: &[String], cx: &mut Context<Self>) {
-        // A closed tab's pending chat creation goes with it.
-        self.parked_launches.retain(|key, _| !keys.contains(key));
+        // A closed tab's pending chat creation goes with it, and so does
+        // any computer it already started.
+        let closed: Vec<String> = self
+            .parked_launches
+            .keys()
+            .filter(|key| keys.contains(key))
+            .cloned()
+            .collect();
+        for key in closed {
+            if let Some(launch) = self.parked_launches.remove(&key) {
+                self.abandon_launch(launch, cx);
+            }
+        }
         let active = keys.contains(&self.current_key);
         if active {
             self.pickers
                 .update(cx, |pickers, cx| pickers.freeze_cloud_launch(false, cx));
+            if self.cloud.pending() {
+                let launch = self.cloud.take_launch();
+                self.abandon_launch(launch, cx);
+            }
         }
         let scoped = self
             .cloud_canvas_key
@@ -19789,6 +19804,108 @@ mod cloud_canvas_tests {
             );
             assert_eq!(c.failure_key.as_deref(), Some("cloud-canvas:a"));
         });
+    }
+    /// Delete on a failed launch never loses the message: with a newer draft
+    /// in the box it waits behind "Restore previous draft".
+    #[gpui::test]
+    fn deleting_a_failed_launch_keeps_its_message_behind_a_newer_draft(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let state = cx.new(|_| crate::state::AppState::new());
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |c, cx| {
+            c.set_cloud_canvas_key(Some("cloud-canvas:a".into()), cx);
+            c.cloud.request =
+                Some(serde_json::json!({"firstMessage":"Original task","projectId":"p"}));
+            c.cloud.staged = vec![crate::attachments::StagedAttachment::from_file(
+                "notes.txt",
+                b"notes".to_vec(),
+            )];
+            c.input
+                .update(cx, |input, cx| input.set_text("Newer draft", cx));
+            c.discard_cloud_launch(cx);
+            assert_eq!(c.input.read(cx).text(), "Newer draft");
+            assert_eq!(c.cloud.rejected_drafts.len(), 1);
+            assert_eq!(c.cloud.rejected_drafts[0].0, "Original task");
+            assert_eq!(c.cloud.rejected_drafts[0].1[0].name, "notes.txt");
+        });
+    }
+    /// Closing a tab whose create is still in flight leaves no computer
+    /// behind: the create is replayed under its key and what it returns is
+    /// archived.
+    #[gpui::test]
+    fn closing_a_tab_with_a_pending_create_archives_its_computer(cx: &mut gpui::TestAppContext) {
+        #[derive(Default)]
+        struct Controller {
+            calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+        }
+        #[async_trait::async_trait]
+        impl zuse_rpc::RpcService for Controller {
+            async fn handle(
+                &self,
+                method: &str,
+                params: serde_json::Value,
+            ) -> Result<zuse_rpc::RpcReply, zuse_rpc::RpcError> {
+                self.calls
+                    .lock()
+                    .unwrap()
+                    .push((method.into(), params.clone()));
+                match method {
+                    zuse_rpc::methods::CLOUD_CREATE => {
+                        zuse_rpc::RpcReply::value(&serde_json::json!({
+                            "workspace":{"workspaceId":"orphan","initialSessionId":"session"}
+                        }))
+                    }
+                    _ => zuse_rpc::RpcReply::value(&serde_json::json!({})),
+                }
+            }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, runtime.handle().clone()));
+        let controller = std::sync::Arc::new(Controller::default());
+        let engine = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            controller.clone(),
+        ));
+        let state = cx.new(|_| crate::state::AppState::new());
+        state.update(cx, |state, _| state.set_test_engine(engine));
+        let composer = cx.new(|cx| Composer::new(state, cx));
+        composer.update(cx, |c, cx| {
+            c.set_cloud_canvas_key(Some("cloud-canvas:a".into()), cx);
+            c.cloud.request = Some(serde_json::json!({"idempotencyKey":"original-key",
+                "firstMessage":"In flight","projectId":"p","expectedAccountId":"owner"}));
+            c.cloud.task = Some(gpui::Task::ready(()));
+            c.set_cloud_canvas_key(Some("cloud-canvas:b".into()), cx);
+            c.discard_cloud_canvas_keys(&["cloud-canvas:a".into()], cx);
+            assert!(c.cloud_launch_summaries().is_empty());
+        });
+        for _ in 0..200 {
+            cx.run_until_parked();
+            runtime.block_on(tokio::time::sleep(std::time::Duration::from_millis(5)));
+            if controller
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(method, _)| method == zuse_rpc::methods::CLOUD_ARCHIVE)
+            {
+                break;
+            }
+        }
+        let calls = controller.calls.lock().unwrap();
+        let create = calls
+            .iter()
+            .find(|(method, _)| method == zuse_rpc::methods::CLOUD_CREATE)
+            .expect("the in-flight create is looked up");
+        assert_eq!(create.1["idempotencyKey"], "original-key");
+        let archive = calls
+            .iter()
+            .find(|(method, _)| method == zuse_rpc::methods::CLOUD_ARCHIVE)
+            .expect("its computer is archived");
+        assert_eq!(archive.1["workspaceId"], "orphan");
     }
     /// A launch update arriving while its tab is in the background lands on
     /// that tab, never on the one in front.

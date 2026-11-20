@@ -18,7 +18,7 @@ pub(super) struct Launch {
     pub(super) request: Option<Value>,
     accepted: Option<Value>,
     issue: Option<StagedAttachment>,
-    staged: Vec<StagedAttachment>,
+    pub(super) staged: Vec<StagedAttachment>,
     pub pause_task: Option<Task<()>>,
     pub pause_error: Option<String>,
     native: Option<NativeTask>,
@@ -27,7 +27,7 @@ pub(super) struct Launch {
     // Retain receipt identity through the gap before execution/history arrives.
     admitted_native: Option<Value>,
     native_staged: Vec<StagedAttachment>,
-    rejected_drafts: Vec<(String, Vec<StagedAttachment>)>,
+    pub(super) rejected_drafts: Vec<(String, Vec<StagedAttachment>)>,
     /// The retained message is in the chat but wasn't sent: the tray offers
     /// Retry and Edit.
     unsent: bool,
@@ -1840,37 +1840,80 @@ impl Composer {
         }
         self.pickers
             .update(cx, |pickers, cx| pickers.freeze_cloud_launch(false, cx));
+        let text = request["firstMessage"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
         if self.input.read(cx).text().is_empty() {
-            let text = request["firstMessage"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
             self.restore_rejected_draft(text, staged, cx);
+        } else {
+            // A newer draft is in the box: the message and its files wait
+            // behind "Restore previous draft" instead of being lost.
+            self.cloud.rejected_drafts.push((text, staged));
         }
-        if let (Some(workspace), Some(engine)) = (
-            accepted
-                .as_ref()
-                .and_then(|row| row["workspaceId"].as_str()),
-            self.state.read(cx).engine().cloned(),
-        ) {
+        self.archive_abandoned_launch(request, accepted, cx);
+        cx.emit(ComposerEvent::CloudLaunchChanged);
+        cx.notify();
+    }
+    /// A launch whose tab was closed or deleted must not leave a computer
+    /// running unnoticed: an accepted computer is archived; one whose create
+    /// may still be in flight is looked up by replaying the same create
+    /// (idempotent by its key) and archived once the server returns it.
+    pub(super) fn archive_abandoned_launch(
+        &mut self,
+        request: Value,
+        accepted: Option<Value>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        let controller = engine.controller();
+        let known = accepted
+            .as_ref()
+            .and_then(|row| row["workspaceId"].as_str())
+            .map(str::to_owned);
+        gpui_tokio::Tokio::spawn(cx, async move {
+            let workspace = match known {
+                Some(workspace) => workspace,
+                None => match controller
+                    .client()
+                    .call_scoped(methods::CLOUD_CREATE, request.clone())
+                    .await
+                {
+                    Ok(response) => {
+                        let row = &response["workspace"];
+                        let row = row.get("workspace").unwrap_or(row);
+                        match row["workspaceId"].as_str().filter(|id| !id.is_empty()) {
+                            Some(id) => id.to_owned(),
+                            None => return,
+                        }
+                    }
+                    // Refused: no computer exists for this request.
+                    Err(_) => return,
+                },
+            };
             let params = json!({"workspaceId":workspace,
                 "expectedAccountId":request["expectedAccountId"],
                 "expectedOrganizationId":request["expectedOrganizationId"],
                 "commandId":uuid::Uuid::new_v4().to_string()});
-            let controller = engine.controller();
-            gpui_tokio::Tokio::spawn(cx, async move {
-                if let Err(error) = controller
-                    .client()
-                    .call_scoped(methods::CLOUD_ARCHIVE, params)
-                    .await
-                {
-                    tracing::warn!(%error, "archiving a discarded cloud launch failed");
-                }
-            })
-            .detach();
+            if let Err(error) = controller
+                .client()
+                .call_scoped(methods::CLOUD_ARCHIVE, params)
+                .await
+            {
+                tracing::warn!(%error, "archiving an abandoned cloud launch failed");
+            }
+        })
+        .detach();
+    }
+    /// A tab that is closed takes its pending chat creation with it, without
+    /// leaving its computer behind.
+    pub(super) fn abandon_launch(&mut self, mut launch: Launch, cx: &mut Context<Self>) {
+        launch.task = None;
+        if let Some(request) = launch.request.take() {
+            self.archive_abandoned_launch(request, launch.accepted.take(), cx);
         }
-        cx.emit(ComposerEvent::CloudLaunchChanged);
-        cx.notify();
     }
     fn cloud_create_failure(&mut self, message: String, cx: &mut Context<Self>) {
         // A parked tab keeps its request: Retry there gets the same answer

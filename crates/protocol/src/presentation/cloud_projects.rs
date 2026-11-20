@@ -6,10 +6,14 @@ use crate::Space;
 /// for anything that is not a repository location (a local-only identity
 /// such as `commit:<sha>` or `local:<hash>`).
 pub fn repository_key(spelling: &str) -> Option<String> {
-    let mut text = spelling.trim();
-    for scheme in ["https://", "http://", "ssh://", "git://"] {
-        if let Some(rest) = text.strip_prefix(scheme) {
+    // Case never distinguishes repositories: `HTTPS://…/Repo.GIT` is the same.
+    let lower = spelling.trim().to_ascii_lowercase();
+    let mut text = lower.as_str();
+    let mut scheme = false;
+    for prefix in ["https://", "http://", "ssh://", "git://"] {
+        if let Some(rest) = text.strip_prefix(prefix) {
             text = rest;
+            scheme = true;
             break;
         }
     }
@@ -19,21 +23,34 @@ pub fn repository_key(spelling: &str) -> Option<String> {
     {
         text = rest;
     }
-    let text = text.replacen(':', "/", 1);
-    let text = text.trim_end_matches('/');
-    let text = text.strip_suffix(".git").unwrap_or(text);
-    let parts: Vec<&str> = text.split('/').filter(|part| !part.is_empty()).collect();
-    if parts.len() < 3 || !parts[0].contains('.') {
+    // The authority ends at the first `/` of a URL, or at the `:` of the
+    // scp form (`host:owner/repo`); a URL's `:port` is dropped.
+    let (authority, path) = match (text.find(':'), text.find('/')) {
+        (Some(colon), slash) if !scheme && slash.is_none_or(|slash| colon < slash) => {
+            (&text[..colon], &text[colon + 1..])
+        }
+        _ => text.split_once('/')?,
+    };
+    let host = authority.split(':').next()?;
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    if parts.len() < 2 || !host.contains('.') {
         return None;
     }
-    Some(parts.join("/").to_ascii_lowercase())
+    Some(format!("{host}/{}", parts.join("/")))
 }
 
 /// `owner/repo` for a repository spelling, in its own case.
 pub fn repository_owner_and_name(spelling: &str) -> Option<String> {
     repository_key(spelling)?;
     let text = spelling.trim().trim_end_matches('/');
-    let text = text.strip_suffix(".git").unwrap_or(text);
+    let text = match text.len().checked_sub(4) {
+        Some(at) if text.is_char_boundary(at) && text[at..].eq_ignore_ascii_case(".git") => {
+            &text[..at]
+        }
+        _ => text,
+    };
     let mut parts = text.rsplit(['/', ':']).filter(|part| !part.is_empty());
     let repo = parts.next()?;
     let owner = parts.next()?;
@@ -150,6 +167,9 @@ mod tests {
             "ssh://git@github.com/OpcodeHQ/zuse",
             "github.com/opcodehq/zuse",
             "https://github.com/opcodehq/zuse/",
+            "HTTPS://GitHub.com/OpcodeHQ/Zuse.GIT",
+            "ssh://git@github.com:22/opcodehq/zuse.git",
+            "https://github.com:443/opcodehq/zuse",
         ] {
             assert_eq!(
                 repository_key(spelling).as_deref(),
@@ -162,6 +182,11 @@ mod tests {
         assert_eq!(
             repository_owner_and_name("git@github.com:swarajbachu/zuse.git").as_deref(),
             Some("swarajbachu/zuse")
+        );
+        assert_eq!(
+            repository_owner_and_name("HTTPS://github.com/OpcodeHQ/Zuse.GIT").as_deref(),
+            Some("OpcodeHQ/Zuse"),
+            "labels keep the original spelling"
         );
     }
 

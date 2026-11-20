@@ -350,13 +350,14 @@ impl Shell {
     pub(super) fn select_cloud_launch(&mut self, key: &str, cx: &mut Context<Self>) {
         if let Some(index) = self.launch_tab(key) {
             if index == self.cloud_tabs.active
+                && matches!(self.route, Route::Chat)
                 && self.cloud_conversation.is_none()
                 && self.state.read(cx).selected_chat.is_none()
             {
                 return;
             }
-            // Coming back from a local chat: the tab strip shows again.
-            self.cloud_tabs.active = usize::MAX;
+            // The tab in front is stashed first (its unsaved choices stay),
+            // then the launch's tab comes back on the chat route.
             self.select_cloud_tab(index, cx);
         }
     }
