@@ -309,6 +309,10 @@ pub(super) fn coordinator_view(zot: &Zot) -> Result<serde_json::Value> {
         }
     };
     let mut view = serde_json::to_value(zot)?;
+    // The purpose reaches the prompt as INSTRUCTIONS.md; once is enough.
+    if let Some(config) = view["config"].as_object_mut() {
+        config.remove("purpose");
+    }
     view["issues"] = zot
         .issues
         .iter()

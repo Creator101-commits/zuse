@@ -31,10 +31,64 @@ use std::{
 use zuse_model::cloud::{Head, Workspace};
 
 /// Keep HTTP status private until an authoritative route can give it domain meaning.
+/// A conflict keeps the server's error code: "busy" is only right when the
+/// server gave no reason.
 #[derive(Debug)]
-struct CloudHttpFailure(reqwest::StatusCode);
+struct CloudHttpFailure(reqwest::StatusCode, Option<String>);
+/// Prefix of a conflict the app can't explain; the server's code follows.
+pub(crate) const CLOUD_CONFLICT_PREFIX: &str = "Cloud couldn't do this right now";
+impl CloudHttpFailure {
+    fn from_body(status: reqwest::StatusCode, body: &[u8]) -> Self {
+        let code = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|value| {
+                value["error"]
+                    .as_str()
+                    .filter(|code| {
+                        !code.is_empty()
+                            && code.len() <= 128
+                            && code
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+                    })
+                    .map(str::to_owned)
+            });
+        Self(status, code)
+    }
+}
+/// What a known conflict means for the user.
+fn conflict_message(code: &str) -> Option<&'static str> {
+    if let Some(message) = task_rejection(code) {
+        return Some(message);
+    }
+    Some(match code {
+        "cloud_lifecycle_in_progress" | "cloud_lifecycle_quiescence_required" => {
+            "This computer is pausing, archiving or waking. Try again when it finishes."
+        }
+        "cloud_lifecycle_runtime_update_required" | "cloud_delete_runtime_update_required" => {
+            "This computer needs an update before it can do that."
+        }
+        "computer_recreation_in_progress" => {
+            "This computer is being recreated. Try again when it finishes."
+        }
+        "cloud_allocation_retry_unavailable"
+        | "cloud_allocation_retry_not_required"
+        | "cloud_allocation_retry_outcome_unknown" => {
+            "This computer's start can't be retried right now. Reopen it to see its current state."
+        }
+        _ => return None,
+    })
+}
 impl std::fmt::Display for CloudHttpFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.as_u16() == 409
+            && let Some(code) = self.1.as_deref()
+        {
+            return match conflict_message(code) {
+                Some(message) => f.write_str(message),
+                None => write!(f, "{CLOUD_CONFLICT_PREFIX} ({code}). Try again."),
+            };
+        }
         f.write_str(match self.0.as_u16() {
             401 => "Cloud could not verify your session. Reconnect in Settings → General.",
             403 => "You do not have access to this workspace.",
@@ -105,6 +159,11 @@ fn task_rejection(code: &str) -> Option<&'static str> {
         }
         "cloud_command_permission_policy_changed" | "cloud_command_permission_policy_missing" => {
             "This access mode can't be used for this task, so this message didn't run. Pick another access mode and send again."
+        }
+        // A workspace created before server message admission accepts only
+        // its first message; later ones can never be admitted there.
+        "server_command_admission_update_required" => {
+            "This chat was started before Cloud messaging was enabled for its computer. Start a new chat to continue."
         }
         "cloud_command_policy_or_runtime_fenced"
         | "cloud_command_checkout_fenced"
@@ -475,7 +534,7 @@ impl CloudApi {
                     sidebar_cache::clear_all();
                 }
                 // Keep authority failures distinct from repository editing errors.
-                return Err(CloudHttpFailure(status).into());
+                return Err(CloudHttpFailure(status, None).into());
             }
             // Same here: a 403 withdraws this one workspace, so forget its
             // saved history and keep every other chat's.
@@ -770,7 +829,7 @@ impl CloudApi {
                     return Err(TaskRejection(message).into());
                 }
             }
-            return Err(CloudHttpFailure(status).into());
+            return Err(CloudHttpFailure::from_body(status, &bytes).into());
         }
         // 204 No Content (GitHub select/confirm/cancel/disconnect) has no body.
         if bytes.is_empty() {
@@ -2421,6 +2480,67 @@ mod context_failure_tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "You do not have access to this workspace.");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn conflicts_name_the_server_reason_instead_of_busy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let conflict = |code: &'static str| {
+            axum::routing::post(move || async move {
+                (
+                    axum::http::StatusCode::CONFLICT,
+                    axum::Json(json!({ "error": code })),
+                )
+            })
+        };
+        let router = axum::Router::new()
+            .route(
+                "/v1/cloud/workspaces/legacy/task-commands",
+                conflict("server_command_admission_update_required"),
+            )
+            .route(
+                "/v1/cloud/workspaces/paused/pause",
+                conflict("cloud_lifecycle_in_progress"),
+            )
+            .route(
+                "/v1/cloud/workspaces/other/pause",
+                conflict("cloud_some_new_conflict"),
+            )
+            .route(
+                "/v1/cloud/workspaces/silent/pause",
+                axum::routing::post(|| async { axum::http::StatusCode::CONFLICT }),
+            );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let api = CloudApi::new(&format!("http://{address}")).unwrap();
+        let error = |path: [&'static str; 5]| {
+            let api = &api;
+            async move {
+                api.request_scoped("fixture-token", &path, Some(json!({})), None, &[])
+                    .await
+                    .unwrap_err()
+                    .to_string()
+            }
+        };
+        let legacy = error(["v1", "cloud", "workspaces", "legacy", "task-commands"]).await;
+        assert!(legacy.contains("Start a new chat"), "{legacy}");
+        let lifecycle = error(["v1", "cloud", "workspaces", "paused", "pause"]).await;
+        assert!(
+            lifecycle.contains("pausing, archiving or waking"),
+            "{lifecycle}"
+        );
+        let unknown = error(["v1", "cloud", "workspaces", "other", "pause"]).await;
+        assert_eq!(
+            unknown,
+            "Cloud couldn't do this right now (cloud_some_new_conflict). Try again."
+        );
+        for message in [&legacy, &lifecycle, &unknown] {
+            assert!(!message.contains("busy"), "{message}");
+        }
+        // Only a conflict without any reason still reads as busy.
+        let silent = error(["v1", "cloud", "workspaces", "silent", "pause"]).await;
+        assert!(silent.contains("busy"), "{silent}");
         server.abort();
     }
 }
