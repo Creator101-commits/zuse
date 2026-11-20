@@ -809,7 +809,9 @@ impl IssuePanel {
         let files: Vec<_> = self
             .files
             .iter()
-            .filter(|f| f.path != "INSTRUCTIONS.md" && !f.content.trim().is_empty())
+            .filter(|f| {
+                (f.path != "INSTRUCTIONS.md" || f.version > 1) && !f.content.trim().is_empty()
+            })
             .collect();
         let mut body = column().gap(px(18.));
         if open.is_empty() && threads.is_empty() {
