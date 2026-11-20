@@ -2351,6 +2351,14 @@ pub fn sender_header(
     timestamp: i64,
 ) -> Div {
     let _ = timestamp;
+    sender_header_labeled(sender, &format!("Sent by {}", sender.name))
+}
+
+/// The same header with its own wording, such as "Sent from Zapper".
+pub fn sender_header_labeled(
+    sender: &zuse_protocol::presentation::zot_message::ZotSender,
+    label: &str,
+) -> Div {
     // The Zapper's own messages carry its face; relayed thread activity
     // keeps the terminal mark so the two never read as the same author.
     let lead = match sender.avatar.as_ref().filter(|_| !sender.activity) {
@@ -2363,7 +2371,7 @@ pub fn sender_header(
         .text_size(px(12.))
         .text_color(rgb(0x959595))
         .child(lead)
-        .child(format!("Sent by {}", sender.name))
+        .child(label.to_owned())
 }
 
 pub fn sender_footer(body: String, timestamp: i64) -> Div {
