@@ -63,10 +63,14 @@ pub(super) fn apply(
         }
         ZotAction::EditIssue { issue_id, details } => {
             validate(zot, issue_id, details)?;
+            let child_in_progress = zot.issues.iter().any(|i| {
+                i.details.parent.as_deref() == Some(issue_id.as_str())
+                    && i.details.status == ZotIssueStatus::InProgress
+            });
             let issue = find(zot, issue_id)?;
             let mut details = details.clone();
             if coordinator {
-                transition(issue, &details)?;
+                transition(issue, &details, child_in_progress)?;
             }
             details.normalize(!issue.threads.is_empty());
             if issue.details == details {
@@ -355,7 +359,8 @@ pub(super) fn coordinator_view(zot: &Zot) -> Result<serde_json::Value> {
 }
 /// Status moves the coordinator may make itself. Each one needs the evidence
 /// that makes it true, so the board can't drift ahead of the work.
-fn transition(issue: &ZotIssue, next: &ZotIssueDetails) -> Result<()> {
+/// A parent issue is in progress while one of its children is.
+fn transition(issue: &ZotIssue, next: &ZotIssueDetails, child_in_progress: bool) -> Result<()> {
     let before = &issue.details;
     if next.status != before.status {
         ensure!(
@@ -368,8 +373,10 @@ fn transition(issue: &ZotIssue, next: &ZotIssueDetails) -> Result<()> {
                 "link the pull request before moving the issue to inReview"
             ),
             ZotIssueStatus::InProgress => ensure!(
-                !issue.threads.is_empty(),
-                "start a thread with delegate (issueId) before moving the issue to inProgress"
+                !issue.threads.is_empty() || child_in_progress,
+                "an issue is inProgress only while a thread works on it: delegate {{issueId: \"{}\"}} (which moves it to inProgress for you), or, for a parent issue, start a thread on one of its child issues (details.parent: \"{}\") first",
+                issue.id,
+                issue.id
             ),
             ZotIssueStatus::NeedsYou => {
                 bail!("hand the issue to the user with askUser")
@@ -440,11 +447,19 @@ fn validate(zot: &Zot, id: &str, details: &ZotIssueDetails) -> Result<()> {
         );
     }
     ensure!(
-        details
-            .relations
-            .iter()
-            .all(|r| r != id && zot.issues.iter().any(|i| i.id == *r)),
-        "relations must reference other issues in this Zapper"
+        !details.relations.iter().any(|r| r == id),
+        "relations must reference other issues, not the issue itself"
+    );
+    let unknown: Vec<&str> = details
+        .relations
+        .iter()
+        .filter(|r| !zot.issues.iter().any(|i| i.id == **r))
+        .map(String::as_str)
+        .collect();
+    ensure!(
+        unknown.is_empty(),
+        "relations must reference existing issues in this Zapper; unknown: {}. Create those issues first (createIssue, one command each), then add the relation with editIssue, or leave relations empty for now",
+        unknown.join(", ")
     );
     if let Some(ZotIssueOwner::Thread { chat_id }) = &details.owner {
         ensure!(
@@ -453,9 +468,10 @@ fn validate(zot: &Zot, id: &str, details: &ZotIssueDetails) -> Result<()> {
         );
     }
     if let Some(parent) = &details.parent {
+        ensure!(parent != id, "an issue can't be its own parent");
         ensure!(
-            parent != id && zot.issues.iter().any(|i| i.id == *parent),
-            "parent must be another issue in this Zapper"
+            zot.issues.iter().any(|i| i.id == *parent),
+            "parent issue {parent} doesn't exist yet: create it first (createIssue), then create or edit this issue with details.parent"
         );
     }
     ensure!(
@@ -520,6 +536,7 @@ pub(super) fn report(tx: &rusqlite::Transaction<'_>, event: &ZotEvent) -> Result
             r.get(0)
         })?;
     let mut zot: Zot = serde_json::from_str(&state)?;
+    let before = zot.clone();
     let mut changed = false;
     for issue in &mut zot.issues {
         if !issue.threads.contains(&event.worker_chat_id) {
@@ -565,6 +582,7 @@ pub(super) fn report(tx: &rusqlite::Transaction<'_>, event: &ZotEvent) -> Result
             .revision
             .checked_add(1)
             .context("Zapper revision exhausted")?;
+        record_changes(tx, &before, &zot)?;
         tx.execute(
             "UPDATE zots SET state=?2 WHERE id=?1",
             params![zot.id, serde_json::to_string(&zot)?],
@@ -836,6 +854,106 @@ mod tests {
                 .unwrap()
                 .text
                 .starts_with("Dropped · Superseded")
+        );
+    }
+    #[test]
+    fn a_parent_shows_in_progress_while_a_child_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Zots::open(dir.path(), "local").unwrap();
+        create(&store, "release");
+        let mut parent = details();
+        parent.status = ZotIssueStatus::Todo;
+        parent.done_criteria = "Both parts ship".into();
+        as_zapper(
+            &store,
+            "parent",
+            ZotAction::CreateIssue {
+                issue_id: "parent".into(),
+                details: parent.clone(),
+            },
+        )
+        .unwrap();
+        let mut child = parent.clone();
+        child.parent = Some("parent".into());
+        as_zapper(
+            &store,
+            "child",
+            ZotAction::CreateIssue {
+                issue_id: "child".into(),
+                details: child,
+            },
+        )
+        .unwrap();
+        let mut moving = parent.clone();
+        moving.status = ZotIssueStatus::InProgress;
+        let move_parent = |id: &str| {
+            as_zapper(
+                &store,
+                id,
+                ZotAction::EditIssue {
+                    issue_id: "parent".into(),
+                    details: moving.clone(),
+                },
+            )
+        };
+        let err = move_parent("too-early").unwrap_err().to_string();
+        assert!(err.contains("delegate {issueId: \"parent\"}"), "{err}");
+        assert!(err.contains("child issues"), "{err}");
+        as_zapper(
+            &store,
+            "zot-worker-start",
+            ZotAction::Delegate {
+                issue_id: Some("child".into()),
+                worker: ZotWorker {
+                    chat_id: "zot-worker-start".into(),
+                    ..worker()
+                },
+                model: config().coordinator_model,
+                base: "origin/main".into(),
+            },
+        )
+        .unwrap();
+        move_parent("with-child").unwrap();
+        let zot = store.get("release").unwrap();
+        let parent = zot.issues.iter().find(|i| i.id == "parent").unwrap();
+        assert_eq!(parent.details.status, ZotIssueStatus::InProgress);
+    }
+    #[test]
+    fn unknown_relations_and_parents_say_to_create_them_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Zots::open(dir.path(), "local").unwrap();
+        create(&store, "release");
+        let mut related = details();
+        related.relations = vec!["later".into()];
+        let err = store
+            .command(command(
+                "release",
+                "related",
+                ZotAction::CreateIssue {
+                    issue_id: "fix".into(),
+                    details: related,
+                },
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown: later"), "{err}");
+        assert!(err.contains("Create those issues first"), "{err}");
+        let mut child = details();
+        child.parent = Some("later".into());
+        let err = store
+            .command(command(
+                "release",
+                "child",
+                ZotAction::CreateIssue {
+                    issue_id: "fix".into(),
+                    details: child,
+                },
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("parent issue later doesn't exist yet"),
+            "{err}"
         );
     }
     #[test]
