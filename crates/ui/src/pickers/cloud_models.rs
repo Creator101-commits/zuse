@@ -8,7 +8,9 @@ pub(super) fn preparation_catalog_error(error: &zuse_rpc::RpcError) -> bool {
         error,
         zuse_rpc::RpcError::Closed | zuse_rpc::RpcError::Transport(_)
     ) || matches!(error, zuse_rpc::RpcError::Failed(message)
-            if message == "The workspace is busy. Wait for its current operation to finish.")
+            if message == "The workspace is busy. Wait for its current operation to finish."
+                // A conflict the engine names by the server's code.
+                || message.starts_with("Cloud couldn't do this right now ("))
 }
 
 #[cfg(test)]
