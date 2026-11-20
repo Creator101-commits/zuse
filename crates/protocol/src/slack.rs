@@ -1,6 +1,9 @@
 //! Public Slack settings and attribution. Installation credentials are server-owned.
 use serde::{Deserialize, Serialize};
 
+/// Where a user-role message came from when no person typed it into this chat.
+/// The message's text parts keep exactly what the agent received; `text` is
+/// the short version the transcript shows.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "_tag", rename_all = "lowercase")]
 pub enum MessageSource {
@@ -11,15 +14,26 @@ pub enum MessageSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         channel: Option<String>,
     },
+    /// A coordinator turn the Zapper engine assembled: its brief, state and
+    /// the user's message or thread updates. `text` is the user's own words
+    /// when the turn carries them, otherwise a one-line summary of the
+    /// updates. Older readers drop this part and show the full prompt.
+    Zapper {
+        text: String,
+        sender: crate::presentation::zot_message::ZotSender,
+    },
 }
 impl MessageSource {
     pub fn text(&self) -> &str {
         match self {
-            Self::Slack { text, .. } => text,
+            Self::Slack { text, .. } | Self::Zapper { text, .. } => text,
         }
     }
+    /// The header shown above the short text.
+    pub const ZAPPER_LABEL: &str = "Sent from Zapper";
     pub fn label(&self) -> String {
         match self {
+            Self::Zapper { .. } => Self::ZAPPER_LABEL.into(),
             Self::Slack {
                 author, channel, ..
             } => match (author, channel) {
@@ -33,6 +47,7 @@ impl MessageSource {
     /// Who sent it, for a "Sent by …" header: "Ada in #eng · Slack", or "Slack".
     pub fn sender_name(&self) -> String {
         match self {
+            Self::Zapper { sender, .. } => sender.name.clone(),
             Self::Slack {
                 author, channel, ..
             } => match (author, channel) {
@@ -46,6 +61,9 @@ impl MessageSource {
     /// The same attribution header Zapper messages use, so every message sent
     /// on someone's behalf reads alike.
     pub fn sender(&self) -> crate::presentation::zot_message::ZotSender {
+        if let Self::Zapper { sender, .. } = self {
+            return sender.clone();
+        }
         crate::presentation::zot_message::ZotSender {
             zot_id: "slack".into(),
             chat_id: String::new(),
@@ -53,6 +71,9 @@ impl MessageSource {
             avatar: None,
             activity: false,
         }
+    }
+    pub fn is_slack(&self) -> bool {
+        matches!(self, Self::Slack { .. })
     }
 }
 
@@ -230,6 +251,29 @@ mod tests {
             serde_json::to_value(source).unwrap(),
             serde_json::json!({"_tag":"slack","text":"Fix it"})
         );
+    }
+    #[test]
+    fn zapper_turns_carry_their_summary_and_sender() {
+        let sender = crate::presentation::zot_message::ZotSender {
+            zot_id: "z".into(),
+            chat_id: "coord".into(),
+            name: "Release".into(),
+            avatar: None,
+            activity: false,
+        };
+        let source = MessageSource::Zapper {
+            text: "2 thread reports · ZAP-7 changed".into(),
+            sender: sender.clone(),
+        };
+        let json = serde_json::to_value(&source).unwrap();
+        assert_eq!(json["_tag"], "zapper");
+        assert_eq!(json["text"], "2 thread reports · ZAP-7 changed");
+        let back: MessageSource = serde_json::from_value(json).unwrap();
+        assert_eq!(back, source);
+        assert_eq!(back.label(), "Sent from Zapper");
+        assert_eq!(back.sender(), sender);
+        assert!(!back.is_slack());
+        assert_eq!(back.text(), "2 thread reports · ZAP-7 changed");
     }
     #[test]
     fn slack_unicode_results_are_bounded_without_cutting_characters() {

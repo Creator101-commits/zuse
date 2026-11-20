@@ -116,6 +116,29 @@ impl CloudHistory {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let mut seen: std::collections::HashSet<_> = rows.iter().map(|m| m.id.clone()).collect();
+        // The computer's transcript may carry an admitted message under its
+        // own id. Its user messages that no admission names by id stand in
+        // for admissions with the same text, one for one, so the message
+        // never shows twice (once from the transcript, once appended here).
+        let admitted_ids: std::collections::HashSet<&str> = admissions
+            .iter()
+            .filter_map(|entry| entry["messageId"].as_str())
+            .collect();
+        let mut unclaimed: Vec<String> = rows
+            .iter()
+            .filter(|m| {
+                m.role == zuse_model::MessageRole::User && !admitted_ids.contains(m.id.as_str())
+            })
+            .map(|m| {
+                m.parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        zuse_model::MessagePart::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>()
+            })
+            .collect();
         for entry in admissions.iter().take(256) {
             let Some(id) = entry["messageId"]
                 .as_str()
@@ -133,6 +156,13 @@ impl CloudHistory {
             let Some(text) = entry["text"].as_str() else {
                 continue;
             };
+            if let Some(index) = unclaimed
+                .iter()
+                .position(|shown| shown.trim() == text.trim())
+            {
+                unclaimed.swap_remove(index);
+                continue;
+            }
             let Ok(assets) = serde_json::from_value::<Vec<zuse_protocol::cloud_assets::Asset>>(
                 entry
                     .get("attachments")

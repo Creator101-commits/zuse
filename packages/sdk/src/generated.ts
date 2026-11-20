@@ -67,7 +67,17 @@ issueId?: string, worker: ZotWorker, model: ZotModel, base: string, } | { "type"
  * Activity entry this comment answers; shown nested under it.
  */
 replyTo?: string, } | { "type": "askUser", issueId: string, question: string, recommendation?: string, } | { "type": "closeIssue", issueId: string, outcome: ZotIssueOutcome, note: string, } | { "type": "freshConversation" } | { "type": "delete" };
-export type ZotCommand = { commandId: string, zotId: string, expectedRevision: number | null, action: ZotAction, };
+export type ZotCommand = { commandId: string, zotId: string,
+/**
+ * Optional. When given, the command fails only if what it depends on
+ * changed after that revision (see [`ZotAction::conflict_scope`]).
+ */
+expectedRevision: number | null,
+/**
+ * The action object, or the same object as a JSON-encoded string for
+ * clients that struggle to escape large nested JSON.
+ */
+action: ZotAction, };
 export type ZotEvent = { id: string, zotId: string, workerChatId: string, kind: string, summary: string, acknowledged: boolean, };
 export type ControlInfo = { apiVersion: number, appVersion: string, capabilities: Array<string>, methods: Array<string>, schemas: Record<string, unknown>, };
 export const API_VERSION = 1 as const;

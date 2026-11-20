@@ -401,6 +401,52 @@ mod tests {
     fn head(ids: &[&str], before: Option<i64>) -> Head {
         serde_json::from_value(json!({"schemaVersion":1,"payloadFormat":"fixture","workspaceId":"task","sessionId":"session","runtimeGeneration":1,"cursor":{"epoch":"epoch","version":2},"chat":{"id":"session","deviceId":"cloud:task","archived":false,"createdAt":"2026-10-31T00:00:00Z"},"conversations":[],"transcript":{"reset":ids.iter().map(|id|json!({"id":id,"role":"assistant","parts":[{"id":id,"kind":"text","text":id}],"createdAt":1,"deviceId":"cloud:task"})).collect::<Vec<_>>()},"queue":[],"queuePaused":false,"olderMessageSequence":before})).unwrap()
     }
+    /// The owner's "yoo" chat: the launch admission names the first message
+    /// by one id, the computer's transcript records it under another and
+    /// replies. Exactly one user bubble shows, never a second one appended
+    /// after the reply.
+    #[test]
+    fn first_message_recorded_under_the_computers_id_shows_once() {
+        let entry = |id: &str, role, text: &str| zuse_model::SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![zuse_model::MessagePart::Text {
+                id: format!("text:{id}"),
+                text: text.into(),
+            }],
+            created_at: 1,
+            device_id: "cloud:task".into(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let transcript = vec![
+            entry("runtime-user", zuse_model::MessageRole::User, "yoo"),
+            entry(
+                "runtime-reply",
+                zuse_model::MessageRole::Assistant,
+                "Yoo! What are we working on?",
+            ),
+        ];
+        let admissions = vec![
+            json!({"commandId":"launch:task","messageId":"admitted-first",
+            "text":"yoo","executionState":"completed","createdAt":0}),
+        ];
+        let rows = crate::cloud_history::CloudHistory::admission_rows(
+            &head(&[], None),
+            &admissions,
+            transcript.clone(),
+        );
+        assert_eq!(rows.len(), 2, "one user bubble and the reply");
+        // A newer admission with the same text that the transcript has not
+        // reached yet still shows.
+        let mut more = admissions.clone();
+        more.push(json!({"commandId":"c2","messageId":"second","text":"yoo","executionState":"queued","createdAt":2}));
+        let rows =
+            crate::cloud_history::CloudHistory::admission_rows(&head(&[], None), &more, transcript);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].id, "second");
+    }
     #[test]
     fn older_page_requires_same_projection_cursor_and_contiguous_unique_range() {
         let current = head(&["tail"], Some(2));

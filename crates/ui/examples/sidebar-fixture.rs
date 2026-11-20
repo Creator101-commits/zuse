@@ -1,5 +1,6 @@
 //! Isolated native sidebar review fixture. ZUSE_SIDEBAR_COMPACT / ZUSE_SIDEBAR_HIDE_LABEL select layout;
 //! ZUSE_SIDEBAR_BY_PROJECT groups by project, with a remote clone of the local repository.
+//! ZUSE_SIDEBAR_WHATS_NEW opens the "What's new" dialog (a number picks a release, 0 = newest).
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use zuse_ui::*;
 
@@ -97,10 +98,35 @@ fn main() -> anyhow::Result<()> {
             // Same backdrop as the app window, or the frosted surface has nothing to blur.
             window_background: theme::Theme::of(cx).window_background_appearance(),
             ..Default::default()
-        }, |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx))).unwrap();
+        }, |_, cx| cx.new(|cx| {
+            let mut shell = shell::Shell::new(state.clone(), boot, cx);
+            // ZUSE_SIDEBAR_WHATS_NEW opens the release notes dialog; a number picks a release (0 = newest).
+            match std::env::var("ZUSE_SIDEBAR_WHATS_NEW").ok().map(|v| v.parse::<usize>()) {
+                Some(Ok(index)) => shell.show_whats_new_at(index, cx),
+                Some(Err(_)) => shell.show_whats_new(cx),
+                None => {}
+            }
+            shell
+        })).unwrap();
         appearance::reapply_window_background(cx);
         state.update(cx, |_, cx| cx.notify());
         cx.activate(true);
+        // Xvfb's frame loop can stay idle: with `browser-fixture` (gpui/bench),
+        // keep presenting the scene so an external capture sees real pixels.
+        #[cfg(feature = "browser-fixture")]
+        {
+            let window = gpui::AnyWindowHandle::from(_window);
+            cx.spawn(async move |cx| loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+                let presented = window.update(cx, |_, w, cx| {
+                    w.refresh();
+                    let arena = w.draw(cx);
+                    w.present_if_needed();
+                    arena.clear();
+                });
+                if presented.is_err() { break; }
+            }).detach();
+        }
     });
     Ok(())
 }

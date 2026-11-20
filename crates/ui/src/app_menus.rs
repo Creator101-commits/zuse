@@ -272,6 +272,7 @@ fn localized_menus(l10n: &zuse_i18n::Localizer) -> Vec<Menu> {
         // Sparkle's placement: directly under About. Other platforms reach
         // the same check from the account menu.
         MenuItem::action(l10n.text("desktop-check_for_updates"), CheckForUpdates),
+        MenuItem::action(l10n.text("native-whats_new_menu"), shell::ShowWhatsNew),
         MenuItem::separator(),
         MenuItem::action(
             l10n.text("commands-default_keybindings_settings"),

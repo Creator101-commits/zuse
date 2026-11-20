@@ -139,6 +139,10 @@ impl IssuePanel {
             .and_then(|id| self.zot.issues.iter().find(|i| i.id == *id))
             .map(ZotIssue::code)
     }
+    /// The issue on show, by id. Hosts that open issues as tabs follow it.
+    pub fn selected_id(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
     pub fn show_issue(&mut self, id: String, cx: &mut Context<Self>) {
         self.selected = Some(id);
         self.editor = None;
@@ -807,7 +811,9 @@ impl IssuePanel {
         let files: Vec<_> = self
             .files
             .iter()
-            .filter(|f| f.path != "INSTRUCTIONS.md" && !f.content.trim().is_empty())
+            .filter(|f| {
+                (f.path != "INSTRUCTIONS.md" || f.version > 1) && !f.content.trim().is_empty()
+            })
             .collect();
         let mut body = column().gap(px(18.));
         if open.is_empty() && threads.is_empty() {
@@ -2343,6 +2349,14 @@ pub fn sender_header(
     timestamp: i64,
 ) -> Div {
     let _ = timestamp;
+    sender_header_labeled(sender, &format!("Sent by {}", sender.name))
+}
+
+/// The same header with its own wording, such as "Sent from Zapper".
+pub fn sender_header_labeled(
+    sender: &zuse_protocol::presentation::zot_message::ZotSender,
+    label: &str,
+) -> Div {
     // The Zapper's own messages carry its face; relayed thread activity
     // keeps the terminal mark so the two never read as the same author.
     let lead = match sender.avatar.as_ref().filter(|_| !sender.activity) {
@@ -2355,7 +2369,7 @@ pub fn sender_header(
         .text_size(px(12.))
         .text_color(rgb(0x959595))
         .child(lead)
-        .child(format!("Sent by {}", sender.name))
+        .child(label.to_owned())
 }
 
 pub fn sender_footer(body: String, timestamp: i64) -> Div {

@@ -900,6 +900,27 @@ impl CloudConversation {
     fn computer_running(&self) -> bool {
         matches!(self.computer_summary().tone, Tone::Running)
     }
+    /// The status line's Retry on a computer that needs attention: the
+    /// repair the server offers for it, confirmed in the computer menu.
+    pub(super) fn retry_failed_computer(&mut self, cx: &mut Context<Self>) {
+        self.open_computer(cx);
+        self.computer.confirm = [
+            Action::RetryRestart,
+            Action::RetryRecreate,
+            Action::Restart,
+            Action::Recreate,
+        ]
+        .into_iter()
+        .find(|action| allowed(&self.computer.metadata, *action));
+        cx.notify();
+    }
+    /// The status line's Delete: confirmed in the computer menu, like Delete
+    /// computer there.
+    pub(super) fn delete_failed_computer(&mut self, cx: &mut Context<Self>) {
+        self.open_computer(cx);
+        self.computer.confirm = Some(Action::Delete);
+        cx.notify();
+    }
     pub(in crate::shell) fn open_computer(&mut self, cx: &mut Context<Self>) {
         if !self.computer.open {
             self.toggle_computer(cx);

@@ -126,6 +126,7 @@ mod cloud_tabs;
 mod tabs;
 mod top_bar;
 mod voice_stage;
+mod whats_new;
 use voice_stage::VOICE_STAGE_ORB_SCALE;
 
 use spaces::{AddSpaceFlow, RenameSpaceDialog};
@@ -157,6 +158,7 @@ actions!(
         OpenModelPicker,
         NewSession,
         OpenSettings,
+        ShowWhatsNew,
         OpenDevices,
         OpenCloudSettings,
         OpenBilling,
@@ -1589,6 +1591,14 @@ fn titlebar_island_vertical_geometry(progress: f32) -> (f32, f32) {
     (center - height * 0.5, height)
 }
 
+/// Whether the outlet still shows the transcript of a chat being left: the
+/// dock is mid-way back to the new-chat canvas. A cloud chat being created
+/// keeps the composer docked with its own launch outlet (the first message),
+/// so it is never treated as a departing transcript.
+fn departing_transcript(has_selection: bool, cloud_starting: bool, transcript: f32) -> bool {
+    !has_selection && !cloud_starting && transcript > 0.0
+}
+
 fn bottom_stack_measurement_matches(
     measured_has_composer: bool,
     expected_has_composer: bool,
@@ -2374,6 +2384,8 @@ pub struct Shell {
     chat_rename: Option<ChatRename>,
     /// Chat id awaiting delete confirmation.
     delete_confirm: Option<String>,
+    /// Open "What's new" dialog: the bundled changelog release it shows.
+    whats_new: Option<usize>,
     deleting_chat: bool,
     cloud_delete_commands: std::collections::HashMap<String, String>,
     /// Global confirmation/error dialog for the Changes-pane trash action. The
@@ -2741,6 +2753,7 @@ impl Shell {
             let transcript = transcript.clone();
             move |this: &mut Shell, _, event: &ComposerEvent, cx| match event {
                 ComposerEvent::CloudAdmitted {
+                    key,
                     workspace,
                     account,
                     organization,
@@ -2771,17 +2784,27 @@ impl Shell {
                             workspace: id.into(),
                             initial_session: session.into(),
                         };
-                        this.open_cloud_conversation(target, workspace.clone(), launch.clone(), cx);
+                        this.open_admitted_cloud_chat(
+                            key,
+                            target,
+                            workspace.clone(),
+                            launch.clone(),
+                            cx,
+                        );
                     }
                 }
                 ComposerEvent::CloudLaunchChanged => {
+                    // The draft key a new chat launched under is its tab's.
+                    this.track_current_cloud_canvas(cx);
                     cx.notify();
                 }
                 ComposerEvent::ResumeCloud { .. }
                 | ComposerEvent::CloudSleepRequested
                 | ComposerEvent::CloudWakeRequested
                 | ComposerEvent::CloudComputerRecreating { .. }
-                | ComposerEvent::CloudForegroundAdmitted => {}
+                | ComposerEvent::CloudForegroundAdmitted
+                | ComposerEvent::CloudStatusRetry
+                | ComposerEvent::CloudStatusDelete => {}
                 ComposerEvent::WorkspaceCommand(command) => {
                     this.pending_workspace_command = Some(*command);
                     cx.notify();
@@ -3037,6 +3060,7 @@ impl Shell {
             slack_links: Default::default(),
             chat_rename: None,
             delete_confirm: None,
+            whats_new: None,
             deleting_chat: false,
             cloud_delete_commands: std::collections::HashMap::new(),
             discard_working_tree: None,
@@ -3821,6 +3845,16 @@ impl Shell {
         self.right_pane_open(cx) && self.horizontal_fit().right
     }
 
+    /// Whether a Zapper coordinator chat's right side shows the Zapper panel.
+    /// Open surface tabs (a subagent chip's transcript) take the side over
+    /// until they close, so the titlebar's surface strip always lists what
+    /// the pane below it shows.
+    fn zot_panel_on_right(&self, cx: &App) -> bool {
+        matches!(self.route, Route::Chat)
+            && self.selected_zot(cx).is_some()
+            && !self.right_pane_shown(cx)
+    }
+
     /// The current chat's terminal flag (per-session, in-memory).
     fn terminal_open(&self, cx: &App) -> bool {
         self.cloud_conversation.is_none() && self.panels.get(&self.panel_key(cx)).terminal_open
@@ -3893,6 +3927,12 @@ impl Shell {
     /// only the explorer's own toggle undocks that portion.
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
         if matches!(self.route, Route::Chat) && self.selected_zot(cx).is_some() {
+            // Surface tabs (a subagent opened from a chip) stand in for the
+            // Zapper panel; the toggle closes them back to it first.
+            if self.right_pane_open(cx) {
+                self.set_surfaces_open(false, cx);
+                return;
+            }
             self.zot_ui.panel_hidden = !self.zot_ui.panel_hidden;
             cx.notify();
             return;
@@ -5119,12 +5159,7 @@ impl Shell {
     ) {
         self.set_surfaces_open(true, cx);
         let doc_id = format!("workflow-agent:{row_id}:{index}");
-        if let Some((&id, _)) = self
-            .subagent_tabs
-            .iter()
-            .find(|(_, tab)| tab.doc_id == doc_id)
-        {
-            self.set_right_active(RightSurface::Subagent(id), cx);
+        if self.focus_open_subagent_tab(&doc_id, cx) {
             return;
         }
         let Some(snapshot) = transcript.read(cx).workflow_agent(&row_id, index) else {
@@ -5190,6 +5225,36 @@ impl Shell {
         self.set_right_active(RightSurface::Subagent(id), cx);
     }
 
+    /// Focus the tab already showing `doc_id`, if any. The tab must sit in
+    /// THIS chat's strip: one left in another chat's strip (the same doc
+    /// reached from a copy or a side chat) moves here, or focusing it would
+    /// select a surface the visible strip doesn't list.
+    fn focus_open_subagent_tab(&mut self, doc_id: &str, cx: &mut Context<Self>) -> bool {
+        let Some(id) = self
+            .subagent_tabs
+            .iter()
+            .find_map(|(&id, tab)| (tab.doc_id == doc_id).then_some(id))
+        else {
+            return false;
+        };
+        let surface = RightSurface::Subagent(id);
+        let key = self.panel_key(cx);
+        if !self
+            .right_tabs
+            .get(&key)
+            .is_some_and(|tabs| tabs.contains(&surface))
+        {
+            for (other, tabs) in self.right_tabs.iter_mut() {
+                if *other != key {
+                    tabs.retain(|s| *s != surface);
+                }
+            }
+            self.right_tabs.entry(key).or_default().push(surface);
+        }
+        self.set_right_active(surface, cx);
+        true
+    }
+
     /// A spawn chip's "Open subagent": focus the existing tab for that doc,
     /// or open one. `frozen` (subagent done/failed) tries the uploaded
     /// transcript blob first and falls back to the live doc watch; running
@@ -5205,12 +5270,7 @@ impl Shell {
         // The chip lives in the conversation column — the pane it opens into
         // may still be closed.
         self.set_surfaces_open(true, cx);
-        if let Some((&id, _)) = self
-            .subagent_tabs
-            .iter()
-            .find(|(_, tab)| tab.doc_id == doc_id)
-        {
-            self.set_right_active(RightSurface::Subagent(id), cx);
+        if self.focus_open_subagent_tab(&doc_id, cx) {
             return;
         }
         self.subagent_seq += 1;
@@ -9342,7 +9402,10 @@ impl Shell {
         let cloud = id.starts_with(CLOUD_ROW_PREFIX);
         // Archived organization tasks have no restore list yet (Settings →
         // Archived lists personal computers), so they are not offered.
-        let cloud_locked = cloud && self.state.read(cx).cloud_organization_id().is_some();
+        // A chat still being created has no computer to archive yet.
+        let cloud_locked = cloud
+            && (self.state.read(cx).cloud_organization_id().is_some()
+                || id[CLOUD_ROW_PREFIX.len()..].starts_with(cloud_sidebar::PENDING_LAUNCH_PREFIX));
         // Cloud rows wear a small cloud beside their age, green while the
         // computer is up (the catalog's own state; nothing is polled).
         let cloud_online = id
@@ -10957,6 +11020,7 @@ impl Shell {
         .fade_overflow_y(&self.sidebar_scroll);
 
         let github_star_banner = self.render_github_star_banner(theme, cx);
+        let whats_new_card = self.render_whats_new_card(theme, cx);
 
         div()
             .w(px(
@@ -10982,6 +11046,8 @@ impl Shell {
             // "Star on GitHub" banner until dismissed (persisted), above the
             // footer, below the lists. App updates live in the footer itself.
             .when_some(github_star_banner, |el, banner| el.child(banner))
+            // The running release's notes, until dismissed (persisted per version).
+            .when_some(whats_new_card, |el, card| el.child(card))
             .child(
                 div()
                     .px(px(8.))
@@ -12355,6 +12421,10 @@ impl Shell {
             cx.notify();
             return true;
         }
+        if self.whats_new.take().is_some() {
+            cx.notify();
+            return true;
+        }
         if self.sync_flow.has_visible_overlay()
             || self.delete_space_confirm.is_some()
             || self.chat_menu.get().is_some()
@@ -12921,6 +12991,9 @@ impl Shell {
         if let Some(update) = self.render_update_prompt(viewport, cx) {
             overlays.push(update);
         }
+        if let Some(whats_new) = self.render_whats_new_dialog(viewport, cx) {
+            overlays.push(whats_new);
+        }
 
         overlays
     }
@@ -13286,7 +13359,10 @@ impl Shell {
         // Content outlet: selected chat → transcript; nothing selected → the
         // centered new-thread composition; no spaces at all → the onboarding
         // card. New-chat mode mints the chat id on first send.
-        let departing_transcript = !has_selection && dock_frame.transcript() > 0.0;
+        // A new cloud chat being created docks the composer too, but its
+        // outlet is the launch prompt, never a departing (empty) transcript.
+        let departing_transcript =
+            departing_transcript(has_selection, cloud_starting, dock_frame.transcript());
         if !has_selection && !departing_transcript {
             self.transcript
                 .update(cx, |transcript, cx| transcript.finish_route_exit(cx));
@@ -14080,11 +14156,7 @@ impl Shell {
             // In takeover the panel's left edge IS the sidebar seam, which
             // already carries the sidebar tone's right hairline — a second
             // border there doubled up (user report).
-            .when(inset, |el| {
-                el.rounded(px(zuse_viewport::workspace_style::RADIUS))
-                    .border_1()
-                    .border_color(crate::theme::hairline(0.05))
-            })
+            .when(inset, Self::inset_pane_card)
             .when(!inset && !self.right_pane_expanded, |el| {
                 el.border_l_1().border_color(theme.border)
             })
@@ -14123,7 +14195,7 @@ impl Shell {
             div()
                 .h_full()
                 .relative()
-                .when(inset, |el| el.py(px(gutter)).pr(px(gutter)))
+                .when(inset, |el| Self::inset_pane_frame(el, gutter))
                 .child(panel)
                 .into_any_element(),
         )
@@ -15847,6 +15919,7 @@ impl Render for Shell {
             // Native Settings menu item and the platform convention (Cmd+, on
             // macOS, Ctrl+, elsewhere) toggle the modal from any section.
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| this.toggle_settings(cx)))
+            .on_action(cx.listener(|this, _: &ShowWhatsNew, _, cx| this.show_whats_new(cx)))
             .on_action(cx.listener(|this, _: &OpenDevices, _, cx| {
                 this.open_settings(SettingsSection::Devices, cx)
             }))
@@ -16025,8 +16098,8 @@ impl Render for Shell {
                     0.0
                 };
                 // The Zot panel replaces the right pane but takes the same room.
-                let on_zot = on_chat && self.selected_zot(cx).is_some();
-                let right_target_width = if on_zot {
+                let on_zot_panel = on_chat && self.zot_panel_on_right(cx);
+                let right_target_width = if on_zot_panel {
                     if self.zot_ui.panel_hidden {
                         0.0
                     } else {
@@ -16104,7 +16177,7 @@ impl Render for Shell {
                 // never renders it (zuse __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
-                let right_open = on_chat && !on_zot && self.right_pane_shown(cx);
+                let right_open = on_chat && !on_zot_panel && self.right_pane_shown(cx);
                 // Takeover mode derives its width from the viewport, so a
                 // manual drag handle would fight the expanded target.
                 let right_handle = (right_open
@@ -16128,9 +16201,9 @@ impl Render for Shell {
                         .then(|| self.pull_request_pane_handle(cx))
                         .flatten()
                 });
-                let right: AnyElement = if on_zot && self.zot_ui.panel_hidden {
+                let right: AnyElement = if on_zot_panel && self.zot_ui.panel_hidden {
                     Empty.into_any_element()
-                } else if on_zot {
+                } else if on_zot_panel {
                     self.render_zot_inspector(window, cx)
                 } else if on_chat {
                     self.render_right_pane(window, cx)
@@ -16424,6 +16497,16 @@ impl Render for Shell {
 
 #[cfg(test)]
 mod tests {
+    /// A new cloud chat's first message shows the moment it is sent: the
+    /// docked composer of a chat being created never swaps its launch
+    /// outlet for an empty departing transcript.
+    #[test]
+    fn a_cloud_chat_being_created_is_never_a_departing_transcript() {
+        assert!(super::departing_transcript(false, false, 0.5));
+        assert!(!super::departing_transcript(false, true, 1.0));
+        assert!(!super::departing_transcript(true, false, 1.0));
+        assert!(!super::departing_transcript(false, false, 0.0));
+    }
     use super::*;
 
     pub(super) fn chat_with_path(

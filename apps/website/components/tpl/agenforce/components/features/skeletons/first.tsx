@@ -1,0 +1,126 @@
+"use client";
+import {
+	IconCheck,
+	IconClock,
+	IconGitBranch,
+	IconSparkles,
+} from "@tabler/icons-react";
+import { useWebsiteMessages } from "@zuse/i18n/website/react";
+import type React from "react";
+import { AgentBadge } from "@/components/agent-badge";
+import { cn } from "@/components/tpl/agenforce/lib/utils";
+
+const WORKTREES = [
+	{
+		branch: "agent/checkout-recovery",
+		agent: "Builder",
+		mark: "B",
+		detail: "showcase:files_and_tests",
+		status: "showcase:running",
+		tone: "warning" as const,
+	},
+	{
+		branch: "agent/session-race",
+		agent: "Reviewer",
+		mark: "R",
+		detail: "showcase:pr_comments",
+		status: "showcase:in_review",
+		tone: "primary" as const,
+	},
+	{
+		branch: "agent/sidebar-cache",
+		agent: "Builder",
+		mark: "B",
+		detail: "showcase:merged_history_kept",
+		status: "showcase:cleaned",
+		tone: "success" as const,
+	},
+] as const;
+
+export const SkeletonOne = () => {
+	const { message: t } = useWebsiteMessages();
+	return (
+		<div className="perspective-distant h-full w-full -translate-y-10 rotate-x-30 -rotate-y-20 rotate-z-15 scale-[1.14] mask-r-from-50% mask-radial-from-50%">
+			{WORKTREES.map((item, index) => (
+				<WorktreeCard
+					key={item.branch}
+					{...item}
+					detail={t(item.detail)}
+					status={t(item.status)}
+					className={cn(
+						"absolute max-w-[88%]",
+						index === 0 && "bottom-0 left-12 z-30",
+						index === 1 && "bottom-10 left-8 z-20",
+						index === 2 && "bottom-20 left-4 z-10 max-w-[80%]",
+					)}
+				/>
+			))}
+		</div>
+	);
+};
+
+function WorktreeCard({
+	branch,
+	agent,
+	mark,
+	detail,
+	status,
+	tone,
+	className,
+}: Omit<(typeof WORKTREES)[number], "detail" | "status"> & {
+	detail: string;
+	status: string;
+	className?: string;
+}) {
+	return (
+		<div
+			className={cn(
+				"border-border bg-card mx-auto w-full rounded-2xl border p-3 shadow-2xl",
+				className,
+			)}
+		>
+			<div className="flex items-center gap-2">
+				<IconGitBranch className="text-muted-foreground size-4 shrink-0" />
+				<p className="text-heading min-w-0 flex-1 truncate font-mono text-[11px]">
+					{branch}
+				</p>
+				<Badge tone={tone}>{status}</Badge>
+			</div>
+			<div className="mt-3 flex items-center gap-2">
+				<AgentBadge mark={mark} className="size-6 rounded-md" />
+				<span className="text-heading text-[11px] font-medium">{agent}</span>
+				<span className="text-muted-foreground ml-auto font-mono text-[9px]">
+					{detail}
+				</span>
+			</div>
+		</div>
+	);
+}
+
+function Badge({
+	tone,
+	children,
+}: {
+	tone: "primary" | "success" | "warning";
+	children: React.ReactNode;
+}) {
+	const Icon =
+		tone === "success"
+			? IconCheck
+			: tone === "warning"
+				? IconClock
+				: IconSparkles;
+	return (
+		<span
+			className={cn(
+				"flex items-center gap-1 rounded-full border px-1.5 py-0.5 font-mono text-[8px] font-semibold",
+				tone === "success" && "border-primary/30 bg-primary/10 text-primary",
+				tone === "warning" &&
+					"border-amber-400/30 bg-amber-400/10 text-amber-500",
+				tone === "primary" && "border-sky-400/30 bg-sky-400/10 text-sky-500",
+			)}
+		>
+			<Icon className="size-2.5" /> {children}
+		</span>
+	);
+}

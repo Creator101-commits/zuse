@@ -13,6 +13,8 @@ pub(crate) mod guest_start;
 pub(super) mod initial_boot;
 mod preparation_hold;
 pub mod rejection;
+#[cfg(test)]
+mod start_deadline_tests;
 pub(crate) mod timings;
 
 pub const MIGRATION: &str = include_str!("../../migrations/0004_allocations.sql");
@@ -422,6 +424,11 @@ impl RuntimeControl {
             {
                 return result;
             }
+            // Never "Preparing" forever: a first start that still has no
+            // provider machine after its deadline stops visibly (Retry/Delete).
+            if self.stop_overdue_allocation(job, clock_ms()).await? {
+                return result;
+            }
             // Successful not-ready observations do not consume the provider-failure
             // backoff exponent. Physical delivery attempts remain monotonic.
             let mut failure_job = job.clone();
@@ -666,7 +673,11 @@ impl RuntimeControl {
                 let machine = match found {
                     Some(machine) => machine,
                     None => {
-                        self.begin_allocation_dispatch(job, &operation).await?;
+                        // Every non-initial attempt has just looked up the exact
+                        // name and found nothing; only that permits resolving an
+                        // old uncertain create.
+                        self.begin_allocation_dispatch(job, &operation, !initial_dispatch)
+                            .await?;
                         let result = provider
                             .create_operation(
                                 required(&operation, "snapshot_id")?,
@@ -680,7 +691,15 @@ impl RuntimeControl {
                             &result,
                         )
                         .await?;
-                        result.map_err(provider_error)?
+                        // A definite refusal is journaled as rejected above and
+                        // stops visibly now instead of after another backoff.
+                        result.map_err(|error| {
+                            if effects::definitely_not_created(&error) {
+                                ApiError::unavailable("cloud_provider_rejected")
+                            } else {
+                                provider_error(error)
+                            }
+                        })?
                     }
                 };
                 if machine.name != name || machine.id.is_empty() {

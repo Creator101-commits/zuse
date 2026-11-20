@@ -391,6 +391,8 @@ impl Shell {
                         // never runs worktree setup of its own.
                         ComposerEvent::CloudAdmitted { .. }
                         | ComposerEvent::CloudForegroundAdmitted
+                        | ComposerEvent::CloudStatusRetry
+                        | ComposerEvent::CloudStatusDelete
                         | ComposerEvent::CloudSleepRequested
                         | ComposerEvent::CloudWakeRequested
                         | ComposerEvent::CloudComputerRecreating { .. }

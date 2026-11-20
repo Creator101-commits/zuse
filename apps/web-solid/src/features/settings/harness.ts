@@ -38,7 +38,7 @@ export interface HarnessUpdateStatus {
   manualCommand?: string;
 }
 
-export { harnessIcon as harnessMark, harnessTint } from "@/ui/harness";
+export { harnessIcon as harnessMark,harnessTint } from "@/ui/harness";
 export const isCustomAcp = (id: string) => id.startsWith("acp-");
 
 const CLI: Record<string, string> = {
@@ -110,6 +110,7 @@ export const keepsOneLogin = (id: string) => id === "antigravity";
 export const switchesAccounts = (id: string) => id !== "hermes" && id !== "antigravity";
 
 export function providerNote(id: string): string | undefined {
+  if (id === "antigravity") return "To use a different Google account, remove the connected account, then connect again.";
   return id === "hermes"
     ? "Hermes manages its own credential pool and rotates through it. Accounts added here go through `hermes auth add`; remove one with `hermes auth remove`."
     : undefined;

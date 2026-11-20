@@ -106,8 +106,11 @@ impl RuntimeConfig {
                 .filter(|s| !s.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            // Current desktops send every follow-up message as a task
+            // command; a workspace created without command admission accepts
+            // only its first message. On unless explicitly turned off.
             command_admission_creation: match env::var("ZUSE_CLOUD_COMMAND_ADMISSION_V2") {
-                Err(env::VarError::NotPresent) => false,
+                Err(env::VarError::NotPresent) => true,
                 Ok(v) if v == "true" => true,
                 Ok(v) if v == "false" => false,
                 _ => anyhow::bail!("Invalid ZUSE_CLOUD_COMMAND_ADMISSION_V2"),

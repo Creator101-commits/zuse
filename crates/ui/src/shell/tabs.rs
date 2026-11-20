@@ -9,6 +9,35 @@ pub(super) fn active_tab_text_color(theme: &Theme) -> gpui::Hsla {
     crate::theme::mix(theme.text, theme.text_muted, 0.3)
 }
 
+/// The × every closable tab shares: shown on the active tab, revealed on
+/// hover (of `group`) for the rest.
+pub(super) fn tab_close_button(
+    id: SharedString,
+    label: &'static str,
+    active: bool,
+    group: SharedString,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .size(px(16.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .when(!active, |d| d.invisible())
+        .group_hover(group, |d| d.visible())
+        .hover(|d| d.bg(theme.muted_fill()))
+        .child(
+            icon(icons::CLOSE)
+                .size(px(10.))
+                .text_color(theme.text_muted),
+        )
+}
+
 fn conversation_tab_title(title: Option<&str>) -> &str {
     title.unwrap_or("New chat")
 }
@@ -94,7 +123,7 @@ struct PanelTitlebarWidths {
 
 pub(super) struct TitlebarTrailing {
     fit: HorizontalPanelFit,
-    right_pane_visible: bool,
+    pub(super) right_pane_visible: bool,
     pub(super) takeover: bool,
     row_left: f32,
     row_gap: f32,
@@ -746,28 +775,9 @@ impl Shell {
                 })
                 .when(!active, |d| d.text_color(theme.text_muted))
         };
-        // The × every closable tab shares: shown on the active tab, revealed
-        // on hover for the rest.
         let close_button =
             |id: SharedString, label: &'static str, active: bool, group: SharedString| {
-                div()
-                    .id(id)
-                    .role(gpui::Role::Button)
-                    .aria_label(label)
-                    .size(px(16.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .when(!active, |d| d.invisible())
-                    .group_hover(group, |d| d.visible())
-                    .hover(|d| d.bg(theme.muted_fill()))
-                    .child(
-                        icon(icons::CLOSE)
-                            .size(px(10.))
-                            .text_color(theme.text_muted),
-                    )
+                tab_close_button(id, label, active, group, &theme)
             };
         let main_chips = main_tabs
             .into_iter()
@@ -1288,10 +1298,13 @@ impl Shell {
                                 icons::sidebar_glyph(
                                     motion::state_t(
                                         "toggle-changes",
-                                        self.selected_zot(cx)
-                                            .map_or(self.right_pane_open(cx) && fit.right, |_| {
+                                        self.selected_zot(cx).map_or(
+                                            self.right_pane_open(cx) && fit.right,
+                                            |_| {
                                                 !self.zot_ui.panel_hidden
-                                            }),
+                                                    || self.right_pane_open(cx)
+                                            },
+                                        ),
                                         motion::GLYPH_STATE,
                                         self.reduced_motion,
                                     ),

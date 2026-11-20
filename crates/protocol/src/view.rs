@@ -503,6 +503,39 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     }
 }
 
+/// Whether a tool name is one of the Zapper MCP tools, in any form a harness
+/// stores it: bare (`zapper_command`), or with the `mcp__<server>__` prefix
+/// (`mcp__zuse__zapper_command`). Includes the legacy `zot_*` names.
+pub fn is_zapper_tool_name(name: &str) -> bool {
+    let bare = match name.strip_prefix("mcp__") {
+        Some(rest) => rest.split_once("__").map_or(rest, |(_, tool)| tool),
+        None => name,
+    };
+    matches!(
+        bare,
+        "zapper_command"
+            | "zapper_events"
+            | "zapper_files"
+            | "zapper_issue"
+            | "zapper_acknowledge"
+            | "zot_command"
+            | "zot_events"
+            | "zot_files"
+            | "zot_acknowledge"
+    )
+}
+
+/// Whether a call is to one of the Zapper MCP tools (see [`is_zapper_tool_name`]).
+pub fn is_zapper_call(call: &crate::ToolCall) -> bool {
+    match call {
+        crate::ToolCall::Mcp { tool, .. } => is_zapper_tool_name(tool),
+        crate::ToolCall::Unknown { name, .. } => {
+            name.starts_with("mcp__") && is_zapper_tool_name(name)
+        }
+        _ => false,
+    }
+}
+
 /// Per-kind chip label + one-line detail. Labels match zuse's `describeTool`
 /// (tool-chip.tsx) exactly, so the two viewports name a tool identically.
 pub fn tool_chip_content(call: &crate::ToolCall) -> (&'static str, String) {
@@ -533,6 +566,18 @@ fn tool_chip_content_raw(call: &crate::ToolCall) -> (&'static str, String) {
         ToolCall::Todo { items } => {
             let done = items.iter().filter(|i| i.done).count();
             ("Todo", format!("{done}/{} done", items.len()))
+        }
+        ToolCall::Mcp {
+            server,
+            tool,
+            input,
+        } if is_zapper_tool_name(tool) => {
+            // "Zapper · createIssue": the command's action type when it has one.
+            let action = input
+                .as_ref()
+                .and_then(|i| i.get("action")?.get("type")?.as_str())
+                .unwrap_or(tool.as_str());
+            ("Zapper", action.to_owned())
         }
         ToolCall::Mcp {
             server,

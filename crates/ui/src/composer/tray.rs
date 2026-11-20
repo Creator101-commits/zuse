@@ -595,21 +595,7 @@ impl Composer {
         // The prompt itself is already in the transcript; the tray only says
         // what the cloud computer is doing.
         if let Some(row) = self.cloud_status_row(&theme, cx) {
-            let retry = self.cloud_launch_pending(cx)
-                && self.cloud.task.is_none()
-                && self.visible_failure().is_none();
-            rows.push(TrayRow::Pill(if retry {
-                row.action(
-                    tray_text_action("retry-cloud-launch", "Retry", None, &theme).on_click(
-                        cx.listener(|this, _, _, cx| {
-                            let text = this.input.read(cx).text().to_owned();
-                            this.send_cloud(text, cx);
-                        }),
-                    ),
-                )
-            } else {
-                row
-            }));
+            rows.push(TrayRow::Pill(row));
             if self.cloud_launch_pending(cx) {
                 // Nothing else in the tray while the launch owns it.
             } else if let Some(notice) = self.cloud_model_notice_row(&theme, cx) {
@@ -1452,7 +1438,12 @@ impl Composer {
         let harness = self.pickers.read(cx).resolved(cx).harness;
         let label = harness.map_or("your provider", crate::settings::accounts::provider_name);
         // A failed send in this composer outranks the transcript's error.
-        if let Some(message) = self.visible_failure() {
+        // A new cloud chat's failure is its status line (with Retry and
+        // Delete), not a second notice.
+        if let Some(message) = self
+            .visible_failure()
+            .filter(|_| !self.cloud_launch_pending(cx))
+        {
             let offline = message.as_ref() == "Engine not connected";
             let configuration = is_configuration_notice(
                 message.as_ref(),

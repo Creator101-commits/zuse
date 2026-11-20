@@ -5368,6 +5368,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> SidebarSessionRows {
         let cloud_groups = self.cloud_sidebar_groups(cx);
+        let group_labels = {
+            let state = self.state.read(cx);
+            state.project_labels(&state.cloud_sidebar_projects())
+        };
         let now = Utc::now();
         let filter = self.settings.space_filter.clone();
         let profile_key = self.active_sidebar_pin_profile_key(cx);
@@ -5826,6 +5830,11 @@ impl Shell {
                     }
                 }
             }
+            // Two repositories with one name read as `owner/repo`.
+            let group = group.map(|(key, label)| {
+                let label = group_labels.local.get(&key).cloned().unwrap_or(label);
+                (key, label)
+            });
             let Some((key, label)) = group else {
                 rendered.extend(rendered_rows);
                 if !pinned_group {

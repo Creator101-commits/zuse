@@ -21,6 +21,13 @@ use zuse_protocol::cloud_runtime_updates as wire;
 
 /// After this many failed attempts a release is not offered to that computer.
 const MAX_FAILURES: i32 = 2;
+/// A running guest polls at least every 10 minutes and every poll re-stamps
+/// `offered_at`; a download (10 min timeout) plus swap stays well inside this.
+/// An online computer silent for longer lost the attempt.
+pub const IN_FLIGHT_DEADLINE_MS: i64 = 30 * 60_000;
+/// How often the worker applies `IN_FLIGHT_DEADLINE_MS`.
+pub const EXPIRY_SWEEP_MS: i64 = 5 * 60_000;
+pub const TIMED_OUT: &str = "runtime_update_timed_out";
 
 /// Which channel this deployment follows and where artifacts are downloaded.
 #[derive(Clone)]
@@ -395,6 +402,28 @@ impl RuntimeControl {
             self.notify_task_drain();
         }
         Ok(json!({"recorded": true}))
+    }
+
+    /// Deadline for `pending`/`downloading`: an online computer whose runtime
+    /// stopped reporting for `IN_FLIGHT_DEADLINE_MS` resolves to `failed`
+    /// (`runtime_update_timed_out`, visible in the update status). The next
+    /// poll or message starts a fresh attempt, so this is the retry. Not
+    /// counted toward `MAX_FAILURES`: a busy guest is not a bad release.
+    /// Sleeping computers don't poll and swap a staged update on their next
+    /// start; the workspace's `updated_at` (bumped on wake) restarts the clock.
+    pub async fn expire_runtime_updates(&self, now: i64) -> Result<u64, ApiError> {
+        let expired = sqlx::query("UPDATE zuse_rust_runtime_updates u SET state='failed',error_code=$2,urgency='background',attested_at=$1,updated_at=$1 FROM api_cloud_workspaces w WHERE w.workspace_id=u.workspace_id AND u.state IN ('pending','downloading') AND w.state='ready' AND w.desired_state='ready' AND w.runtime_state='online' AND GREATEST(COALESCE(u.offered_at,u.updated_at),u.updated_at,w.updated_at)<=$1-$3")
+            .bind(now)
+            .bind(TIMED_OUT)
+            .bind(IN_FLIGHT_DEADLINE_MS)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if expired > 0 {
+            // Messages that waited for the update are judged again now.
+            self.notify_task_drain();
+        }
+        Ok(expired)
     }
 
     /// `GET /v1/cloud/workspaces/{id}/runtime-update` for an authorized user.

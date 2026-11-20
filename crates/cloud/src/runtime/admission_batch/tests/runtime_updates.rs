@@ -67,6 +67,59 @@ async fn status(control: &RuntimeControl, pool: &PgPool, id: &str) -> u::UpdateS
     control.runtime_update_status(&row).await.unwrap()
 }
 
+/// REGRESSION GUARD for "Downloading forever": an in-flight update on an
+/// online computer that stops reporting resolves to a visible failure, not
+/// counted against the release, and the next poll starts a new attempt.
+/// Leaves the original attempt in flight again for the caller.
+async fn in_flight_deadline(
+    control: &RuntimeControl,
+    owner: &PgPool,
+    pool: &PgPool,
+    id: &str,
+    update_id: &str,
+    offered: i64,
+) {
+    use crate::runtime::runtime_updates::{IN_FLIGHT_DEADLINE_MS, TIMED_OUT};
+    let saved: (String, String, String, i64) = sqlx::query_as("SELECT state,desired_state,runtime_state,updated_at FROM api_cloud_workspaces WHERE workspace_id=$1").bind(id).fetch_one(owner).await.unwrap();
+    let late = offered.max(saved.3) + IN_FLIGHT_DEADLINE_MS + 1;
+    // Asleep: it doesn't poll, and swaps a staged update on its next start.
+    sqlx::query("UPDATE api_cloud_workspaces SET state='paused',desired_state='paused',runtime_state='offline' WHERE workspace_id=$1").bind(id).execute(owner).await.unwrap();
+    assert_eq!(control.expire_runtime_updates(late).await.unwrap(), 0);
+    sqlx::query("UPDATE api_cloud_workspaces SET state='ready',desired_state='ready',runtime_state='online' WHERE workspace_id=$1").bind(id).execute(owner).await.unwrap();
+    // Online but inside the deadline.
+    assert_eq!(control.expire_runtime_updates(late - 2).await.unwrap(), 0);
+    assert_eq!(
+        status(control, pool, id).await.state,
+        u::UpdateState::Downloading
+    );
+    assert_eq!(control.expire_runtime_updates(late).await.unwrap(), 1);
+    let timed_out = status(control, pool, id).await;
+    assert_eq!(timed_out.state, u::UpdateState::Failed);
+    assert_eq!(timed_out.error_code.as_deref(), Some(TIMED_OUT));
+    let failures: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM zuse_rust_runtime_update_failures WHERE workspace_id=$1",
+    )
+    .bind(id)
+    .fetch_one(owner)
+    .await
+    .unwrap();
+    assert_eq!(failures, 0, "a silent guest is not a bad release");
+    // The next poll is the retry: a new attempt.
+    let retry = control
+        .runtime_update_offer(id, CREDENTIAL, late + 1)
+        .await
+        .unwrap()
+        .directive
+        .expect("offered again after the timeout");
+    assert_ne!(retry.update_id, update_id);
+    assert_eq!(
+        status(control, pool, id).await.state,
+        u::UpdateState::Downloading
+    );
+    sqlx::query("UPDATE zuse_rust_runtime_updates SET update_id=$2,urgency='now',state='downloading',error_code=NULL,attested_at=NULL WHERE workspace_id=$1").bind(id).bind(update_id).execute(owner).await.unwrap();
+    sqlx::query("UPDATE api_cloud_workspaces SET state=$2,desired_state=$3,runtime_state=$4 WHERE workspace_id=$1").bind(id).bind(&saved.0).bind(&saved.1).bind(&saved.2).execute(owner).await.unwrap();
+}
+
 pub(super) fn attestation(
     outcome: u::Outcome,
     update_id: Option<String>,
@@ -267,6 +320,7 @@ pub(super) async fn exercise(
             .code,
         "workspace_runtime_fenced"
     );
+    in_flight_deadline(control, owner, pool, id, &directive.update_id, now + 1).await;
 
     control
         .runtime_update_attest(
