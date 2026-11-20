@@ -276,6 +276,17 @@ impl Zots {
             CREATE TABLE IF NOT EXISTS zot_releases(chat TEXT NOT NULL, device TEXT NOT NULL, zot TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(chat,device,zot));
             CREATE TABLE IF NOT EXISTS zot_worker_holds(zot TEXT NOT NULL, chat TEXT NOT NULL, reason TEXT NOT NULL, PRIMARY KEY(zot,chat));
             CREATE TABLE IF NOT EXISTS zot_targets(zot TEXT NOT NULL, target TEXT NOT NULL, revision INTEGER NOT NULL, PRIMARY KEY(zot,target));")?;
+        // Holds note the thread's last finished turn once it is seen stopped,
+        // so a turn the user starts afterwards releases the hold.
+        for column in ["stamped INTEGER NOT NULL DEFAULT 0", "turn TEXT"] {
+            if let Err(error) = db.execute(
+                &format!("ALTER TABLE zot_worker_holds ADD COLUMN {column}"),
+                [],
+            ) && !error.to_string().contains("duplicate column")
+            {
+                return Err(error.into());
+            }
+        }
         let token_file = root.join("control-token");
         let token = match std::fs::read_to_string(&token_file) {
             Ok(token) => {
@@ -743,7 +754,7 @@ impl Zots {
                         .optional()?;
                     ensure!(
                         hold.as_deref().map(HoldSource::of) != Some(HoldSource::User),
-                        "worker needs explicit user continuation: the user stopped this thread, so only they can restart it. Don't retry; askUser on its issue (or record a decision) asking whether to continue it"
+                        "worker needs explicit user continuation: the user stopped this thread, so only they can restart it. Don't retry; askUser on its issue (or record a decision) asking whether to continue it. If they continue it in its own chat, this clears once it runs again"
                     );
                     ensure!(
                         worker.followups < zot.config.max_followups,
@@ -778,7 +789,7 @@ impl Zots {
             }
             ZotAction::StopWorker { chat_id } | ZotAction::ArchiveWorker { chat_id } => {
                 tx.execute(
-                    "INSERT OR REPLACE INTO zot_worker_holds VALUES(?1,?2,?3)",
+                    "INSERT OR REPLACE INTO zot_worker_holds(zot,chat,reason) VALUES(?1,?2,?3)",
                     params![
                         zot.id,
                         chat_id,
@@ -914,6 +925,67 @@ impl Zots {
         tx.commit()?;
         self.inner.changed.send_modify(|n| *n = n.wrapping_add(1));
         Ok(result)
+    }
+
+    /// Release a held thread that is running again, or that finished a turn
+    /// after it was seen stopped: someone (the user, in its own chat)
+    /// continued it. The hold's interruption and failure reports are
+    /// resolved with it. A hold is first stamped with the thread's last
+    /// finished turn when the thread is seen not working, so a stop that
+    /// hasn't landed yet can't release its own hold. Returns whether the
+    /// hold was released.
+    pub(crate) fn settle_hold(
+        &self,
+        zot: &str,
+        chat: &str,
+        working: bool,
+        last_completed_turn: Option<&str>,
+    ) -> Result<bool> {
+        let mut db = self
+            .inner
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Zapper storage unavailable"))?;
+        let tx = db.transaction()?;
+        let hold: Option<(bool, Option<String>)> = tx
+            .query_row(
+                "SELECT stamped,turn FROM zot_worker_holds WHERE zot=?1 AND chat=?2",
+                params![zot, chat],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let released = match hold {
+            None => false,
+            Some((false, _)) => {
+                if !working {
+                    tx.execute(
+                        "UPDATE zot_worker_holds SET stamped=1, turn=?3 WHERE zot=?1 AND chat=?2",
+                        params![zot, chat, last_completed_turn],
+                    )?;
+                }
+                false
+            }
+            Some((true, turn)) => {
+                let resumed = working || turn.as_deref() != last_completed_turn;
+                if resumed {
+                    tx.execute(
+                        "DELETE FROM zot_worker_holds WHERE zot=?1 AND chat=?2",
+                        params![zot, chat],
+                    )?;
+                    tx.execute(
+                        "UPDATE zot_events SET acknowledged=1 WHERE zot=?1 AND worker=?2 AND acknowledged=0 AND kind IN ('interrupted','failed')",
+                        params![zot, chat],
+                    )?;
+                }
+                resumed
+            }
+        };
+        tx.commit()?;
+        drop(db);
+        if released {
+            self.inner.changed.send_modify(|n| *n = n.wrapping_add(1));
+        }
+        Ok(released)
     }
 
     pub fn files(&self, id: &str, history: bool) -> Result<Vec<ZotFile>> {
@@ -1738,7 +1810,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute(
-                    "INSERT INTO zot_worker_holds VALUES('release','worker',?1)",
+                    "INSERT INTO zot_worker_holds(zot,chat,reason) VALUES('release','worker',?1)",
                     [reason],
                 )
                 .unwrap();
@@ -1760,13 +1832,116 @@ mod tests {
                 .lock()
                 .unwrap()
                 .execute(
-                    "INSERT OR REPLACE INTO zot_worker_holds VALUES('release','worker',?1)",
+                    "INSERT OR REPLACE INTO zot_worker_holds(zot,chat,reason) VALUES('release','worker',?1)",
                     [reason],
                 )
                 .unwrap();
             let err = resume(&format!("after-{id}")).unwrap_err().to_string();
             assert!(err.contains("only they can restart it"), "{id}: {err}");
         }
+    }
+    #[test]
+    fn continuing_a_held_thread_in_its_chat_releases_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Zots::open(dir.path(), "local").unwrap();
+        create(&store, "release");
+        store
+            .command(command(
+                "release",
+                "adopt",
+                ZotAction::AdoptWorker { worker: worker() },
+            ))
+            .unwrap();
+        // The user stops the thread from the app while its turn still runs.
+        store
+            .command(command(
+                "release",
+                "user-stop",
+                ZotAction::StopWorker {
+                    chat_id: "worker".into(),
+                },
+            ))
+            .unwrap();
+        store
+            .record_event(&ZotEvent {
+                id: "interrupted-1".into(),
+                zot_id: "release".into(),
+                worker_chat_id: "worker".into(),
+                kind: "interrupted".into(),
+                summary: "Worker was stopped by the user.".into(),
+                acknowledged: false,
+            })
+            .unwrap();
+        let auto = |id: &str| {
+            store.command_as(
+                command(
+                    "release",
+                    id,
+                    ZotAction::MessageWorker {
+                        chat_id: "worker".into(),
+                        text: "Carry on".into(),
+                        automatic: true,
+                    },
+                ),
+                Some("zot-release-0"),
+                true,
+            )
+        };
+        let pending = |store: &Zots| {
+            store
+                .events("release")
+                .unwrap()
+                .iter()
+                .filter(|e| !e.acknowledged && e.kind == "interrupted")
+                .count()
+        };
+        // Still running the stopped turn: the stop hasn't landed, so the
+        // hold stays and isn't stamped.
+        assert!(
+            !store
+                .settle_hold("release", "worker", true, Some("t1"))
+                .unwrap()
+        );
+        // Seen stopped at turn t1.
+        assert!(
+            !store
+                .settle_hold("release", "worker", false, Some("t1"))
+                .unwrap()
+        );
+        assert!(
+            !store
+                .settle_hold("release", "worker", false, Some("t1"))
+                .unwrap()
+        );
+        assert!(auto("blocked").is_err());
+        assert_eq!(pending(&store), 1);
+        // The user sends a message in the thread's chat and it runs again.
+        assert!(
+            store
+                .settle_hold("release", "worker", true, Some("t1"))
+                .unwrap()
+        );
+        assert_eq!(pending(&store), 0, "the Needs-you report is resolved");
+        auto("after-user-continued").unwrap();
+        // A turn that started and finished between two looks also counts.
+        store
+            .command(command(
+                "release",
+                "user-stop-2",
+                ZotAction::StopWorker {
+                    chat_id: "worker".into(),
+                },
+            ))
+            .unwrap();
+        store
+            .settle_hold("release", "worker", false, Some("t2"))
+            .unwrap();
+        assert!(
+            store
+                .settle_hold("release", "worker", false, Some("t3"))
+                .unwrap()
+        );
+        auto("after-quick-turn").unwrap();
     }
     pub(super) fn config() -> ZotConfig {
         ZotConfig {

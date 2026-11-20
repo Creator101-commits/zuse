@@ -37,24 +37,41 @@ impl ZotSupervisor {
     }
 }
 
-/// Who ended a turn that stopped without completing: a Stop the user sent to
-/// the thread after the Zapper's message went out, or else the thread itself
-/// (its runtime ended, or the engine stopped it for memory). The Zapper's own
-/// stops carry its outbox ids.
+/// Who ended a turn that stopped without completing. A message the user
+/// sent to the thread after the Zapper's (and after any Stop of theirs)
+/// redirected the turn: nothing needs continuing, so no hold (`None`).
+/// Otherwise a Stop the user sent after the Zapper's message holds it for the
+/// user, and with no Stop at all the thread ended by itself (its runtime
+/// ended, or the engine stopped it for memory). The Zapper's own commands
+/// carry its outbox ids.
 pub(super) fn abort_hold(
     commands: &[zuse_doc::SessionCommandEntry],
     sent_at: i64,
     zapper_commands: &[String],
-) -> &'static str {
-    let user_stop = commands.iter().any(|c| {
-        matches!(c.payload, SessionCommandPayload::Interrupt {})
-            && c.issued_at >= sent_at
-            && !zapper_commands.contains(&c.id)
+) -> Option<&'static str> {
+    let users = commands
+        .iter()
+        .filter(|c| c.issued_at >= sent_at && !zapper_commands.contains(&c.id));
+    let last_stop = users
+        .clone()
+        .filter(|c| matches!(c.payload, SessionCommandPayload::Interrupt {}))
+        .map(|c| c.issued_at)
+        .max();
+    let redirected = users.clone().any(|c| {
+        matches!(
+            c.payload,
+            SessionCommandPayload::Run { .. }
+                | SessionCommandPayload::Steer { .. }
+                | SessionCommandPayload::RespondInput { .. }
+                | SessionCommandPayload::ChatCommand { .. }
+        ) && last_stop.is_none_or(|stop| c.issued_at >= stop)
     });
-    if user_stop {
-        HOLD_USER
+    if redirected {
+        None
+    } else if last_stop.is_some() {
+        Some(HOLD_USER)
     } else {
-        HOLD_THREAD_STOPPED
+        Some(HOLD_THREAD_STOPPED)
     }
 }
 
@@ -136,6 +153,12 @@ fn reconcile(
             else {
                 continue;
             };
+            zots.settle_hold(
+                &zot.id,
+                &worker.chat_id,
+                status.status == SessionStatus::Working,
+                status.last_completed_turn.as_deref(),
+            )?;
             if status.status == SessionStatus::Working {
                 continue;
             }
@@ -176,7 +199,7 @@ fn reconcile(
                     tx.execute("UPDATE zot_outbox SET phase='settled' WHERE id=?1", [id])?;
                     if aborted || status.status == SessionStatus::Errored {
                         let reason = if status.status == SessionStatus::Errored {
-                            HOLD_THREAD_FAILED
+                            Some(HOLD_THREAD_FAILED)
                         } else {
                             let commands = docs
                                 .open(&worker.chat_id)
@@ -185,13 +208,22 @@ fn reconcile(
                                 .unwrap_or_default();
                             abort_hold(&commands, sent_at, &zapper_commands)
                         };
-                        // A hold written when the stop was issued already
-                        // says who stopped the thread.
-                        tx.execute(
-                            "INSERT OR IGNORE INTO zot_worker_holds VALUES(?1,?2,?3)",
-                            params![zot.id, worker.chat_id, reason],
-                        )?;
-                        interrupted |= aborted;
+                        // None: the user redirected the turn with a message
+                        // of their own, so nothing waits on anyone.
+                        if let Some(reason) = reason {
+                            // A hold written when the stop was issued already
+                            // says who stopped the thread; either way the
+                            // thread is seen stopped at this turn.
+                            tx.execute(
+                                "INSERT OR IGNORE INTO zot_worker_holds(zot,chat,reason) VALUES(?1,?2,?3)",
+                                params![zot.id, worker.chat_id, reason],
+                            )?;
+                            tx.execute(
+                                "UPDATE zot_worker_holds SET stamped=1, turn=?3 WHERE zot=?1 AND chat=?2 AND stamped=0",
+                                params![zot.id, worker.chat_id, status.last_completed_turn],
+                            )?;
+                            interrupted |= aborted;
+                        }
                     }
                 }
             }
@@ -578,22 +610,57 @@ mod abort_tests {
         }
     }
 
+    fn message(id: &str, at: i64) -> SessionCommandEntry {
+        SessionCommandEntry {
+            payload: SessionCommandPayload::Steer {
+                prompt: "do this instead".into(),
+                message_id: None,
+            },
+            ..stop(id, at)
+        }
+    }
+
     #[test]
     fn aborts_are_held_for_whoever_caused_them() {
         let zapper = vec!["zapper-stop".to_owned()];
         // Nobody stopped it: the thread ended by itself.
-        assert_eq!(abort_hold(&[], 100, &zapper), HOLD_THREAD_STOPPED);
+        assert_eq!(abort_hold(&[], 100, &zapper), Some(HOLD_THREAD_STOPPED));
         // A Stop from before the Zapper's message doesn't count.
         assert_eq!(
             abort_hold(&[stop("old", 50)], 100, &zapper),
-            HOLD_THREAD_STOPPED
+            Some(HOLD_THREAD_STOPPED)
         );
         // The Zapper's own stop is its outbox id.
         assert_eq!(
             abort_hold(&[stop("zapper-stop", 150)], 100, &zapper),
-            HOLD_THREAD_STOPPED
+            Some(HOLD_THREAD_STOPPED)
         );
         // Anyone else's Stop after the message is the user's.
-        assert_eq!(abort_hold(&[stop("button", 150)], 100, &zapper), HOLD_USER);
+        assert_eq!(
+            abort_hold(&[stop("button", 150)], 100, &zapper),
+            Some(HOLD_USER)
+        );
+    }
+
+    #[test]
+    fn a_turn_the_user_redirected_needs_no_continuation() {
+        let zapper = vec!["zapper-stop".to_owned()];
+        // Stop then a new message: the user redirected the turn.
+        assert_eq!(
+            abort_hold(&[stop("button", 150), message("new", 151)], 100, &zapper),
+            None
+        );
+        // A message that replaced the turn without a separate Stop.
+        assert_eq!(abort_hold(&[message("new", 150)], 100, &zapper), None);
+        // A message before a later Stop doesn't undo that Stop.
+        assert_eq!(
+            abort_hold(&[message("new", 150), stop("button", 160)], 100, &zapper),
+            Some(HOLD_USER)
+        );
+        // The Zapper's own messages are not the user's.
+        assert_eq!(
+            abort_hold(&[message("zapper-stop", 150)], 100, &zapper),
+            Some(HOLD_THREAD_STOPPED)
+        );
     }
 }
