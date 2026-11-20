@@ -233,6 +233,9 @@ impl CloudConversation {
             cx.observe(&composer, |_: &mut Self, _, cx| cx.notify()),
             cx.observe(&state, |this: &mut Self, state, cx| {
                 this.history.observe_live(state.read(cx));
+                // New transcript or admissions reconcile the first message's
+                // stand-in and the working lines right away.
+                this.sync_progress(cx);
                 let transcript = state.read(cx).transcript.clone();
                 this.composer.update(cx, |composer, cx| {
                     composer.apply_cloud_response_activity(&transcript, cx)
@@ -376,6 +379,25 @@ impl CloudConversation {
                 .pending_echoes()
                 .iter()
                 .any(|entry| entry.id == echo);
+            // The first message's stand-in is in the server's transcript now
+            // (under its own id): the send anchor moves to it, then the
+            // stand-in goes, so the message keeps its place with no jump.
+            if pending.is_none() && shown {
+                let real = self
+                    .state
+                    .read(cx)
+                    .transcript
+                    .iter()
+                    .find(|entry| entry.role == zuse_model::MessageRole::User)
+                    .map(|entry| entry.id.clone());
+                if let Some(real) = real {
+                    self.transcript.update(cx, |transcript, cx| {
+                        transcript.retarget_own_send(&echo, &real, cx)
+                    });
+                }
+            }
+            let anchor = pending.is_some() && !shown;
+            let pending_changed = pending.is_some() != shown;
             match (pending, shown) {
                 (Some(text), false) => self.state.update(cx, |state, cx| {
                     let device = state.local_device_id.clone().unwrap_or_default();
@@ -402,6 +424,19 @@ impl CloudConversation {
                     cx.notify();
                 }),
                 _ => {}
+            }
+            if pending_changed {
+                // This can run while the conversation renders, where the
+                // transcript would not hear the state change: tell it, so it
+                // rebuilds its rows (the stand-in never lingers).
+                self.transcript.update(cx, |_, cx| cx.notify());
+            }
+            if anchor {
+                // Like any send: the first message moves to the top and the
+                // reply streams in below it.
+                self.transcript.update(cx, |transcript, cx| {
+                    transcript.on_own_send(session.clone(), echo.clone(), cx)
+                });
             }
         }
         let computer = self.computer_activity(cx);
@@ -1024,17 +1059,17 @@ impl Shell {
         // A failed start says why on the status line; nothing spins here.
         let working = self.composer.read(cx).cloud_launch_working();
         let width = crate::settings::transcript_width(cx);
-        let clearance = (self.bottom_stack.get() - self.terminal_geometry.get().height).max(0.0)
-            + Theme::TRANSCRIPT_FADE_BAND
-            + 8.0;
+        // The first message sits where any sent message anchors (the top of
+        // the transcript, the reply below), so the conversation that takes
+        // over shows it in the same place.
         div()
             .id("cloud-launch-outlet")
             .debug_selector(|| "cloud-launch-outlet".into())
             .size_full()
             .flex()
             .flex_col()
-            .justify_end()
-            .pb(px(clearance))
+            .justify_start()
+            .pt(px(crate::transcript::OWN_SEND_TOP_INSET_PX))
             .child(
                 div().w_full().flex().justify_center().px(px(48.0)).child(
                     div()
@@ -2012,6 +2047,11 @@ mod tests {
                     .any(|e| e.id == echo),
                 "the first message shows at once"
             );
+            assert_eq!(
+                view.transcript.read(cx).own_send_target().as_deref(),
+                Some(echo.as_str()),
+                "the first message anchors like any send"
+            );
             assert!(view.computer_activity(cx).is_some_and(|stage| stage.busy));
             // Ready; history and the live transcript arrive together.
             view.computer.metadata = json!({"workspaceId":"task","state":"ready"});
@@ -2045,6 +2085,11 @@ mod tests {
             assert!(
                 state.pending_echoes().is_empty(),
                 "the stand-in is replaced"
+            );
+            assert_eq!(
+                view.transcript.read(cx).own_send_target().as_deref(),
+                Some("runtime-user"),
+                "the anchor moves to the server's copy, so nothing jumps"
             );
             let users = state
                 .transcript

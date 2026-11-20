@@ -4914,6 +4914,23 @@ impl Transcript {
         cx.notify();
     }
 
+    #[cfg(test)]
+    pub(crate) fn own_send_target(&self) -> Option<String> {
+        self.own_turn
+            .as_ref()
+            .map(|anchor| anchor.message_id.to_string())
+    }
+    /// The prompt an own send is anchored to was replaced by the server's
+    /// copy under another id: keep the anchor on it, with no jump.
+    pub fn retarget_own_send(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        if let Some(anchor) = self.own_turn.as_mut()
+            && anchor.message_id.as_ref() == from
+        {
+            anchor.message_id = SharedString::from(to.to_owned());
+            cx.notify();
+        }
+    }
+
     /// Remember a locally-authored queue row without touching the active
     /// runway. If host promotion won the race with the QueueMessage reply, the
     /// matching prompt is already present and can be anchored immediately.

@@ -90,6 +90,12 @@ impl RpcService for Controller {
                 assert_eq!(_params["firstMessage"], "Fix the flaky sync test");
                 assert_eq!(_params["agentConnectionId"], "fixture-codex");
                 *self.admitted.lock().unwrap() = Some(_params.clone());
+                // `FIXTURE_ADMIT=1`: the server admits the chat at once.
+                if admit() {
+                    return RpcReply::value(
+                        &json!({"workspace":{"workspaceId":"admitted-computer","chatId":"admitted-thread","initialSessionId":"admitted-session","state":"ready","desiredState":"ready","statusCode":"ready","commandDeliveryMode":"server-admitted-v2","commandAdmissionVersion":2}}),
+                    );
+                }
                 RpcReply::value(
                     &json!({"workspace":{"workspaceId":"admitted-computer","chatId":"admitted-thread","initialSessionId":"admitted-session","state":"provisioning","desiredState":"ready","statusCode":"allocating"}}),
                 )
@@ -117,6 +123,12 @@ impl RpcService for Controller {
                     value["provisional"] = json!(true);
                 }
                 RpcReply::value(&value)
+            }
+            // The computer records the first message under its own id and
+            // replies; the launch command row still reads running (a missed
+            // end event).
+            methods::CLOUD_HISTORY if self.new_chat && admit() => {
+                RpcReply::value(&admitted_history())
             }
             methods::CLOUD_HISTORY if self.new_chat => RpcReply::value(
                 &json!({"accountId":"fixture-owner","apiOrigin":"https://fixture-api.example.test","workspace":admitted_workspace()}),
@@ -488,6 +500,24 @@ for char in 'Fix the flaky sync test':
 key('Return',1);key('Return',0);x.XFlush(d)
 "#;
 
+fn admit() -> bool {
+    std::env::var("FIXTURE_ADMIT").is_ok()
+}
+fn admitted_history() -> Value {
+    let mut workspace = admitted_workspace();
+    workspace["state"] = json!("ready");
+    workspace["desiredState"] = json!("ready");
+    workspace["statusCode"] = json!("ready");
+    workspace["revision"] = json!(2);
+    let chat = json!({"id":"admitted-session","threadId":"admitted-thread","deviceId":"cloud:admitted-computer","title":"Fix the flaky sync test","archived":false,"cwd":".","branch":"task/cloud-only","createdAt":"2026-11-20T10:50:00Z","config":{"harness":"codex","model":"gpt-5.5","sandbox":"workspace-write"}});
+    let messages = json!([
+        {"id":"runtime-user","role":"user","parts":[{"id":"runtime-user-text","kind":"text","text":"Fix the flaky sync test"}],"createdAt":1793361600000_i64,"deviceId":"cloud:admitted-computer"},
+        {"id":"runtime-reply","role":"assistant","parts":[{"id":"runtime-reply-text","kind":"text","text":"The sync test raced the file watcher. It now waits for the watcher's ready signal before writing, and passed 50 runs in a row."}],"createdAt":1793361607000_i64,"deviceId":"cloud:admitted-computer","status":"complete","durationMs":7000}
+    ]);
+    json!({"apiOrigin":"https://fixture-api.example.test","accountId":"fixture-owner","workspace":workspace,"commandDeliveryMode":"server-admitted-v2","commandAdmissionVersion":2,"taskCommandCanEdit":true,
+        "commandAdmissions":[{"commandId":"launch:admitted-computer","messageId":"admitted-first","text":"Fix the flaky sync test","executionState":"running","createdAt":1793361600000_i64}],
+        "head":{"schemaVersion":1,"payloadFormat":"zuse-transcript-v1","workspaceId":"admitted-computer","sessionId":"admitted-session","runtimeGeneration":1,"cursor":{"epoch":"fixture-checkpoint","version":4},"chat":chat,"conversations":[chat],"transcript":{"reset":messages},"queue":[],"queuePaused":false,"olderMessageSequence":null}})
+}
 fn admitted_workspace() -> Value {
     json!({"workspaceId":"admitted-computer","chatId":"admitted-thread","initialSessionId":"admitted-session","state":"provisioning","desiredState":"ready","statusCode":"allocating","title":"Fix the flaky sync test","branch":"task/cloud-only","createdAt":1793361600000_i64})
 }
