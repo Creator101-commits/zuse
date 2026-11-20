@@ -2,7 +2,9 @@
 use super::zot_forms::{Form, Kind, ZotAfter};
 use super::*;
 use zuse_protocol::presentation::zot_mascots;
-use zuse_protocol::presentation::zot_panel::{ZOT_SECTIONS, ZotPage, ZotPanelTabs, ZotTab};
+use zuse_protocol::presentation::zot_panel::{
+    NeedsYouItem, NeedsYouTarget, ZOT_SECTIONS, ZotPage, ZotPanelTabs, ZotTab, needs_you_items,
+};
 use zuse_protocol::zots::*;
 
 #[derive(Default)]
@@ -1649,19 +1651,7 @@ impl Shell {
                     )
                 },
             );
-        let decisions: Vec<_> = zot
-            .decisions
-            .iter()
-            .filter(|d| d.answer.is_none())
-            .cloned()
-            .collect();
-        let events: Vec<_> = self
-            .zot_ui
-            .events
-            .iter()
-            .filter(|e| e.zot_id == zot.id && !e.acknowledged && e.kind != "settled")
-            .cloned()
-            .collect();
+        let asks = needs_you_items(&zot.issues, &zot.decisions);
         let mut view = div().flex().flex_col().gap(px(14.0)).child(hero).when(
             !zot.config.purpose.trim().is_empty(),
             |d| {
@@ -1675,13 +1665,7 @@ impl Shell {
                 )
             },
         );
-        let asked: Vec<ZotIssue> = zot
-            .issues
-            .iter()
-            .filter(|i| i.details.status == ZotIssueStatus::NeedsYou)
-            .cloned()
-            .collect();
-        if !decisions.is_empty() || !events.is_empty() || !asked.is_empty() {
+        if !asks.is_empty() {
             let mut needs = div()
                 .flex()
                 .flex_col()
@@ -1699,47 +1683,40 @@ impl Shell {
                         .text_color(theme.warning)
                         .child("Needs you"),
                 );
-            for decision in decisions {
+            for item in asks {
+                let (glyph, id) = match &item {
+                    NeedsYouItem::Decision { id, .. } => {
+                        (icons::INFO_CIRCLE, format!("zot-decision-{id}"))
+                    }
+                    NeedsYouItem::Issue { id, .. } => {
+                        (icons::STATUS_QUESTION, format!("zot-asked-{id}"))
+                    }
+                };
                 let z = zot.clone();
+                let decisions = zot.decisions.clone();
+                let title = item.title();
+                let target = item.target();
                 needs = needs.child(list_row(
-                    format!("zot-decision-{}", decision.id),
-                    icons::INFO_CIRCLE,
+                    id,
+                    glyph,
                     theme.warning,
-                    decision.question.clone(),
+                    title,
                     Some("Answer".into()),
                     theme,
-                    move |this, _, _, cx| {
-                        this.open_zot_dialog(z.clone(), Kind::Decision(decision.clone()), cx);
+                    move |this, _, _, cx| match &target {
+                        NeedsYouTarget::IssueTab(id) => {
+                            this.show_zot_page(ZotPage::Issue(id.clone()), cx)
+                        }
+                        NeedsYouTarget::DecisionForm(id) => {
+                            if let Some(decision) = decisions.iter().find(|d| &d.id == id) {
+                                this.open_zot_dialog(
+                                    z.clone(),
+                                    Kind::Decision(decision.clone()),
+                                    cx,
+                                );
+                            }
+                        }
                     },
-                    cx,
-                ));
-            }
-            // Issues handed to the user come first: their answer unblocks work.
-            for issue in asked {
-                let id = issue.id.clone();
-                needs = needs.child(list_row(
-                    format!("zot-asked-{}", issue.id),
-                    icons::STATUS_QUESTION,
-                    theme.warning,
-                    format!("{} · {}", issue.code(), issue.details.title),
-                    Some("Answer".into()),
-                    theme,
-                    move |this, _, _, cx| {
-                        this.show_zot_page(ZotPage::Issue(id.clone()), cx);
-                    },
-                    cx,
-                ));
-            }
-            for event in events {
-                let id = event.worker_chat_id.clone();
-                needs = needs.child(list_row(
-                    format!("zot-event-{}", event.id),
-                    icons::CHAT_ROUND_LINE,
-                    theme.text_muted,
-                    event.summary,
-                    Some("Open".into()),
-                    theme,
-                    move |this, _, _, cx| this.open_chat(id.clone(), cx),
                     cx,
                 ));
             }
@@ -2470,7 +2447,32 @@ impl Shell {
             .iter()
             .find(|f| is_document(f))
             .map(|f| ZotPage::File(f.path.clone()));
+        // Coordinator events: the card must not list them.
+        self.zot_ui.events = [
+            (
+                "e1",
+                "thread",
+                "Worker was interrupted: rebuild the base image",
+            ),
+            ("e2", "issueChanged", "ZAP-9 Linked pull request #280"),
+            ("e3", "thread", "ZAP-8 Thread report: tests pass"),
+        ]
+        .into_iter()
+        .map(|(id, kind, summary)| ZotEvent {
+            id: id.into(),
+            zot_id: zot.id.clone(),
+            worker_chat_id: if kind == "issueChanged" {
+                String::new()
+            } else {
+                "zot-worker-1".into()
+            },
+            kind: kind.into(),
+            summary: summary.into(),
+            acknowledged: false,
+        })
+        .collect();
         match step {
+            "overview" => self.show_zot_page(ZotPage::Section(ZotTab::Overview), cx),
             "issue" => {
                 self.show_zot_page(ZotPage::Section(ZotTab::Issues), cx);
                 if let Some(page) = issue {

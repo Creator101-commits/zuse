@@ -233,6 +233,91 @@ pub fn zapper_chat_id(chat_id: &str) -> bool {
     chat_id.starts_with("zot-")
 }
 
+/// One thing in the Overview's "Needs you" card: something that really waits
+/// on the user. Coordinator events (thread reports, linked pull requests,
+/// interruptions) are the Zapper's inbox and never appear here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NeedsYouItem {
+    /// An open decision with no answer yet.
+    Decision { id: String, question: String },
+    /// An issue the Zapper handed to the user.
+    Issue {
+        id: String,
+        code: String,
+        title: String,
+        /// The latest question the Zapper asked on the issue, if any.
+        question: Option<String>,
+    },
+}
+
+/// What Open on a "Needs you" item shows. Never a chat: the items have no
+/// chat of their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NeedsYouTarget {
+    /// The issue's tab.
+    IssueTab(String),
+    /// The answer form of the decision.
+    DecisionForm(String),
+}
+
+impl NeedsYouItem {
+    pub fn target(&self) -> NeedsYouTarget {
+        match self {
+            Self::Decision { id, .. } => NeedsYouTarget::DecisionForm(id.clone()),
+            Self::Issue { id, .. } => NeedsYouTarget::IssueTab(id.clone()),
+        }
+    }
+    /// The row's title.
+    pub fn title(&self) -> String {
+        match self {
+            Self::Decision { question, .. } => question.clone(),
+            Self::Issue {
+                code,
+                title,
+                question,
+                ..
+            } => format!("{code} · {}", question.as_deref().unwrap_or(title)),
+        }
+    }
+}
+
+/// What waits on the user in a Zapper's `issues` and `decisions`: open issues owned by the user (with the
+/// latest `question` activity) first, then decisions with no answer. Both
+/// leave the list once answered or handed back, because they are read from
+/// the current owner and answer.
+pub fn needs_you_items(
+    issues: &[crate::zots::ZotIssue],
+    decisions: &[crate::zots::ZotDecision],
+) -> Vec<NeedsYouItem> {
+    use crate::zots::{ZotIssueOwner, ZotIssueStatus};
+    let issues = issues
+        .iter()
+        .filter(|i| {
+            i.details.status == ZotIssueStatus::NeedsYou
+                && i.details.current_owner() == Some(ZotIssueOwner::User)
+        })
+        .map(|i| NeedsYouItem::Issue {
+            id: i.id.clone(),
+            code: i.code(),
+            title: i.details.title.clone(),
+            question: i
+                .activity
+                .iter()
+                .rev()
+                .find(|a| a.kind == "question" && !a.text.trim().is_empty())
+                .map(|a| a.text.trim().to_owned()),
+        });
+    let decisions =
+        decisions
+            .iter()
+            .filter(|d| d.answer.is_none())
+            .map(|d| NeedsYouItem::Decision {
+                id: d.id.clone(),
+                question: d.question.clone(),
+            });
+    issues.chain(decisions).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,5 +423,126 @@ mod tests {
         assert!(!ZOT_SECTIONS.contains(&ZotTab::History));
         assert!(ZotPage::History.closable());
         assert!(!ZotPage::Section(ZotTab::Drive).closable());
+    }
+
+    fn raised(
+        number: u32,
+        status: crate::zots::ZotIssueStatus,
+        owner: Option<crate::zots::ZotIssueOwner>,
+        activity: &[(&str, &str)],
+    ) -> crate::zots::ZotIssue {
+        crate::zots::ZotIssue {
+            id: format!("issue-{number}"),
+            number,
+            details: crate::zots::ZotIssueDetails {
+                title: format!("Issue {number}"),
+                status,
+                owner,
+                ..Default::default()
+            },
+            created_at: 0,
+            updated_at: 0,
+            threads: Vec::new(),
+            pull_requests: Vec::new(),
+            activity: activity
+                .iter()
+                .enumerate()
+                .map(|(n, (kind, text))| crate::zots::ZotIssueActivity {
+                    actor: None,
+                    id: format!("a{n}"),
+                    created_at: n as i64,
+                    kind: (*kind).into(),
+                    text: (*text).into(),
+                    reply_to: None,
+                })
+                .collect(),
+        }
+    }
+    fn decision(id: &str, answer: Option<&str>) -> crate::zots::ZotDecision {
+        crate::zots::ZotDecision {
+            id: id.into(),
+            worker_chat_id: None,
+            question: format!("Question {id}?"),
+            answer: answer.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn needs_you_lists_only_user_asks() {
+        use crate::zots::{ZotIssueOwner as O, ZotIssueStatus as S};
+        let issues = [
+            raised(
+                1,
+                S::NeedsYou,
+                Some(O::User),
+                &[("comment", "fyi"), ("question", "Ship it?")],
+            ),
+            // Not the user's: the Zapper and its threads hold these.
+            raised(2, S::InProgress, Some(O::Zapper), &[("question", "old")]),
+            raised(
+                3,
+                S::InProgress,
+                Some(O::Thread {
+                    chat_id: "c".into(),
+                }),
+                &[],
+            ),
+            // Handed back or finished.
+            raised(4, S::Todo, Some(O::Zapper), &[("question", "answered")]),
+            raised(5, S::Done, Some(O::User), &[]),
+        ];
+        let decisions = [decision("d1", None), decision("d2", Some("yes"))];
+        let items = needs_you_items(&issues, &decisions);
+        assert_eq!(
+            items,
+            [
+                NeedsYouItem::Issue {
+                    id: "issue-1".into(),
+                    code: "ZAP-1".into(),
+                    title: "Issue 1".into(),
+                    question: Some("Ship it?".into()),
+                },
+                NeedsYouItem::Decision {
+                    id: "d1".into(),
+                    question: "Question d1?".into(),
+                },
+            ]
+        );
+        assert_eq!(items[0].title(), "ZAP-1 · Ship it?");
+    }
+
+    #[test]
+    fn needs_you_issue_without_a_question_shows_its_title() {
+        use crate::zots::{ZotIssueOwner as O, ZotIssueStatus as S};
+        let items = needs_you_items(&[raised(7, S::NeedsYou, Some(O::User), &[])], &[]);
+        assert_eq!(items[0].title(), "ZAP-7 · Issue 7");
+    }
+
+    #[test]
+    fn needs_you_items_leave_once_answered_or_handed_back() {
+        use crate::zots::{ZotIssueOwner as O, ZotIssueStatus as S};
+        let mut asked = raised(1, S::NeedsYou, Some(O::User), &[("question", "Ok?")]);
+        let mut open = decision("d", None);
+        assert_eq!(needs_you_items(&[asked.clone()], &[open.clone()]).len(), 2);
+        open.answer = Some("yes".into());
+        asked.details.owner = Some(O::Zapper);
+        asked.details.status = S::InProgress;
+        assert!(needs_you_items(&[asked], &[open]).is_empty());
+    }
+
+    #[test]
+    fn open_routes_to_the_issue_tab_or_the_decision_form() {
+        let item = NeedsYouItem::Issue {
+            id: "i".into(),
+            code: "ZAP-1".into(),
+            title: "t".into(),
+            question: None,
+        };
+        assert_eq!(item.target(), NeedsYouTarget::IssueTab("i".into()));
+        let ask = NeedsYouItem::Decision {
+            id: "d".into(),
+            question: "q".into(),
+        };
+        assert_eq!(ask.target(), NeedsYouTarget::DecisionForm("d".into()));
     }
 }

@@ -94,9 +94,25 @@ fn zapper(device: &str) -> Zot {
         coordinator_chat_id: COORDINATOR.into(),
         previous_coordinator_chats: vec![],
         workers: vec![],
-        decisions: vec![],
+        decisions: vec![ZotDecision {
+            id: "decision-1".into(),
+            worker_chat_id: None,
+            question: "Rebuild the base image before the release?".into(),
+            answer: None,
+        }],
         issues: vec![
-            issue(6, "Improve Zappers", ZotIssueStatus::NeedsYou),
+            {
+                let mut asked = issue(6, "Improve Zappers", ZotIssueStatus::NeedsYou);
+                asked.activity.push(ZotIssueActivity {
+                    actor: Some("Release".into()),
+                    id: "question-1".into(),
+                    created_at: asked.created_at,
+                    kind: "question".into(),
+                    text: "Should the Overview list only what waits on you?".into(),
+                    reply_to: None,
+                });
+                asked
+            },
             issue(7, "Zapper panel: closable tabs", ZotIssueStatus::Todo),
         ],
     }

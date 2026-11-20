@@ -1392,19 +1392,8 @@ impl WorkspaceView {
             .iter()
             .filter(|w| self.zot_thread_status(&w.chat_id) == "working")
             .count();
-        let decisions: Vec<_> = zot
-            .decisions
-            .iter()
-            .filter(|d| d.answer.is_none())
-            .cloned()
-            .collect();
-        let events: Vec<_> = self
-            .zots
-            .events
-            .iter()
-            .filter(|e| e.zot_id == zot.id && !e.acknowledged && e.kind != "settled")
-            .cloned()
-            .collect();
+        let asks =
+            zuse_protocol::presentation::zot_panel::needs_you_items(&zot.issues, &zot.decisions);
         let (color, status) = match zot.status {
             ZotStatus::Active => (GREEN, "Active"),
             ZotStatus::Paused => (AMBER, "Paused"),
@@ -1482,11 +1471,7 @@ impl WorkspaceView {
             .child(div().w(px(1.)).h(px(34.)).bg(rgb(BORDER)))
             .child(stat("Working", working, false))
             .child(div().w(px(1.)).h(px(34.)).bg(rgb(BORDER)))
-            .child(stat(
-                "Needs you",
-                decisions.len() + events.len(),
-                decisions.len() + events.len() > 0,
-            ));
+            .child(stat("Needs you", asks.len(), !asks.is_empty()));
         let mut view = column()
             .gap(px(16.))
             .child(hero)
@@ -1502,45 +1487,51 @@ impl WorkspaceView {
             })
             .child(stats);
         let mut needs = group();
-        for decision in decisions.iter().cloned() {
+        for item in &asks {
+            use zuse_protocol::presentation::zot_panel::{NeedsYouItem, NeedsYouTarget};
+            let (id, glyph) = match &item {
+                NeedsYouItem::Decision { id, .. } => (format!("decision-{id}"), "info-circle"),
+                NeedsYouItem::Issue { id, .. } => (format!("asked-{id}"), "info-circle"),
+            };
             let z = zot.clone();
+            let decisions = zot.decisions.clone();
+            let target = item.target();
             needs = needs.child(
                 list_row(
-                    SharedString::from(format!("decision-{}", decision.id)),
-                    "info-circle",
+                    SharedString::from(id),
+                    glyph,
                     AMBER,
-                    decision.question.clone(),
+                    item.title(),
                     Some("Answer"),
                 )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.open_zot_form(
-                        Some(z.clone()),
-                        FormKind::Decision(decision.clone()),
-                        window,
-                        cx,
-                    )
+                .on_click(cx.listener(move |this, _, window, cx| match &target {
+                    NeedsYouTarget::DecisionForm(id) => {
+                        if let Some(decision) = decisions.iter().find(|d| &d.id == id) {
+                            this.open_zot_form(
+                                Some(z.clone()),
+                                FormKind::Decision(decision.clone()),
+                                window,
+                                cx,
+                            )
+                        }
+                    }
+                    NeedsYouTarget::IssueTab(id) => {
+                        this.zots.tabs.select(ZotTab::Issues);
+                        this.zots.pull_request = None;
+                        if let Some(panel) = &this.zots.issues {
+                            panel.update(cx, |p, cx| p.show_issue(id.clone(), cx));
+                        }
+                        cx.notify();
+                    }
                 })),
             );
         }
-        for event in events.iter() {
-            let id = event.worker_chat_id.clone();
-            needs = needs.child(
-                list_row(
-                    SharedString::from(format!("zot-event-{}", event.id)),
-                    "chat-round-line",
-                    MUTED,
-                    event.summary.clone(),
-                    None,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.open_zot_chat(&id, cx))),
-            );
-        }
         view = view.child(column().gap(px(6.)).child(section("Needs you")).child(
-            if decisions.is_empty() && events.is_empty() {
+            if asks.is_empty() {
                 empty_state(
                     "check-circle",
                     "All clear",
-                    "Decisions and blocked threads show up here.",
+                    "Questions and decisions waiting on you show up here.",
                 )
             } else {
                 needs.into_any_element()
