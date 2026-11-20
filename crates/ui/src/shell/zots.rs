@@ -169,9 +169,10 @@ pub(super) fn zot_avatar(zot: &Zot) -> ZotAvatar {
 pub(super) const ZOT_PANEL_WIDTH: f32 = 520.0;
 
 /// A document worth listing: seeded placeholders stay empty, and the
-/// instructions file mirrors the purpose edited with the Zot itself.
+/// instructions file only appears once rewritten. Until then it holds just
+/// the purpose the Overview already shows.
 fn is_document(file: &ZotFile) -> bool {
-    file.path != "INSTRUCTIONS.md" && !file.content.trim().is_empty()
+    (file.path != "INSTRUCTIONS.md" || file.version > 1) && !file.content.trim().is_empty()
 }
 
 /// Drive only appears once it has something to show. `keep` holds the open
@@ -2442,6 +2443,8 @@ mod tests {
         assert!(visible_tabs(&[], Some(ZotTab::Drive)).contains(&ZotTab::Drive));
         let written = [file("NOTES.md", 2, "Decided on Tuesday")];
         assert_eq!(visible_tabs(&written, None), ZOT_SECTIONS);
+        let rewritten = [file("INSTRUCTIONS.md", 2, "I keep the release moving.")];
+        assert_eq!(visible_tabs(&rewritten, None), ZOT_SECTIONS);
     }
 
     #[test]

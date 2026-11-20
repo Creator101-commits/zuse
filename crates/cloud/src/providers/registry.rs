@@ -92,6 +92,22 @@ impl Registry {
     }
 }
 
+/// Deploy preflight (`worker --check`): configuration that parses but would
+/// make every first start fail at the provider.
+pub fn preflight_errors() -> Vec<&'static str> {
+    preflight(|name| std::env::var(name).ok())
+}
+fn preflight(env: impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
+    let set = |name: &str| env(name).is_some_and(|value| !value.trim().is_empty());
+    let mut errors = Vec::new();
+    // Managed base snapshots live in one cluster; the default endpoint
+    // answers NOT_FOUND for them, so every create would be rejected.
+    if set(ProviderId::Boxd.api_key_env()) && !set("BOXD_BASE_URL") {
+        errors.push("BOXD_BASE_URL is required when BOXD_API_KEY is set");
+    }
+    errors
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +142,38 @@ mod tests {
             });
             assert_eq!(registry.configured_ids(), vec![id], "{id:?}");
         }
+    }
+    #[test]
+    fn preflight_requires_the_boxd_cluster_with_a_boxd_key() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+        assert_eq!(
+            preflight(env(&[("BOXD_API_KEY", "fixture-key")])),
+            vec!["BOXD_BASE_URL is required when BOXD_API_KEY is set"]
+        );
+        assert_eq!(
+            preflight(env(&[
+                ("BOXD_API_KEY", "fixture-key"),
+                ("BOXD_BASE_URL", " ")
+            ]))
+            .len(),
+            1
+        );
+        assert!(
+            preflight(env(&[
+                ("BOXD_API_KEY", "fixture-key"),
+                ("BOXD_BASE_URL", "https://nyc.boxd.sh:9443")
+            ]))
+            .is_empty()
+        );
+        assert!(preflight(env(&[("BOAT_API_KEY", "fixture-key")])).is_empty());
+        assert!(preflight(env(&[])).is_empty());
     }
     #[test]
     fn invalid_e2b_timeout_does_not_disable_other_providers() {
