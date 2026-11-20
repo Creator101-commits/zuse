@@ -226,6 +226,9 @@ pub fn switches_accounts(harness: HarnessId) -> bool {
 /// its entries. Pure.
 pub fn provider_note(harness: HarnessId) -> Option<&'static str> {
     match harness {
+        HarnessId::Antigravity => Some(
+            "To use a different Google account, remove the connected account, then connect again.",
+        ),
         HarnessId::Hermes => Some(
             "Hermes manages its own credential pool and rotates through it. Accounts added \
              here go through `hermes auth add`; remove one with `hermes auth remove`.",
@@ -1294,22 +1297,25 @@ impl AccountsPage {
                             .child(SharedString::from("Switch to this account")),
                     )
                 })
-                .when(account.switchable, |menu| {
-                    menu.child(
-                        popover::menu_row(&popup, false, format!("account-menu-remove-{ix}"))
-                            .id(("account-menu-remove", ix))
-                            .text_color(popup.danger_muted)
-                            .on_click(cx.listener(move |page, _, _, cx| {
-                                page.close_row_menu(cx);
-                                page.account_action(
-                                    methods::FORGET_AGENT_ACCOUNT,
-                                    &forget_account,
-                                    cx,
-                                );
-                            }))
-                            .child(SharedString::from("Remove account")),
-                    )
-                })
+                .when(
+                    account.switchable || account.harness == HarnessId::Antigravity,
+                    |menu| {
+                        menu.child(
+                            popover::menu_row(&popup, false, format!("account-menu-remove-{ix}"))
+                                .id(("account-menu-remove", ix))
+                                .text_color(popup.danger_muted)
+                                .on_click(cx.listener(move |page, _, _, cx| {
+                                    page.close_row_menu(cx);
+                                    page.account_action(
+                                        methods::FORGET_AGENT_ACCOUNT,
+                                        &forget_account,
+                                        cx,
+                                    );
+                                }))
+                                .child(SharedString::from("Remove account")),
+                        )
+                    },
+                )
                 .into_any_element();
             more = more.relative().child(popover::anchored_menu_below_end(
                 format!("account-menu-{ix}"),
@@ -1317,9 +1323,8 @@ impl AccountsPage {
                 self.row_menu.closing_since(),
             ));
         }
-        // Accounts with nothing to offer (an unreadable live login,
-        // Antigravity's single login) keep the slot for alignment only.
-        let has_actions = account.switchable;
+        // Accounts with an unreadable live login keep the slot for alignment only.
+        let has_actions = account.switchable || account.harness == HarnessId::Antigravity;
 
         let body = div()
             .id(("account-row", ix))
