@@ -1234,3 +1234,41 @@ native-pr_watch_auto_fix_help = Let this chat fix failing CI, review comments an
 # Draft English fallback; translation pending review.
 # Context: Settings > General, release channel explanation. Track changes do not downgrade local data.
 native-release_channel_description = Stable receives tested releases. Preview receives early builds. Switching channels waits for a newer version; your sessions stay in place.
+
+# Context: "What's new" card and dialog heading. Keep the product name. $version (string): release version, e.g. 0.26.1.
+native-whats_new_title = Zuse { $version }
+
+# Context: "What's new" dialog, counts of changes in the release by kind. $added, $changed, $fixed (number).
+native-whats_new_summary = 新增 { $added } · 改進 { $changed } · 修正 { $fixed }
+
+# Context: "What's new" dialog primary button; closes it and hides the sidebar card for this version.
+native-whats_new_got_it = 知道了
+
+# Context: "What's new" dialog footer link to the website changelog with every release.
+native-whats_new_all_releases = 所有版本
+
+# Context: "What's new" dialog footer, shows the next newer release.
+native-whats_new_next = 下一個
+
+# Context: "What's new" dialog footer, accessible label for the button showing the previous (older) release.
+native-whats_new_previous = 上一個
+
+# Context: "What's new" dialog, link to the rest of a release's notes. $count (number): changes not listed.
+native-whats_new_more_plural =
+    { $count ->
+        [one] 還有 1 項變更
+       *[other] 還有 { $count } 項變更
+    }
+
+# Context: tooltip on the close button of the sidebar "What's new" card.
+native-whats_new_dismiss = 關閉
+
+# Context: accessible label of the sidebar "What's new" card. $version (string): release version.
+native-whats_new_open = 查看 Zuse { $version } 的新功能
+
+# Context: app menu item under "Check for Updates", opens the release notes dialog for this version.
+native-whats_new_menu = 新功能
+
+
+
+

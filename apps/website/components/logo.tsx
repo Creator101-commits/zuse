@@ -1,0 +1,48 @@
+"use client";
+import { websitePath } from "@zuse/i18n/registry";
+import { useWebsiteMessages } from "@zuse/i18n/website/react";
+import Image from "next/image";
+import Link from "next/link";
+import { SITE_NAME } from "@/lib/site";
+import { cn } from "@/lib/utils";
+
+/** memoize wordmark + the real desktop app icon. */
+export const LogoMark = ({ className }: { className?: string }) => {
+	return (
+		<Image
+			src="/app-icon.png"
+			alt=""
+			width={1024}
+			height={1024}
+			className={cn("size-8 rounded-lg", className)}
+			priority
+		/>
+	);
+};
+
+export const Logo = ({
+	className,
+	showWordmark = true,
+	wordmarkClassName,
+}: {
+	className?: string;
+	showWordmark?: boolean;
+	wordmarkClassName?: string;
+}) => {
+	const { locale } = useWebsiteMessages();
+	return (
+		<Link href={websitePath(locale)} className="flex items-center gap-2">
+			<LogoMark className={className} />
+			{showWordmark && (
+				<span
+					className={cn(
+						"text-heading text-lg font-semibold -tracking-sm",
+						wordmarkClassName,
+					)}
+				>
+					{SITE_NAME}
+				</span>
+			)}
+		</Link>
+	);
+};
