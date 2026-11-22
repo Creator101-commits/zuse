@@ -10,6 +10,8 @@ import { blobState, fetchBlob, isOpen, toggleOpen } from "./resources";
 
 export interface GroupContext {
   harness: () => string | undefined;
+  /** Opens a subagent chip's transcript; absent where subagent docs cannot be watched. */
+  openSubagent?: (ref: string, title: string) => void;
 }
 
 /** A run of tool calls and thoughts. Ordinary groups fold behind a summary; lone agents and thinking stay open. */
@@ -202,7 +204,13 @@ function ToolRow(props: {
       <div class="tool-card">
         <Show
           when={!isAgent()}
-          fallback={<SubagentHeader part={call()!} harness={props.ctx.harness()} />}
+          fallback={
+            <SubagentHeader
+              part={call()!}
+              harness={props.ctx.harness()}
+              openSubagent={props.ctx.openSubagent}
+            />
+          }
         >
           <Show
             when={expandable()}
@@ -290,7 +298,7 @@ function ChipHeader(props: { item: ToolItem; text: () => string; live: boolean; 
   );
 }
 
-function SubagentHeader(props: { part: ToolPart; harness: string | undefined }) {
+function SubagentHeader(props: { part: ToolPart; harness: string | undefined; openSubagent?: (ref: string, title: string) => void }) {
   const status = () => agentStatus(props.part);
   const call = () => callOf(props.part);
   const title = () => chipLabel({ key: props.part.id, kind: "call", part: props.part }, () => "")[1] || "Subagent";
@@ -303,8 +311,8 @@ function SubagentHeader(props: { part: ToolPart; harness: string | undefined }) 
     }
     return null;
   };
-  return (
-    <div class="chip-head subagent">
+  const body = () => (
+    <>
       <span class="subagent-status" data-status={status()}>
         <Switch>
           <Match when={status() === "running"}><span class="subagent-live" role="img" aria-label="Subagent running" /></Match>
@@ -316,7 +324,24 @@ function SubagentHeader(props: { part: ToolPart; harness: string | undefined }) 
       <span class="chip-label strong truncate">{title()}</span>
       <Show when={status() === "running"}><span class="chip-detail">Agent running</span></Show>
       <Show when={model()}><span class="chip-detail">{model()}</span></Show>
-    </div>
+    </>
+  );
+  // With a doc ref and somewhere to open it, the chip is a button into that transcript.
+  const ref = () => props.part.subagentRef;
+  const openable = () => !!ref() && !!props.openSubagent;
+  const open = () => {
+    const doc = ref();
+    if (doc && props.openSubagent) props.openSubagent(doc, title());
+  };
+  return (
+    <Show
+      when={openable()}
+      fallback={<div class="chip-head subagent">{body()}</div>}
+    >
+      <button type="button" class="chip-head subagent subagent-open" aria-label={`Open subagent ${title()}`} onClick={open}>
+        {body()}
+      </button>
+    </Show>
   );
 }
 

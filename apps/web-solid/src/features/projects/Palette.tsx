@@ -117,6 +117,10 @@ export function VirtualList<T>(props: {
   footer?: JSX.Element;
   role?: JSX.HTMLAttributes<HTMLDivElement>["role"];
   pad?: number;
+  /** Receives the scroll element once mounted; its scroll does not bubble to ancestors. */
+  scrollEl?: (el: HTMLDivElement) => void;
+  /** The list scrolled (own scroll only; it does not bubble). */
+  onScroll?: () => void;
 }) {
   let scroller: HTMLDivElement | undefined;
   const virtualizer = createVirtualizer({
@@ -142,7 +146,17 @@ export function VirtualList<T>(props: {
     if (active !== undefined && active >= 0 && active < count) virtualizer.scrollToIndex(active, { align: "auto" });
   });
   return (
-    <div ref={scroller} id={props.id} class={`pj-list ${props.class ?? ""}`} role={props.role ?? "listbox"} aria-label={props.label}>
+    <div
+      ref={(el) => {
+        scroller = el;
+        props.scrollEl?.(el);
+      }}
+      id={props.id}
+      class={`pj-list ${props.class ?? ""}`}
+      role={props.role ?? "listbox"}
+      aria-label={props.label}
+      onScroll={() => props.onScroll?.()}
+    >
       <div style={{ height: `${virtualizer.getTotalSize()}px`, position: "relative" }}>
         <For each={virtualizer.getVirtualItems()}>
           {(row) => (

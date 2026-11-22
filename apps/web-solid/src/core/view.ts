@@ -12,7 +12,7 @@ export type Route =
   | { kind: "usage" }
   | { kind: "archive"; projectKey?: string };
 
-export type RightPanel = "files" | "changes" | "terminal" | "browser" | "git" | "history" | "pullRequest" | null;
+export type RightPanel = "files" | "changes" | "terminal" | "browser" | "git" | "history" | "pullRequest" | "agent" | null;
 
 export interface Preferences {
   theme: "system" | "dark" | "light";
@@ -73,7 +73,8 @@ function loadTab(): TabState {
     return {
       selectedChatId: typeof value.selectedChatId === "string" ? value.selectedChatId : null,
       draftProjectPath: typeof value.draftProjectPath === "string" ? value.draftProjectPath : null,
-      rightPanel: typeof value.rightPanel === "string" ? value.rightPanel : null,
+      // "agent" names a subagent doc in workspace state, which is not persisted; reopen nothing.
+      rightPanel: typeof value.rightPanel === "string" && value.rightPanel !== "agent" ? value.rightPanel : null,
     };
   } catch {
     return empty;

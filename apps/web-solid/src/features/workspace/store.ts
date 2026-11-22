@@ -66,6 +66,13 @@ export function hostParams(target: Target, params: Record<string, unknown> = {})
   return { ...params, targetDeviceId: target.deviceId };
 }
 
+/** A subagent chip's transcript target: the doc id to watch and the chat that owns its device. */
+export interface AgentTarget {
+  chatId: string;
+  ref: string;
+  title: string;
+}
+
 export interface DiffStat {
   checkoutId: string;
   deviceId: string;
@@ -95,6 +102,8 @@ interface WorkspaceData {
   /** Open right-panel surfaces, in strip order. */
   tabs: Exclude<RightPanel, null>[];
   lastPanel: Exclude<RightPanel, null>;
+  /** The subagent whose transcript the "agent" surface shows; null when the tab is closed. */
+  agent: AgentTarget | null;
   sessionInfoOpen: boolean;
 }
 
@@ -106,6 +115,7 @@ export const [workspace, setWorkspace] = createStore<WorkspaceData>({
   branches: {},
   tabs: [],
   lastPanel: "files",
+  agent: null,
   sessionInfoOpen: false,
 });
 
@@ -187,6 +197,7 @@ export function closePanelTab(panel: Exclude<RightPanel, null>) {
   const tabs = workspace.tabs.filter((tab) => tab !== panel);
   (() => {
     setWorkspace(draft => { draft["tabs"] = tabs; });
+    if (panel === "agent") setWorkspace(draft => { draft["agent"] = null; });
     if (view.rightPanel === panel) {
       // The right neighbour takes over, else the left, like desktop.
       const next = tabs[Math.min(index, tabs.length - 1)] ?? null;
@@ -194,6 +205,13 @@ export function closePanelTab(panel: Exclude<RightPanel, null>) {
       if (next) setWorkspace(draft => { draft["lastPanel"] = next; });
     }
   })();
+}
+
+/** Open a subagent chip's transcript in the right panel, replacing any open one. */
+export function openSubagent(target: AgentTarget) {
+  const same = workspace.agent?.chatId === target.chatId && workspace.agent.ref === target.ref;
+  if (!same) setWorkspace(draft => { draft["agent"] = target; });
+  openPanel("agent");
 }
 
 export function toggleRightPanel() {

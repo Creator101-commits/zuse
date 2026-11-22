@@ -3794,16 +3794,22 @@ async fn drive_run(
     // steerable harness parks here instead of ending the run — the child and
     // its steering mailbox stay warm, and the next user message (dispatch
     // routes into a live run) starts the next turn with zero respawn/resume
-    // latency. Release completed, unused runtimes after five minutes: each
-    // parked agent and its MCP servers can retain hundreds of MB. History and
-    // provider session identity remain durable, so the next message resumes.
+    // latency. Release completed, unused runtimes after the harness's parked
+    // window (five minutes by default; an agent whose resume replays its
+    // history, like Devin, keeps its runtime longer): each parked agent and
+    // its MCP servers can retain hundreds of MB. History and provider
+    // session identity remain durable, so the next message resumes.
     // Active turns, voice calls and reported background work hold the reaper
     // off. A call hang-up restarts its window.
     let idle_override = std::env::var("ZUSE_SESSION_IDLE_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(std::time::Duration::from_millis);
-    let session_idle = idle_override.unwrap_or(std::time::Duration::from_secs(5 * 60));
+    let session_idle = idle_override.unwrap_or_else(|| {
+        harness
+            .parked_idle_window()
+            .unwrap_or(std::time::Duration::from_secs(5 * 60))
+    });
     // Keep the existing lost-subagent grace independent of ordinary idle
     // retention. Reducing parked-process memory must not shorten the window
     // for a real subagent that is still working (4h, or 40m for voice chats).

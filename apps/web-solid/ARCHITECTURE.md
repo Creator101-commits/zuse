@@ -17,8 +17,8 @@ Area exports, mounted by `src/shell/App.tsx`:
 | Area | Exports | Mounted |
 | --- | --- | --- |
 | `sidebar` | `Sidebar` | Left column |
-| `workspace` | `TopBar`, `RightPanel` | Above the chat; right column when `view.rightPanel` is set |
-| `transcript` | `Transcript` | Chat body (fills, scrolls) |
+| `workspace` | `TopBar`, `RightPanel` | Above the chat; right column when `view.rightPanel` is set. Its `agent` surface (a subagent chip's live transcript, `SubagentTranscript`) opens only through `openSubagent` and is never offered in the `+` menu or restored from session storage. |
+| `transcript` | `Transcript`, `SubagentTranscript` | Chat body (fills, scrolls); `SubagentTranscript` is the agent surface's read-only subagent transcript |
 | `composer` | `Composer` | Below the transcript. Also renders the landing heading when no chat is selected. |
 | `zappers` | `ZapperPage`, `ConfigPage`, `ZapperSidebar` | Dedicated coordinator/worker route, inspector and sidebar group |
 | `projects` | `NewProject`, `ProjectArchive` | Routes `newProject`, `archive` |

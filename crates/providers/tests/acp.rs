@@ -1522,6 +1522,543 @@ async fn devin_missing_variant_is_bounded_and_never_prompts() {
     assert!(!dir.path().join("prompted").exists());
 }
 
+/// Write `body` as an executable python ACP fixture inside `dir` and return
+/// the Devin harness bound to it (`model = None` skips the model catalog).
+#[cfg(unix)]
+fn devin_script(dir: &tempfile::TempDir, name: &str, body: &str) -> AcpHarness {
+    use std::os::unix::fs::PermissionsExt;
+    let script = dir.path().join(name);
+    std::fs::write(&script, body).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    AcpHarness::devin().with_executable(script)
+}
+
+#[cfg(unix)]
+fn devin_request(prompt: &str) -> RunRequest {
+    let mut req = request(prompt);
+    req.model = None;
+    req
+}
+
+/// Devin 3000.14 Fusion replay: every lead `usage_update` arrives twice
+/// (untagged + `subagent_context.parentAgentId "root"`), and a blocking
+/// sidekick handoff is bracketed by `_cognition.ai/sidekick/wait` with the
+/// sidekick's own `sk::` tool frames in between. The "root" duplicate and
+/// the sidekick's agent id must never become subagent parents; the handoff
+/// collapses to exactly one synthesized chip whose tagged Done and chip
+/// ToolResult land before the turn's untagged Done.
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_fusion_sidekick_frames_tag_under_one_chip() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = devin_script(
+        &dir,
+        "devin.py",
+        r#"#!/usr/bin/env python3
+import json, sys
+
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+
+def update(u):
+    emit({'method':'session/update','params':{'sessionId':'s-1','update':u}})
+
+def wait(waiting):
+    emit({'method':'_cognition.ai/sidekick/wait','params':{'sessionId':'s-1','waiting':waiting}})
+
+LEAD_USAGE = {'cognition.ai/inputTokens':90,'cognition.ai/outputTokens':10}
+
+assert sys.argv[1:] == ['acp'], sys.argv
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/prompt':
+        # Every lead usage_update arrives twice: untagged, then tagged
+        # subagent_context.parentAgentId "root".
+        for ctx in [None, {'parentAgentId':'root'}]:
+            meta = dict(LEAD_USAGE)
+            if ctx: meta['cognition.ai/subagent_context'] = ctx
+            update({'sessionUpdate':'usage_update','used':100,'size':1000,'_meta':meta})
+        # Blocking sidekick handoff: wait, sidekick frames, wait:false.
+        wait(True)
+        update({'sessionUpdate':'usage_update','used':50,'size':500,'_meta':{
+            'cognition.ai/inputTokens':40,'cognition.ai/outputTokens':10,
+            'cognition.ai/subagent_context':{'parentAgentId':'sidekick'}}})
+        sk = {'cognition.ai/inferenceToolName':'exec','cognition.ai/sidekick':True}
+        update({'sessionUpdate':'tool_call','toolCallId':'sk::exec:0#1','title':'Ran ls','kind':'execute','rawInput':{'command':'ls'},'_meta':sk})
+        update({'sessionUpdate':'tool_call_update','toolCallId':'sk::exec:0#1','status':'completed','_meta':sk})
+        wait(False)
+        update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'done'}})
+        emit({'id':req['id'],'result':{'stopReason':'end_turn'}})
+        break
+"#,
+    );
+    let (controls, _steer, _token) = controls();
+    let events = run_to_end(&harness, devin_request("fusion turn"), controls).await;
+
+    // The lead ("root") and the sidekick's own agent id are not children.
+    for e in &events {
+        if let AgentEvent::Subagent {
+            parent_tool_use_id, ..
+        } = e
+        {
+            assert!(
+                !matches!(parent_tool_use_id.as_str(), "root" | "sidekick"),
+                "{e:?}"
+            );
+        }
+    }
+    // Exactly one synthesized sidekick chip.
+    let chips: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolCall { id, call } if call.is_subagent_spawn() => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chips.len(), 1, "{events:?}");
+    let chip = chips[0];
+    // Every tagged event routes under that chip; the sk:: tool call never
+    // appears untagged.
+    for e in &events {
+        match e {
+            AgentEvent::Subagent {
+                parent_tool_use_id, ..
+            } => assert_eq!(parent_tool_use_id, chip, "{e:?}"),
+            AgentEvent::ToolCall { id, .. } | AgentEvent::ToolResult { id, .. } => {
+                assert_ne!(id, "sk::exec:0#1", "{e:?}")
+            }
+            _ => {}
+        }
+    }
+    // The chip's tagged Done and its resolving ToolResult precede the
+    // turn's untagged Done.
+    let tagged_done = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::Subagent {
+                    parent_tool_use_id,
+                    event,
+                } if parent_tool_use_id == chip
+                    && matches!(
+                        event.as_ref(),
+                        AgentEvent::Done {
+                            status: DoneStatus::Completed,
+                            ..
+                        }
+                    )
+            )
+        })
+        .expect("tagged sidekick Done");
+    let chip_result = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::ToolResult { id, .. } if id == chip))
+        .expect("chip ToolResult");
+    let turn_done = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    ..
+                }
+            )
+        })
+        .expect("turn Done");
+    assert!(
+        tagged_done < turn_done && chip_result < turn_done,
+        "{events:?}"
+    );
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+}
+
+/// Devin 3000.14 mid-turn prompt, merged case: the fake advertises
+/// `cognition.ai/midTurnPrompts`, emits "first", waits for the second
+/// `session/prompt` (a steer sent mid-turn), records any `session/cancel`
+/// to a marker file, emits "second", then answers both prompts
+/// back-to-back. The steer must ride a real `session/prompt` — no cancel —
+/// with a `Steered` boundary before "second" and exactly one Done.
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_mid_turn_steer_merges_without_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("cancelled");
+    let harness = devin_script(
+        &dir,
+        "devin.py",
+        r#"#!/usr/bin/env python3
+import json, sys, pathlib
+root = pathlib.Path(__file__).parent
+
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+
+def update(u):
+    emit({'method':'session/update','params':{'sessionId':'s-1','update':u}})
+
+assert sys.argv[1:] == ['acp'], sys.argv
+first_id = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/cancel':
+        (root / 'cancelled').touch()
+    elif method == 'session/prompt':
+        if first_id is None:
+            first_id = req['id']
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'first'}})
+            # Hold the response until the injected prompt arrives.
+        else:
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'second'}})
+            emit({'id':first_id,'result':{'stopReason':'end_turn'}})
+            emit({'id':req['id'],'result':{'stopReason':'end_turn'}})
+            break
+"#,
+    );
+    let (controls, steer_tx, _token) = controls();
+    let mut req = devin_request("first task");
+    req.cwd = dir.path().display().to_string();
+    let mut stream = harness.run(req, controls).await.unwrap();
+    let mut steer = Some(steer_tx);
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(&event, AgentEvent::TextDelta { text } if text == "first")
+                && let Some(tx) = steer.take()
+            {
+                tx.send(SteerMessage {
+                    prompt: "also do this".into(),
+                    message_id: None,
+                    attachments: Vec::new(),
+                    config: None,
+                })
+                .await
+                .unwrap();
+            }
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("run finished in time");
+
+    assert!(
+        !marker.exists(),
+        "session/cancel must not be sent: {events:?}"
+    );
+    let steered = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .expect("Steered boundary");
+    let second = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second"))
+        .expect("second text");
+    assert!(steered < second, "{events:?}");
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+}
+
+/// Devin 3000.14 mid-turn prompt, late race: the fake answers the first
+/// prompt immediately after the second `session/prompt` arrives, emits
+/// "second" ~1s later and answers the second. The injected prompt reached
+/// Devin after its turn ended, so it becomes its own turn — still exactly
+/// one Done, after "second", with Steered before it.
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_mid_turn_steer_late_response_still_one_done() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = devin_script(
+        &dir,
+        "devin.py",
+        r#"#!/usr/bin/env python3
+import json, sys, time
+
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+
+def update(u):
+    emit({'method':'session/update','params':{'sessionId':'s-1','update':u}})
+
+assert sys.argv[1:] == ['acp'], sys.argv
+first_id = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/prompt':
+        if first_id is None:
+            first_id = req['id']
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'first'}})
+        else:
+            # The first turn ends NOW; the injected prompt lands after it
+            # and runs as its own turn ~1s later.
+            emit({'id':first_id,'result':{'stopReason':'end_turn'}})
+            time.sleep(1)
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'second'}})
+            emit({'id':req['id'],'result':{'stopReason':'end_turn'}})
+            break
+"#,
+    );
+    let (controls, steer_tx, _token) = controls();
+    let mut req = devin_request("first task");
+    req.cwd = dir.path().display().to_string();
+    let mut stream = harness.run(req, controls).await.unwrap();
+    let mut steer = Some(steer_tx);
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(&event, AgentEvent::TextDelta { text } if text == "first")
+                && let Some(tx) = steer.take()
+            {
+                tx.send(SteerMessage {
+                    prompt: "also do this".into(),
+                    message_id: None,
+                    attachments: Vec::new(),
+                    config: None,
+                })
+                .await
+                .unwrap();
+            }
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("run finished in time");
+
+    let steered = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .expect("Steered boundary");
+    let second = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second"))
+        .expect("second text");
+    assert!(steered < second, "{events:?}");
+    let done_positions: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| matches!(e, AgentEvent::Done { .. }).then_some(i))
+        .collect();
+    assert_eq!(done_positions.len(), 1, "{events:?}");
+    assert!(done_positions[0] > second, "{events:?}");
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+}
+
+/// Devin 3000.14 mid-turn prompt with a lead tool in flight: the steer is
+/// sent the moment the exec `tool_call` arrives, but Devin only applies an
+/// injected prompt at the lead's next model call — after the tool returns.
+/// The `Steered` boundary must therefore wait for the tool's ToolResult:
+/// emitting it earlier strands the result in the post-steer segment (the
+/// engine drops stale tool echoes and the pre-steer chip hangs). Assert
+/// ToolResult(lead) < Steered < "second", one Done, no session/cancel.
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_mid_turn_steer_boundary_waits_for_lead_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("cancelled");
+    let harness = devin_script(
+        &dir,
+        "devin.py",
+        r#"#!/usr/bin/env python3
+import json, sys, pathlib
+root = pathlib.Path(__file__).parent
+
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+
+def update(u):
+    emit({'method':'session/update','params':{'sessionId':'s-1','update':u}})
+
+assert sys.argv[1:] == ['acp'], sys.argv
+first_id = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/cancel':
+        (root / 'cancelled').touch()
+    elif method == 'session/prompt':
+        if first_id is None:
+            first_id = req['id']
+            # A lead tool opens and stays in_progress until the injected
+            # prompt arrives.
+            update({'sessionUpdate':'tool_call','toolCallId':'call-lead-1','title':'Run sleep','kind':'execute','rawInput':{'command':'sleep 5'},'status':'in_progress'})
+        else:
+            # The lead tool finishes, the merged reply streams, then both
+            # prompts resolve together.
+            update({'sessionUpdate':'tool_call_update','toolCallId':'call-lead-1','status':'completed'})
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'second'}})
+            emit({'id':first_id,'result':{'stopReason':'end_turn'}})
+            emit({'id':req['id'],'result':{'stopReason':'end_turn'}})
+            break
+"#,
+    );
+    let (controls, steer_tx, _token) = controls();
+    let mut req = devin_request("first task");
+    req.cwd = dir.path().display().to_string();
+    let mut stream = harness.run(req, controls).await.unwrap();
+    let mut steer = Some(steer_tx);
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(&event, AgentEvent::ToolCall { id, .. } if id == "call-lead-1")
+                && let Some(tx) = steer.take()
+            {
+                tx.send(SteerMessage {
+                    prompt: "also do this".into(),
+                    message_id: None,
+                    attachments: Vec::new(),
+                    config: None,
+                })
+                .await
+                .unwrap();
+            }
+            let done = matches!(event, AgentEvent::Done { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("run finished in time");
+
+    assert!(
+        !marker.exists(),
+        "session/cancel must not be sent: {events:?}"
+    );
+    let tool_result = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolResult { id, .. } if id == "call-lead-1"
+            )
+        })
+        .expect("lead tool ToolResult");
+    let steered = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .expect("Steered boundary");
+    let second = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta { text } if text == "second"))
+        .expect("second text");
+    assert!(
+        tool_result < steered && steered < second,
+        "ToolResult({tool_result}) < Steered({steered}) < second({second}): {events:?}"
+    );
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+}
+
+/// Devin `session/load` can fail transiently with -32015 session_locked
+/// while the previous runtime still holds the session open. The harness
+/// retries instead of falling back to a fresh session: no restore error,
+/// and SessionStarted carries the resumed id.
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_session_load_retries_transient_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = devin_script(
+        &dir,
+        "devin.py",
+        r#"#!/usr/bin/env python3
+import json, sys, pathlib
+root = pathlib.Path(__file__).parent
+loads = root / 'loads'
+
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+
+assert sys.argv[1:] == ['acp'], sys.argv
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{}}})
+    elif method == 'session/load':
+        n = int(loads.read_text()) + 1 if loads.exists() else 1
+        loads.write_text(str(n))
+        if n <= 2:
+            emit({'id':req['id'],'error':{'code':-32015,'message':"Session 'locked-1' is already open in another process (PID 1)",'data':{'cognition.ai/errorKind':'session_locked'}}})
+        else:
+            emit({'id':req['id'],'result':{'sessionId':'locked-1'}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'fresh-1'}})
+    elif method == 'session/prompt':
+        emit({'id':req['id'],'result':{'stopReason':'end_turn'}})
+        break
+"#,
+    );
+    let (controls, _steer, _token) = controls();
+    let mut req = devin_request("resume me");
+    req.resume = Some("locked-1".into());
+    let events = run_to_end(&harness, req, controls).await;
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Error { message }
+            if message.contains("could not restore"))),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::SessionStarted { session_id, .. } if session_id == "locked-1"
+        )),
+        "{events:?}"
+    );
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+}
+
 #[test]
 fn antigravity_sign_in_preserves_relative_home_auth_in_a_separate_process() {
     let parent_cwd = tempfile::tempdir().unwrap();

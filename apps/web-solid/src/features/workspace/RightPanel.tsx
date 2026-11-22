@@ -14,6 +14,7 @@ const Browser = lazy(() => import("./Browser").then((m) => ({ default: m.Browser
 
 const Files = lazy(() => import("./files/Files").then((m) => ({ default: m.Files })));
 const Terminal = lazy(() => import("./Terminal").then((m) => ({ default: m.Terminal })));
+const SubagentTranscript = lazy(() => import("@/features/transcript/Subagent").then((m) => ({ default: m.SubagentTranscript })));
 
 type Surface = Exclude<Panel, null>;
 
@@ -25,6 +26,8 @@ const SURFACES: Record<Surface, { label: string; icon: string; git?: boolean }> 
   history: { label: "History", icon: "git-branch", git: true },
   terminal: { label: "Terminal", icon: "terminal" },
   browser: { label: "Browser", icon: "globe" },
+  // Opened by a subagent chip, never from the "+" menu; the tab shows the subagent's title.
+  agent: { label: "Agent", icon: "tool-agent" },
 };
 // Desktop order (crates/ui/src/shell/panel_menu.rs), with Git beside Changes and History last.
 const ORDER: Surface[] = ["files", "pullRequest", "changes", "git", "terminal", "browser", "history"];
@@ -32,7 +35,12 @@ const ORDER: Surface[] = ["files", "pullRequest", "changes", "git", "terminal", 
 export function RightPanel() {
   const target = createMemo(selectedTarget, targetMemoOptions);
   const [expanded, setExpanded] = createSignal<number | null>(null);
-  const available = (surface: Surface) => !SURFACES[surface].git || !!target()?.git;
+  const available = (surface: Surface) =>
+    surface === "agent"
+      ? !!workspace.agent && workspace.agent.chatId === target()?.chatId
+      : !SURFACES[surface].git || !!target()?.git;
+  const surfaceLabel = (surface: Surface) =>
+    surface === "agent" ? workspace.agent?.title.trim() || "Agent" : SURFACES[surface].label;
   const choices = () => ORDER.filter((s) => available(s) && !workspace.tabs.includes(s));
   // While the panel eases closed it keeps showing the surface it had, like desktop's last frame behind the mask.
   const current = () => view.rightPanel ?? workspace.lastPanel;
@@ -103,15 +111,15 @@ export function RightPanel() {
                   id={`ws-tab-${surface}`}
                   aria-selected={(current() === surface) ? "true" : "false"}
                   aria-controls={`ws-surface-${surface}`}
-                  aria-label={SURFACES[surface].label}
-                  title={SURFACES[surface].label}
+                  aria-label={surfaceLabel(surface)}
+                  title={surfaceLabel(surface)}
                   onClick={() => openPanel(surface)}
                   onAuxClick={(e) => e.button === 1 && closePanelTab(surface)}
                 >
                   <Icon name={SURFACES[surface].icon} size={14} class="ws-tab-icon" />
-                  <span>{SURFACES[surface].label}</span>
+                  <span>{surfaceLabel(surface)}</span>
                 </button>
-                <button type="button" class="ws-tab-close" aria-label={`Close ${SURFACES[surface].label}`} title="Close tab" onClick={() => closePanelTab(surface)}>
+                <button type="button" class="ws-tab-close" aria-label={`Close ${surfaceLabel(surface)}`} title="Close tab" onClick={() => closePanelTab(surface)}>
                   <Icon name="close" size={12} />
                 </button>
               </div>
@@ -162,6 +170,11 @@ export function RightPanel() {
                       <Match when={surface === "pullRequest"}><PullRequest target={target()!} active={view.rightPanel === "pullRequest"} /></Match>
                       <Match when={surface === "terminal"}><Terminal target={target()!} active={view.rightPanel === "terminal"} /></Match>
                       <Match when={surface === "browser"}><Browser target={target()!} /></Match>
+                      <Match when={surface === "agent"}>
+                        <Show when={workspace.agent} keyed>
+                          {(agent) => <SubagentTranscript chatId={agent.chatId} ref={agent.ref} title={agent.title} />}
+                        </Show>
+                      </Match>
                     </Switch>
                   </Loading>
                 </section>

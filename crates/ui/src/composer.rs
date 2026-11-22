@@ -13520,9 +13520,10 @@ impl Render for Composer {
         }
         let mode = self.button_mode(cx);
         let agent_working = mode == SendButtonMode::Stop;
-        let runner_mounted = self
-            .runner
-            .update(cx, |runner, cx| runner.mounted(agent_working, window, cx));
+        let runner_enabled = crate::settings::runner_game_enabled(cx);
+        let runner_mounted = self.runner.update(cx, |runner, cx| {
+            runner.mounted(agent_working, runner_enabled, window, cx)
+        });
         // Shape the current draft before sizing the pill. Waiting for the child
         // layout leaves the parent using the previous edit's height.
         self.input.update(cx, |input, cx| {
@@ -14422,6 +14423,23 @@ mod tests {
                 composer
                     .input
                     .update(cx, |input, cx| test(input, window, cx));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn runner_game_setting_unmounts_a_game_in_play(cx: &mut gpui::TestAppContext) {
+        let (_dir, window) = composer_focus_window(cx);
+        window
+            .update(cx, |composer, window, cx| {
+                composer.runner.update(cx, |runner, cx| {
+                    runner.take_over_for_test();
+                    // With the setting on, a run in progress keeps the strip up past the turn.
+                    assert!(runner.mounted(false, true, window, cx));
+                    // Off unmounts it mid-game and releases the run.
+                    assert!(!runner.mounted(true, false, window, cx));
+                    assert!(!runner.mounted(false, true, window, cx));
+                });
             })
             .unwrap();
     }

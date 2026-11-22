@@ -29,6 +29,8 @@ export interface EntryContext {
   harness: () => string | undefined;
   /** True for the newest entry of the transcript. */
   last: () => boolean;
+  /** Opens a subagent chip's transcript; absent where subagent docs cannot be watched. */
+  openSubagent?: (ref: string, title: string) => void;
 }
 
 export function Entry(props: { entry: SessionMessageEntry; ctx: EntryContext }) {
@@ -117,7 +119,7 @@ function ItemList(props: { items: Item[]; entry: SessionMessageEntry; ctx: Entry
 }
 
 function ItemView(props: { item: Item; entry: SessionMessageEntry; ctx: EntryContext }) {
-  const group: GroupContext = { harness: () => props.ctx.harness() };
+  const group = createMemo((): GroupContext => ({ harness: () => props.ctx.harness(), openSubagent: props.ctx.openSubagent }));
   const streaming = () => props.entry.status === "streaming";
   return (
     <div class="t-item" data-kind={props.item.kind}>
@@ -126,7 +128,7 @@ function ItemView(props: { item: Item; entry: SessionMessageEntry; ctx: EntryCon
           {(it) => <TextItem part={it().part} live={streaming()} />}
         </Match>
         <Match when={props.item.kind === "group" && props.item}>
-          {(it) => <ToolGroup id={it().key} tools={it().tools} live={it().live} ctx={group} />}
+          {(it) => <ToolGroup id={it().key} tools={it().tools} live={it().live} ctx={group()} />}
         </Match>
         <Match when={props.item.kind === "fold" && props.item}>
           {(it) => (
@@ -136,7 +138,7 @@ function ItemView(props: { item: Item; entry: SessionMessageEntry; ctx: EntryCon
           )}
         </Match>
         <Match when={props.item.kind === "workflow" && props.item}>
-          {(it) => <ToolGroup id={it().key} tools={[{ key: it().part.id, kind: "call", part: it().part }]} live={streaming()} ctx={group} />}
+          {(it) => <ToolGroup id={it().key} tools={[{ key: it().part.id, kind: "call", part: it().part }]} live={streaming()} ctx={group()} />}
         </Match>
         <Match when={props.item.kind === "image" && props.item}>
           {(it) => <GeneratedImage part={it().part} device={props.ctx.device()} />}

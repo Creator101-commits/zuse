@@ -373,6 +373,19 @@
 .t-root .subagent-live::after { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--success); }
 .t-root .subagent-icon { color: var(--text-muted); }
 .t-root .tool-row[data-rail] .subagent-icon { display: none; }
+/* A clickable subagent chip opens its transcript; the wash marks it as a button. */
+.t-root .chip-head.subagent-open:hover { background: var(--wash); }
+/* Subagent panel (the right-pane "agent" surface) */
+.t-sub-notice {
+  flex: none; display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  font-size: var(--text-xs); color: var(--text-muted);
+}
+.t-sub-notice button {
+  flex: none; padding: 2px 8px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--raised); color: var(--text); font-size: var(--text-xs); cursor: pointer;
+}
+.t-sub-notice button:hover { background: var(--hover); }
 
 .t-root .chip-panel { margin: 0 0 6px; min-width: 0; }
 .t-root .chip-panel[data-carded] { border-radius: 8px; border: 1px solid var(--border); background: var(--t-ink-1); overflow: hidden; }
