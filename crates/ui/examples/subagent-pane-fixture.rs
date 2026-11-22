@@ -40,17 +40,39 @@ fn main() -> anyhow::Result<()> {
     // ZUSE_FIXTURE_ROUTE applies a shell fixture route (e.g.
     // "settings/general") once the transcript is up.
     let route = std::env::var("ZUSE_FIXTURE_ROUTE").ok();
+    // ZUSE_FIXTURE_ROOT keeps the engine and UI data dirs under a fixed path
+    // instead of a tempdir, and seeds the transcript + subagent docs into the
+    // engine's doc host so `zuse serve` on the same engine dir can serve them
+    // to the web app (WatchDocMessages reads engine docs, not the UI cache).
+    let fixture_root = std::env::var_os("ZUSE_FIXTURE_ROOT").map(std::path::PathBuf::from);
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
+    let engine_dir = fixture_root
+        .as_ref()
+        .map(|root| root.join("engine"))
+        .unwrap_or_else(|| temp.path().join("engine"));
     let runtime = tokio::runtime::Runtime::new()?;
     let core = runtime.block_on(async {
-        zuse_engine::EngineCore::assemble(
-            &temp.path().join("engine"),
-            Arc::new(zuse_engine::default_registry()),
-            zuse_protocol::HarnessId::ClaudeCode,
-            None,
-        )
+        // ZUSE_FIXTURE_ROOT mode seeds the LOCAL profile store
+        // (`profiles/local`), the same root `zuse serve` uses; the default dev
+        // profile (`orgs/dev-org/dev-user`) is invisible to it.
+        if fixture_root.is_some() {
+            let profile = zuse_engine::EngineProfile::local(&engine_dir)?;
+            zuse_engine::EngineCore::assemble_with_profile(
+                profile,
+                Arc::new(zuse_engine::default_registry()),
+                zuse_protocol::HarnessId::ClaudeCode,
+                None,
+            )
+        } else {
+            zuse_engine::EngineCore::assemble(
+                &engine_dir,
+                Arc::new(zuse_engine::default_registry()),
+                zuse_protocol::HarnessId::ClaudeCode,
+                None,
+            )
+        }
     })?;
     core.workspace.create_chat(
         "coordinator",
@@ -62,8 +84,11 @@ fn main() -> anyhow::Result<()> {
     core.workspace.rename_chat("coordinator", "zappers stuff")?;
     let ipc_port = port();
     let _ipc = runtime.block_on(zuse_engine::serve_ipc(ipc_port, core.rpc_service()))?;
-    let data = temp.path().join("ui");
-    std::fs::create_dir(&data)?;
+    let data = fixture_root
+        .as_ref()
+        .map(|root| root.join("ui"))
+        .unwrap_or_else(|| temp.path().join("ui"));
+    std::fs::create_dir_all(&data)?;
     let boot = EngineBootConfig {
         target: None,
         data_dir: data.clone(),
@@ -118,6 +143,46 @@ fn main() -> anyhow::Result<()> {
             {"id": "x2", "kind": "text", "text": "Onboarding is three steps: pick a workspace, connect a repository, then send a first message from a short guide."},
          ]},
     ]);
+
+    // ZUSE_FIXTURE_ROOT mode: mirror the seeded transcript into the engine's
+    // doc host so a `zuse serve` on the same engine dir can serve it to the
+    // web app. The UI reads its own cache; the web app reads engine docs.
+    if fixture_root.is_some() {
+        runtime.block_on(async {
+            let chat_entries: Vec<zuse_doc::SessionMessageEntry> =
+                serde_json::from_value(entries.clone()).expect("seed chat entries decode");
+            let sub_entries: Vec<zuse_doc::SessionMessageEntry> =
+                serde_json::from_value(subagent.clone()).expect("seed subagent entries decode");
+            let chat_doc = core
+                .doc_host
+                .open("coordinator")
+                .expect("open coordinator doc");
+            for entry in &chat_entries {
+                chat_doc.doc().push_message(entry).expect("push chat entry");
+            }
+            let sub_doc = core
+                .doc_host
+                .open("coordinator--sub--research")
+                .expect("open subagent doc");
+            for entry in &sub_entries {
+                sub_doc
+                    .doc()
+                    .push_message(entry)
+                    .expect("push subagent entry");
+            }
+            core.doc_host.flush_all();
+            // The chat list lives in the workspace registry snapshot, not the
+            // doc store — flush it too or `zuse serve` sees zero chats.
+            core.workspace.flush();
+        });
+        eprintln!("[fixture] seeded engine docs for coordinator + subagent");
+        // ZUSE_FIXTURE_SEED_ONLY exits before the GUI app starts: the seeded
+        // docs are already flushed to the engine store, so `zuse serve` on the
+        // same data dir can serve them without a window to keep alive.
+        if std::env::var_os("ZUSE_FIXTURE_SEED_ONLY").is_some() {
+            return Ok(());
+        }
+    }
 
     gpui_platform::application()
         .with_assets(icons::Assets)
