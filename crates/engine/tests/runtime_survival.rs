@@ -183,6 +183,7 @@ impl Harness for ProcessHarness {
                         let boundary = AgentEvent::Steered {
                             assistant_message_id: None,
                             next_assistant_message_id: None,
+                            message_id: None,
                         };
                         if !send(boundary).await
                             || !send(AgentEvent::TextDelta { text: format!("on it: {}", steer.prompt) }).await

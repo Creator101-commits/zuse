@@ -76,6 +76,32 @@ export function RightPanel() {
     }));
   });
 
+  // The agent tab belongs to the chat that owns the subagent. Switching to
+  // another chat hides it; if it was the active surface, hand the panel to a
+  // neighbour tab (right first, like closePanelTab) or close it. The agent
+  // target itself stays — returning to its chat reshows the tab.
+  createEffect(
+    () =>
+      [
+        view.rightPanel,
+        workspace.agent,
+        target()?.chatId ?? null,
+        target()?.git ?? null,
+        workspace.tabs,
+      ] as const,
+    ([panel, agent, chatId]) => {
+      if (panel !== "agent") return;
+      if (agent && agent.chatId === chatId) return;
+      const tabs = workspace.tabs;
+      const at = tabs.indexOf("agent");
+      const right = at >= 0 ? tabs.slice(at + 1).find(available) : undefined;
+      const left = at > 0 ? tabs.slice(0, at).reverse().find(available) : undefined;
+      const fallback = right ?? left ?? (at < 0 ? tabs.find(available) : undefined);
+      if (fallback) openPanel(fallback);
+      else setView(draft => { draft["rightPanel"] = null; });
+    },
+  );
+
   // Expanding gives the panel all the width the conversation can spare (the shell keeps its minimum); collapsing
   // returns to the width it had.
   const toggleExpand = () => {
@@ -172,7 +198,7 @@ export function RightPanel() {
                       <Match when={surface === "browser"}><Browser target={target()!} /></Match>
                       <Match when={surface === "agent"}>
                         <Show when={workspace.agent} keyed>
-                          {(agent) => <SubagentTranscript chatId={agent.chatId} ref={agent.ref} title={agent.title} />}
+                          {(agent) => <SubagentTranscript chatId={agent.chatId} docRef={agent.ref} title={agent.title} />}
                         </Show>
                       </Match>
                     </Switch>

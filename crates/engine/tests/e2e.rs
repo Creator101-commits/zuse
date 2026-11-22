@@ -2679,6 +2679,7 @@ async fn stale_tool_echo_after_steer_boundary_does_not_split_text() {
         AgentEvent::Steered {
             assistant_message_id: Some("a-1".into()),
             next_assistant_message_id: Some("a-2".into()),
+            message_id: None,
         },
         AgentEvent::TextDelta {
             text: "part ".into(),
@@ -2782,6 +2783,7 @@ async fn parked_steer_restamps_started_at_and_idle_clears_it() {
                         .send(Ok(AgentEvent::Steered {
                             assistant_message_id: None,
                             next_assistant_message_id: None,
+                            message_id: None,
                         }))
                         .await;
                     let _ = tx
@@ -3029,6 +3031,7 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
         tx.send(AgentEvent::Steered {
             assistant_message_id: Some("a-1".into()),
             next_assistant_message_id: Some("a-steered".into()),
+            message_id: None,
         })
         .unwrap();
         tx.send(AgentEvent::TextDelta {

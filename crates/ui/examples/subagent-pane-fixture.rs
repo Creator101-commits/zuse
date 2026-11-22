@@ -34,6 +34,12 @@ fn present(window: gpui::AnyWindowHandle, cx: &mut gpui::AsyncApp) {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("warn").init();
     let plain = std::env::var_os("ZUSE_FIXTURE_PLAIN").is_some();
+    // ZUSE_FIXTURE_DEVIN renders the chat as Devin with an "Agent: Sidekick"
+    // chip — the Fusion sidekick shape the pane fix targets.
+    let devin = std::env::var_os("ZUSE_FIXTURE_DEVIN").is_some();
+    // ZUSE_FIXTURE_ROUTE applies a shell fixture route (e.g.
+    // "settings/general") once the transcript is up.
+    let route = std::env::var("ZUSE_FIXTURE_ROUTE").ok();
     let temp = tempfile::tempdir()?;
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(&workspace)?;
@@ -72,7 +78,7 @@ fn main() -> anyhow::Result<()> {
     let mut chats = core.workspace.read_chats()?;
     for chat in &mut chats {
         chat.config = Some(
-            serde_json::from_value(json!({"harness": "claude-code", "model": "claude-opus-5-5",
+            serde_json::from_value(json!({"harness": if devin { "devin" } else { "claude-code" }, "model": "claude-opus-5-5",
                 "reasoning": null, "sandbox": "workspace-write"}))
             .unwrap(),
         );
@@ -96,7 +102,7 @@ fn main() -> anyhow::Result<()> {
         {"id": "a1", "role": "assistant", "createdAt": now - 149_000, "deviceId": device, "status": "complete",
          "parts": [
             {"id": "r1", "kind": "reasoning", "text": "I'm planning new child issues under ZAP-6."},
-            {"id": "s1", "kind": "tool", "call": {"kind": "unknown", "name": "Agent: Research dusk.bot onboarding", "input": {"description": "Research dusk.bot onboarding"}},
+            {"id": "s1", "kind": "tool", "call": {"kind": "unknown", "name": if devin { "Agent: Sidekick" } else { "Agent: Research dusk.bot onboarding" }, "input": {"description": "Research dusk.bot onboarding"}},
              "isError": false, "resolved": true, "subagentRef": "coordinator--sub--research", "subagentStatus": "done"},
             {"id": "c1", "kind": "tool", "call": {"kind": "exec", "command": "git status"}, "isError": false, "resolved": true},
             {"id": "c2", "kind": "tool", "call": {"kind": "exec", "command": "git log --oneline -5"}, "isError": false, "resolved": true},
@@ -171,6 +177,9 @@ fn main() -> anyhow::Result<()> {
                 s.no_project = true;
                 s
             });
+            let shell_slot =
+                std::rc::Rc::new(std::cell::RefCell::new(None::<gpui::Entity<shell::Shell>>));
+            let slot = shell_slot.clone();
             let window = cx
                 .open_window(
                     WindowOptions {
@@ -181,7 +190,11 @@ fn main() -> anyhow::Result<()> {
                         ))),
                         ..Default::default()
                     },
-                    |_, cx| cx.new(|cx| shell::Shell::new(state.clone(), boot, cx)),
+                    |_, cx| {
+                        let shell = cx.new(|cx| shell::Shell::new(state.clone(), boot, cx));
+                        *slot.borrow_mut() = Some(shell.clone());
+                        shell
+                    },
                 )
                 .unwrap();
             cx.on_window_closed(|cx, _| cx.quit()).detach();
@@ -218,6 +231,14 @@ fn main() -> anyhow::Result<()> {
                 };
                 seed(cx);
                 pause(1200).await;
+                if let Some(route) = &route {
+                    if let Some(shell) = shell_slot.borrow().clone() {
+                        shell.update(cx, |s, cx| {
+                            s.fixture_review_route(route, cx);
+                        });
+                    }
+                    pause(600).await;
+                }
                 present(window.into(), cx);
                 println!("ready");
                 let (send, commands) = std::sync::mpsc::channel::<String>();
@@ -237,6 +258,52 @@ fn main() -> anyhow::Result<()> {
                     tick += 1;
                     while let Ok(line) = commands.try_recv() {
                         let words: Vec<&str> = line.split_whitespace().collect();
+                        // `capture PATH` renders the window to a PNG — a real
+                        // capture of the compiled fixture, no screen-recording
+                        // permission needed.
+                        if words.first() == Some(&"capture") && words.len() == 2 {
+                            let path = words[1].to_string();
+                            let saved = gpui::AnyWindowHandle::from(window).update(
+                                cx,
+                                |_, w, _| -> anyhow::Result<()> {
+                                    Ok(w.render_to_image()?.save(path.as_str())?)
+                                },
+                            );
+                            match saved {
+                                Ok(Ok(())) => println!("ok"),
+                                Ok(Err(e)) | Err(e) => println!("capture failed: {e:#}"),
+                            }
+                            continue;
+                        }
+                        // `scroll X Y DY` dispatches a wheel event so long
+                        // pages (settings) can be brought to a row.
+                        if words.first() == Some(&"scroll") && words.len() == 4 {
+                            let (Ok(x), Ok(y), Ok(dy)) = (
+                                words[1].parse::<f32>(),
+                                words[2].parse::<f32>(),
+                                words[3].parse::<f32>(),
+                            ) else {
+                                continue;
+                            };
+                            gpui::AnyWindowHandle::from(window)
+                                .update(cx, |_, window, cx| {
+                                    window.dispatch_event(
+                                        gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                                            position: gpui::point(px(x), px(y)),
+                                            delta: gpui::ScrollDelta::Pixels(gpui::point(
+                                                px(0.),
+                                                px(dy),
+                                            )),
+                                            ..Default::default()
+                                        }),
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                            present(window.into(), cx);
+                            println!("ok");
+                            continue;
+                        }
                         let [verb, x, y] = words[..] else { continue };
                         let (Ok(x), Ok(y)) = (x.parse::<f32>(), y.parse::<f32>()) else {
                             continue;

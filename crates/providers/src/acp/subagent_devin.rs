@@ -60,6 +60,15 @@ pub(crate) struct DevinTracker {
     /// late frame tags the OLD chip (the engine drops stragglers) instead of
     /// opening a new one.
     sidekick_tools: HashMap<String, String>,
+    /// Sidekick toolCallId -> owning chip for calls that have NOT reported
+    /// a terminal result yet. A wait-boundary settlement defers while its
+    /// chip still has entries here.
+    sidekick_open: HashMap<String, String>,
+    /// Chips whose wait-boundary settlement deferred because their tools
+    /// were still running, oldest first. Each emits its Done + chip
+    /// ToolResult once its last open tool reports (or unconditionally at
+    /// turn/finish settle — the backstop so nothing waits forever).
+    deferred_sidekick: VecDeque<String>,
 }
 
 impl DevinTracker {
@@ -171,13 +180,27 @@ impl DevinTracker {
     /// non-blocking dispatch's wait:false lands ~0.3s in, before any
     /// sidekick frame, so it is a no-op — the chip its frames open later
     /// settles with the turn instead.
+    ///
+    /// The settle defers while the chip's own tools are still open: Devin
+    /// can release the wait before the last `tool_call_update` lands, and a
+    /// result arriving after the settle would tag a settled chip — the
+    /// engine drops stragglers by design, leaving the tool unresolved.
     pub(crate) fn sidekick_wait(&mut self) -> Vec<AgentEvent> {
-        self.settle_sidekick(DoneStatus::Completed)
+        if let Some(chip) = self.sidekick_chip.clone()
+            && self.chip_tools_open(&chip)
+        {
+            self.sidekick_chip = None;
+            self.deferred_sidekick.push_back(chip);
+            return Vec::new();
+        }
+        self.settle_chip_now(DoneStatus::Completed)
     }
 
     /// The prompt response settled the turn: a sidekick chip still open (a
     /// non-blocking handoff whose frames arrived mid-turn) settles with the
-    /// turn's status, before the turn's untagged Done.
+    /// turn's status, before the turn's untagged Done. Deferred handoff
+    /// settlements flush here too — the backstop that keeps a tool which
+    /// never reports from holding its chip open forever.
     pub(crate) fn turn_settled(&mut self, status: DoneStatus) -> Vec<AgentEvent> {
         self.settle_sidekick(status)
     }
@@ -220,13 +243,20 @@ impl DevinTracker {
             return Vec::new();
         }
         let tool_id = nonempty(update, "toolCallId").unwrap_or_default();
+        let tool_frame = matches!(
+            update.get("sessionUpdate").and_then(Value::as_str),
+            Some("tool_call" | "tool_call_update")
+        );
         // A late frame for a tool whose handoff already settled tags the OLD
         // chip: the engine drops stragglers for settled chips, and opening a
         // fresh chip here would resurrect a finished transcript.
         if let Some(chip) = self.sidekick_tools.get(tool_id)
             && self.sidekick_chip.as_deref() != Some(chip.as_str())
         {
-            return events.into_iter().map(|event| tag(chip, event)).collect();
+            let chip = chip.clone();
+            let (mut tagged, deferred) = self.tag_sidekick(&chip, events, tool_frame);
+            tagged.extend(deferred);
+            return tagged;
         }
         let chip = match self.sidekick_chip.clone() {
             Some(chip) => chip,
@@ -256,43 +286,95 @@ impl DevinTracker {
                         input: None,
                     },
                 });
-                out.extend(events.into_iter().map(|event| tag(&chip, event)));
                 if !tool_id.is_empty() {
-                    self.sidekick_tools.insert(tool_id.to_owned(), chip);
+                    self.sidekick_tools.insert(tool_id.to_owned(), chip.clone());
                 }
+                let (mut tagged, deferred) = self.tag_sidekick(&chip, events, tool_frame);
+                out.append(&mut tagged);
+                out.extend(deferred);
                 return out;
             }
         };
         if !tool_id.is_empty() {
             self.sidekick_tools.insert(tool_id.to_owned(), chip.clone());
         }
-        events.into_iter().map(|event| tag(&chip, event)).collect()
+        let (mut tagged, deferred) = self.tag_sidekick(&chip, events, tool_frame);
+        tagged.extend(deferred);
+        tagged
     }
 
-    /// Close the open sidekick chip, if any: a tagged Done for its doc plus
-    /// an untagged ToolResult resolving the synthesized spawn chip (no
-    /// lead-side tool call ever settles it).
-    fn settle_sidekick(&mut self, status: DoneStatus) -> Vec<AgentEvent> {
+    /// Tag `events` with `chip` and track the frame's tool open/close state
+    /// (tool frames only). Returns the tagged events plus any deferred
+    /// handoff settlements this frame made due — a `ToolResult` that closes
+    /// a deferred chip's last open tool emits its Done + chip ToolResult
+    /// right after it.
+    fn tag_sidekick(
+        &mut self,
+        chip: &str,
+        events: Vec<AgentEvent>,
+        tool_frame: bool,
+    ) -> (Vec<AgentEvent>, Vec<AgentEvent>) {
+        let mut tagged = Vec::with_capacity(events.len());
+        for event in events {
+            if tool_frame {
+                match &event {
+                    AgentEvent::ToolCall { id, .. } => {
+                        self.sidekick_open.insert(id.clone(), chip.to_owned());
+                    }
+                    AgentEvent::ToolResult { id, .. } => {
+                        self.sidekick_open.remove(id);
+                    }
+                    _ => {}
+                }
+            }
+            tagged.push(tag(chip, event));
+        }
+        (tagged, self.flush_deferred_sidekick())
+    }
+
+    /// Emit deferred handoff settlements whose chips have no open tools
+    /// left, oldest first. A still-running chip keeps its place — later
+    /// deferred chips wait behind it (turn settle is the backstop).
+    fn flush_deferred_sidekick(&mut self) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        while let Some(chip) = self.deferred_sidekick.front() {
+            if self.chip_tools_open(chip) {
+                break;
+            }
+            let chip = self.deferred_sidekick.pop_front().expect("front checked");
+            events.extend(settle_chip_events(&chip, DoneStatus::Completed));
+        }
+        events
+    }
+
+    /// Whether `chip` still has sidekick tools that have not reported a
+    /// terminal result.
+    fn chip_tools_open(&self, chip: &str) -> bool {
+        self.sidekick_open.values().any(|owner| owner == chip)
+    }
+
+    /// Close the open sidekick chip NOW, ignoring deferred settlements —
+    /// the wait boundary's immediate path.
+    fn settle_chip_now(&mut self, status: DoneStatus) -> Vec<AgentEvent> {
         let Some(chip) = self.sidekick_chip.take() else {
             return Vec::new();
         };
-        vec![
-            tag(
-                &chip,
-                AgentEvent::Done {
-                    status,
-                    result: None,
-                    error: None,
-                    session_id: None,
-                },
-            ),
-            AgentEvent::ToolResult {
-                id: chip,
-                is_error: status == DoneStatus::Errored,
-                output: None,
-                diff: None,
-            },
-        ]
+        settle_chip_events(&chip, status)
+    }
+
+    /// Close the open sidekick chip plus every deferred one — the
+    /// unconditional backstop used at turn/finish settle. Deferred chips
+    /// emit first (they are older) with Completed: their wait boundary
+    /// already ended the handoff, only the emission was held.
+    fn settle_sidekick(&mut self, status: DoneStatus) -> Vec<AgentEvent> {
+        let mut events = Vec::new();
+        while let Some(chip) = self.deferred_sidekick.pop_front() {
+            events.extend(settle_chip_events(&chip, DoneStatus::Completed));
+        }
+        if let Some(chip) = self.sidekick_chip.take() {
+            events.extend(settle_chip_events(&chip, status));
+        }
+        events
     }
 
     fn remember_spawn(&mut self, update: &Value) {
@@ -351,6 +433,29 @@ fn tag(parent: &str, event: AgentEvent) -> AgentEvent {
         parent_tool_use_id: parent.to_owned(),
         event: Box::new(event),
     }
+}
+
+/// A settled sidekick chip's closing pair: a tagged Done for its doc plus
+/// an untagged ToolResult resolving the synthesized spawn chip (no
+/// lead-side tool call ever settles it).
+fn settle_chip_events(chip: &str, status: DoneStatus) -> Vec<AgentEvent> {
+    vec![
+        tag(
+            chip,
+            AgentEvent::Done {
+                status,
+                result: None,
+                error: None,
+                session_id: None,
+            },
+        ),
+        AgentEvent::ToolResult {
+            id: chip.to_owned(),
+            is_error: status == DoneStatus::Errored,
+            output: None,
+            diff: None,
+        },
+    ]
 }
 
 #[cfg(test)]
@@ -521,12 +626,32 @@ mod tests {
     #[test]
     fn late_sidekick_update_tags_the_settled_chip_not_a_new_one() {
         let mut tracker = DevinTracker::default();
-        // Handoff 1: wait, one tool, wait:false.
+        // Handoff 1: wait, one tool, wait:false — the settle defers while
+        // the tool is still open.
         assert!(tracker.sidekick_wait().is_empty());
         let events = tracker.map(&sidekick_tool_call("sk::exec:0#first"));
         let chip1 = opened_chip(&events);
-        assert!(!tracker.sidekick_wait().is_empty());
+        assert!(tracker.sidekick_wait().is_empty());
+        // The tool's result flushes the deferred settle: a tagged
+        // ToolResult for the tool itself, then the chip's Done + ToolResult.
+        let settled = tracker.map(&sidekick_tool_done("sk::exec:0#first"));
+        assert!(
+            settled.iter().any(|e| matches!(
+                e,
+                AgentEvent::Subagent { parent_tool_use_id, event }
+                    if *parent_tool_use_id == chip1
+                        && matches!(event.as_ref(), AgentEvent::ToolResult { id, .. } if id == "sk::exec:0#first")
+            )),
+            "{settled:?}"
+        );
+        assert!(matches!(
+            &settled[1],
+            AgentEvent::Subagent { parent_tool_use_id, event }
+                if *parent_tool_use_id == chip1
+                    && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
+        ));
         // Handoff 2 opens a DISTINCT chip.
+        assert!(tracker.sidekick_wait().is_empty());
         assert!(tracker.sidekick_wait().is_empty());
         let events = tracker.map(&sidekick_tool_call("sk::exec:0#second"));
         let chip2 = opened_chip(&events);
@@ -534,6 +659,15 @@ mod tests {
         // A late update for handoff 1's tool tags chip1 — it must not open a
         // third chip (the engine would resurrect a settled transcript).
         let late = tracker.map(&sidekick_tool_done("sk::exec:0#first"));
+        assert!(
+            late.iter().any(|e| matches!(
+                e,
+                AgentEvent::Subagent { parent_tool_use_id, event }
+                    if *parent_tool_use_id == chip1
+                        && matches!(event.as_ref(), AgentEvent::ToolResult { id, .. } if id == "sk::exec:0#first")
+            )),
+            "{late:?}"
+        );
         assert!(
             late.iter().all(|e| matches!(
                 e,
@@ -548,6 +682,65 @@ mod tests {
             )),
             "{late:?}"
         );
+    }
+
+    /// A `waiting:false` that lands while the handoff's tool still runs
+    /// must not settle the chip: the tool's own result would then tag a
+    /// settled chip and the engine would drop it as a straggler. The
+    /// settlement waits for the last open tool instead.
+    #[test]
+    fn handoff_settle_waits_for_the_chips_last_open_tool() {
+        let mut tracker = DevinTracker::default();
+        assert!(tracker.sidekick_wait().is_empty());
+        let events = tracker.map(&sidekick_tool_call("sk::exec:0#slow"));
+        let chip = opened_chip(&events);
+        // wait:false mid-tool: nothing settles yet.
+        assert!(tracker.sidekick_wait().is_empty());
+        // The tool's result lands first (tagged under the chip), then the
+        // deferred settlement: tagged Done + untagged chip ToolResult.
+        let events = tracker.map(&sidekick_tool_done("sk::exec:0#slow"));
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert!(matches!(
+            &events[0],
+            AgentEvent::Subagent { parent_tool_use_id, event }
+                if *parent_tool_use_id == chip
+                    && matches!(event.as_ref(), AgentEvent::ToolResult { id, .. } if id == "sk::exec:0#slow")
+        ));
+        assert!(matches!(
+            &events[1],
+            AgentEvent::Subagent { parent_tool_use_id, event }
+                if *parent_tool_use_id == chip
+                    && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
+        ));
+        assert!(matches!(
+            &events[2],
+            AgentEvent::ToolResult { id, is_error: false, .. } if *id == chip
+        ));
+        // Nothing deferred remains: the turn settle is a no-op.
+        assert!(tracker.turn_settled(DoneStatus::Completed).is_empty());
+    }
+
+    /// The turn settle is the backstop: a deferred chip whose tool never
+    /// reports still settles with the turn, before its untagged Done.
+    #[test]
+    fn deferred_sidekick_chip_settles_with_the_turn() {
+        let mut tracker = DevinTracker::default();
+        assert!(tracker.sidekick_wait().is_empty());
+        let events = tracker.map(&sidekick_tool_call("sk::exec:0#stuck"));
+        let chip = opened_chip(&events);
+        assert!(tracker.sidekick_wait().is_empty());
+        let settled = tracker.turn_settled(DoneStatus::Completed);
+        assert!(matches!(
+            &settled[0],
+            AgentEvent::Subagent { parent_tool_use_id, event }
+                if *parent_tool_use_id == chip
+                    && matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Completed, .. })
+        ));
+        assert!(matches!(
+            &settled[1],
+            AgentEvent::ToolResult { id, .. } if *id == chip
+        ));
+        assert!(tracker.finish_open(DoneStatus::Interrupted).is_empty());
     }
 
     #[test]

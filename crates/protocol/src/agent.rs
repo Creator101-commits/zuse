@@ -951,6 +951,11 @@ pub enum AgentEvent {
     Steered {
         assistant_message_id: Option<String>,
         next_assistant_message_id: Option<String>,
+        /// The steer this boundary delivers, when the driver knows it: confirms
+        /// exactly that ledger entry (nothing, if it was already confirmed).
+        /// `None` confirms the oldest pending steer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Done {

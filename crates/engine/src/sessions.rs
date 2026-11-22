@@ -247,6 +247,23 @@ async fn publish_steer(
     }
 }
 
+/// Retire the ledger entry a `Steered` boundary confirms. A driver that names
+/// the steer (`Some(id)`) confirms exactly that entry — nothing when it is
+/// already gone, and never the front by accident; `None` keeps the oldest
+/// pending steer semantics.
+fn take_confirmed_steer(
+    ledger: &mut std::collections::VecDeque<RoutedSteer>,
+    message_id: Option<&str>,
+) -> Option<RoutedSteer> {
+    match message_id {
+        Some(id) => ledger
+            .iter()
+            .position(|steer| steer.message_id == id)
+            .and_then(|index| ledger.remove(index)),
+        None => ledger.pop_front(),
+    }
+}
+
 struct Inner {
     analytics: OnceLock<zuse_analytics::Analytics>,
     secret_namespace: String,
@@ -4650,6 +4667,7 @@ async fn drive_run(
         // A steer boundary splits the assistant entry exactly where the fold resets.
         if let AgentEvent::Steered {
             next_assistant_message_id,
+            message_id,
             ..
         } = &event
         {
@@ -4679,13 +4697,15 @@ async fn drive_run(
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
             inner.set_status(&chat_id, SessionStatus::Working, true);
-            // The boundary confirms delivery of the oldest accepted steer —
-            // retire its at-least-once ledger entry.
+            // The boundary confirms delivery of the steer it names — or the
+            // oldest accepted steer when the driver does not say — and retires
+            // its at-least-once ledger entry.
             let confirmed = lock(&inner.runs)
                 .get_mut(&chat_id)
                 .filter(|h| h.run_id == run_id)
                 .and_then(|h| {
-                    let confirmed = lock(&h.routed_steers).pop_front();
+                    let confirmed =
+                        take_confirmed_steer(&mut lock(&h.routed_steers), message_id.as_deref());
                     if let Some(confirmed) = &confirmed {
                         h.active_message = Some(confirmed.message_id.clone());
                     }
@@ -5305,6 +5325,53 @@ mod tests {
         assert!(publisher.await.unwrap().is_ok());
         assert_eq!(lock(&ledger).front().unwrap().epoch, turn.steering_epoch());
         assert!(!turn.steer_cancelled("new"));
+    }
+
+    fn routed_steer(message_id: &str) -> RoutedSteer {
+        RoutedSteer {
+            epoch: 0,
+            prompt: format!("prompt {message_id}"),
+            message_id: message_id.into(),
+            fork_history: false,
+            after_stop: false,
+            request: None,
+        }
+    }
+
+    #[test]
+    fn confirmed_steer_names_its_own_ledger_entry_not_the_front() {
+        let mut ledger = std::collections::VecDeque::from([
+            routed_steer("first"),
+            routed_steer("second"),
+            routed_steer("third"),
+        ]);
+        let confirmed = take_confirmed_steer(&mut ledger, Some("second")).unwrap();
+        assert_eq!(confirmed.message_id, "second");
+        assert_eq!(
+            ledger
+                .iter()
+                .map(|s| s.message_id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "third"]
+        );
+    }
+
+    #[test]
+    fn confirmed_steer_with_unknown_id_leaves_the_ledger_alone() {
+        let mut ledger = std::collections::VecDeque::from([routed_steer("first")]);
+        assert!(take_confirmed_steer(&mut ledger, Some("missing")).is_none());
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].message_id, "first");
+    }
+
+    #[test]
+    fn confirmed_steer_without_id_confirms_the_oldest() {
+        let mut ledger =
+            std::collections::VecDeque::from([routed_steer("first"), routed_steer("second")]);
+        let confirmed = take_confirmed_steer(&mut ledger, None).unwrap();
+        assert_eq!(confirmed.message_id, "first");
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].message_id, "second");
     }
 
     #[tokio::test]

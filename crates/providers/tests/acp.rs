@@ -1751,11 +1751,7 @@ for line in sys.stdin:
                 .await
                 .unwrap();
             }
-            let done = matches!(event, AgentEvent::Done { .. });
             events.push(event);
-            if done {
-                break;
-            }
         }
     })
     .await
@@ -1846,11 +1842,7 @@ for line in sys.stdin:
                 .await
                 .unwrap();
             }
-            let done = matches!(event, AgentEvent::Done { .. });
             events.push(event);
-            if done {
-                break;
-            }
         }
     })
     .await
@@ -1952,11 +1944,7 @@ for line in sys.stdin:
                 .await
                 .unwrap();
             }
-            let done = matches!(event, AgentEvent::Done { .. });
             events.push(event);
-            if done {
-                break;
-            }
         }
     })
     .await
@@ -1990,6 +1978,140 @@ for line in sys.stdin:
     assert_eq!(
         dones(&events),
         vec![(DoneStatus::Completed, None)],
+        "{events:?}"
+    );
+}
+
+/// Devin refuses injected mid-turn prompts: two steers ("s1", "s2") ride
+/// `session/prompt` while the turn lives, the fake rejects the SECOND
+/// injection first, then the FIRST, then settles the primary. Each refusal
+/// keeps its steer unconfirmed — its boundary already went out, so the
+/// redelivery `Steered` naming its message id is a no-op confirmation that
+/// still re-arms the segment — and the refused texts redeliver joined in
+/// admission order as the next prompt. One Done per prompt cycle, no
+/// session/cancel.
+#[cfg(unix)]
+#[tokio::test]
+async fn devin_mid_turn_refused_steers_redeliver_in_order_and_confirm_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("cancelled");
+    let redelivered = dir.path().join("redelivered.txt");
+    let harness = devin_script(
+        &dir,
+        "devin.py",
+        r#"#!/usr/bin/env python3
+import json, sys, pathlib
+root = pathlib.Path(__file__).parent
+
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+
+def update(u):
+    emit({'method':'session/update','params':{'sessionId':'s-1','update':u}})
+
+def prompt_text(req):
+    return ''.join(b.get('text','') for b in req['params'].get('prompt',[]) if isinstance(b,dict))
+
+assert sys.argv[1:] == ['acp'], sys.argv
+prompts = []
+primary_id = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/cancel':
+        (root / 'cancelled').touch()
+    elif method == 'session/prompt':
+        prompts.append((req['id'], prompt_text(req)))
+        if len(prompts) == 1:
+            primary_id = req['id']
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'first'}})
+        elif len(prompts) == 2:
+            # First injection: hold its response until the second arrives —
+            # both are refused together below.
+            pass
+        elif len(prompts) == 3:
+            # Both injected prompts arrived while the turn lived: refuse
+            # the second injection first, then the first, then settle the
+            # primary turn.
+            s2_id, _ = prompts[2]
+            s1_id, _ = prompts[1]
+            emit({'id':s2_id,'error':{'code':-32000,'message':'injection refused'}})
+            emit({'id':s1_id,'error':{'code':-32000,'message':'injection refused'}})
+            emit({'id':primary_id,'result':{'stopReason':'end_turn'}})
+        else:
+            # The redelivery prompt joins the refused steers in admission
+            # order.
+            (root / 'redelivered.txt').write_text(prompts[-1][1])
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'again'}})
+            emit({'id':req['id'],'result':{'stopReason':'end_turn'}})
+            break
+"#,
+    );
+    let (controls, steer_tx, _token) = controls();
+    let mut req = devin_request("first task");
+    req.cwd = dir.path().display().to_string();
+    let mut stream = harness.run(req, controls).await.unwrap();
+    let mut steer = Some(steer_tx);
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = stream.next().await {
+            let event = event.unwrap();
+            if matches!(&event, AgentEvent::TextDelta { text } if text == "first")
+                && let Some(tx) = steer.take()
+            {
+                for (message_id, prompt) in [("s1", "s1-text"), ("s2", "s2-text")] {
+                    tx.send(SteerMessage {
+                        prompt: prompt.into(),
+                        message_id: Some(message_id.into()),
+                        attachments: Vec::new(),
+                        config: None,
+                    })
+                    .await
+                    .unwrap();
+                }
+            }
+            events.push(event);
+        }
+    })
+    .await
+    .expect("run finished in time");
+
+    assert!(
+        !marker.exists(),
+        "session/cancel must not be sent: {events:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&redelivered).unwrap(),
+        "s1-text\n\ns2-text",
+        "refused steers redeliver joined in admission order"
+    );
+    // Every Steered boundary names the steer it delivers; the two
+    // redelivery boundaries after the first Done confirm "s1" then "s2".
+    let steered_ids: Vec<Option<String>> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Steered { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        steered_ids,
+        vec![
+            Some("s1".into()),
+            Some("s2".into()),
+            Some("s1".into()),
+            Some("s2".into())
+        ],
+        "{events:?}"
+    );
+    // One Done per prompt cycle: the merged turn, then the redelivery.
+    assert_eq!(
+        dones(&events),
+        vec![(DoneStatus::Completed, None), (DoneStatus::Completed, None)],
         "{events:?}"
     );
 }

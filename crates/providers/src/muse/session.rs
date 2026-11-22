@@ -449,6 +449,7 @@ impl Runner {
         AgentEvent::Steered {
             assistant_message_id: Some(previous),
             next_assistant_message_id: Some(self.assistant.clone()),
+            message_id: None,
         }
     }
 

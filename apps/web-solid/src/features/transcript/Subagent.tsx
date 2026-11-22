@@ -17,7 +17,9 @@ import "./transcript.css";
 /** Re-engage the bottom pin within this distance of the end (desktop STICK_THRESHOLD_PX). */
 const STICK_PX = 70;
 
-export function SubagentTranscript(props: { chatId: string; ref: string; title: string }) {
+// `docRef`, not `ref`: Solid reserves `ref` for element callbacks, so a prop
+// named `ref` never delivers the document id.
+export function SubagentTranscript(props: { chatId: string; docRef: string; title: string }) {
   const [data, setData] = createStore({
     messages: [] as SessionMessageEntry[],
     ready: false,
@@ -48,13 +50,13 @@ export function SubagentTranscript(props: { chatId: string; ref: string; title: 
     () =>
       [
         props.chatId,
-        props.ref,
+        props.docRef,
         state.chats[props.chatId]?.deviceId ?? null,
         attempt(),
         state.epoch,
         state.connection.kind === "connected",
       ] as const,
-    ([, ref, device, , , live]) => {
+    ([, docRef, device, , , live]) => {
       if (!live) {
         setData(draft => { Object.assign(draft, { ready: false, error: "Device unreachable. Reconnect to load this transcript." }); });
         return;
@@ -62,7 +64,7 @@ export function SubagentTranscript(props: { chatId: string; ref: string; title: 
       let ready = false;
       let retry: ReturnType<typeof setTimeout> | undefined;
       let sub: Subscription | undefined;
-      const params = { chatId: ref, targetDeviceId: device };
+      const params = { chatId: docRef, targetDeviceId: device };
       const restart = (message: string) => {
         sub?.cancel();
         setData(draft => { Object.assign(draft, { ready: false, error: message }); });
@@ -112,7 +114,7 @@ export function SubagentTranscript(props: { chatId: string; ref: string; title: 
   const rootChat = () => state.chats[props.chatId];
   const ctxFor = (message: SessionMessageEntry): EntryContext => ({
     // The subagent ref, not a chat id: fork and visual lookups stay hidden.
-    chatId: props.ref,
+    chatId: props.docRef,
     device: () => rootChat()?.deviceId ?? null,
     harness: () => rootChat()?.config?.harness,
     last: () => data.messages[data.messages.length - 1]?.id === message.id,

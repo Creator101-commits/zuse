@@ -35,7 +35,7 @@ mod subagent;
 mod subagent_devin;
 mod system_message;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -3399,7 +3399,7 @@ async fn drain_segment_incoming(
     request: &RunRequest,
     open_tools: &mut std::collections::HashSet<String>,
     assistant_message_id: &mut String,
-    pending_steer_boundaries: &mut usize,
+    pending_steer_boundaries: &mut VecDeque<(u64, Option<String>)>,
 ) -> bool {
     while let Ok(inc) = incoming.try_recv() {
         match inc {
@@ -3415,7 +3415,7 @@ async fn drain_segment_incoming(
                 // surface only inside this drain (its prompt response won
                 // the select race), so a deferred boundary is checked
                 // after every drained notification, not just at settle.
-                if *pending_steer_boundaries > 0
+                if !pending_steer_boundaries.is_empty()
                     && !lead_tools_open(open_tools)
                     && !flush_steer_boundaries(
                         event_tx,
@@ -4089,20 +4089,22 @@ fn track_open_tools(ev: &AgentEvent, open_tools: &mut std::collections::HashSet<
 /// Emit one `Steered` per deferred mid-turn boundary (see
 /// `pending_steer_boundaries` in `run_session`), rotating the
 /// assistant-message ledger exactly like the queued-steer boundary path
-/// does. Returns false when the consumer hung up.
+/// does. Each boundary names the steer it delivers so the engine confirms
+/// that ledger entry, not simply the oldest. Returns false when the
+/// consumer hung up.
 async fn flush_steer_boundaries(
     event_tx: &mpsc::Sender<Result<AgentEvent, HarnessError>>,
     assistant_message_id: &mut String,
-    pending: &mut usize,
+    pending: &mut VecDeque<(u64, Option<String>)>,
 ) -> bool {
-    while *pending > 0 {
-        *pending -= 1;
+    while let Some((_, message_id)) = pending.pop_front() {
         let (prev, next) = rotate(assistant_message_id);
         if !send(
             event_tx,
             AgentEvent::Steered {
                 assistant_message_id: Some(prev),
                 next_assistant_message_id: Some(next),
+                message_id,
             },
         )
         .await
@@ -4693,18 +4695,27 @@ async fn run_session(session: Session) {
     // a real `session/prompt` the agent merges into the running turn; the
     // response futures are tracked here until they resolve (merged) or the
     // turn ends — then they either fold into the settle or become the next
-    // turn themselves.
-    let mut injected: FuturesUnordered<BoxFuture<'static, (String, Result<Value, HarnessError>)>> =
-        FuturesUnordered::new();
+    // turn themselves. Each carries its admission seq and the steer
+    // message id so a refused injection redelivers naming exactly that
+    // steer, and a resolved one's boundary confirms it.
+    let mut injected: FuturesUnordered<
+        BoxFuture<'static, (u64, String, Option<String>, Result<Value, HarnessError>)>,
+    > = FuturesUnordered::new();
+    let mut steer_seq: u64 = 0;
     // Devin applies an injected prompt at the lead's next model call —
     // after its in-flight tools return — so a mid-turn steer's `Steered`
     // boundary is deferred until no lead tool is open (see the mid_turn
     // branch). Emitting it earlier would strand the running tool's
     // ToolResult in the post-steer segment: the engine drops stale tool
-    // echoes and the pre-steer chip would never resolve. Count of pending
-    // boundaries; flushed by the notification arm once tools go idle, or
-    // unconditionally at the turn's settle — dropped on interrupt/stop.
-    let mut pending_steer_boundaries: usize = 0;
+    // echoes and the pre-steer chip would never resolve. FIFO of
+    // (admission seq, steer message id); flushed by the notification arm
+    // once tools go idle, or unconditionally at the turn's settle —
+    // dropped on interrupt/stop.
+    let mut pending_steer_boundaries: VecDeque<(u64, Option<String>)> = VecDeque::new();
+    // Injected prompts Devin refused mid-turn: held by admission seq so
+    // they redeliver ahead of `queued_steers` at the next turn boundary,
+    // each still naming its steer for the confirming `Steered`.
+    let mut refused_steers: BTreeMap<u64, (String, Option<String>)> = BTreeMap::new();
     let mut steering_open = true;
     // Immediate steering for agents without a mid-turn steering extension:
     // a steer cancels the current generation (never a running tool — it
@@ -4777,6 +4788,7 @@ async fn run_session(session: Session) {
             turn.is_none()
                 && cancel_flush_deadline.is_none()
                 && queued_steers.is_empty()
+                && refused_steers.is_empty()
                 && steering_call.is_none()
                 && steer_backlog.is_empty()
                 && open_tools.is_empty()
@@ -4818,8 +4830,10 @@ async fn run_session(session: Session) {
                 }
                 prompt_settled_at = Some(tokio::time::Instant::now());
                 // The settled prompt's tool calls are over with it; a tool
-                // still reported open would read as an unowned turn.
-                open_tools.clear();
+                // still reported open would read as an unowned turn. The
+                // clear waits for the incoming drain below so each drained
+                // ToolResult removes its own id first — a deferred mid-turn
+                // boundary must not flush ahead of a result still queued.
                 starve_deadline = None;
                 prompt_stall_deadline = None;
                 if let Some(id) = current_prompt_id.take() {
@@ -4863,6 +4877,7 @@ async fn run_session(session: Session) {
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
+                                message_id: None,
                             },
                         )
                         .await
@@ -4897,6 +4912,13 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
+                // The settled prompt's tool calls are over with it; a tool
+                // still reported open would read as an unowned turn.
+                open_tools.clear();
+                // The merged turn's terminal outcome, computed once: the
+                // sidekick settle, the late-prompt promotion gate and the
+                // parent Done all read the same status/error.
+                let (status, mut error) = stop_outcome(&res, interrupted || stopping);
                 // Devin mid-turn prompts (`cognition.ai/midTurnPrompts`,
                 // verified against CLI 3000.14.30821): each injected
                 // `session/prompt` resolves with the merged turn — both
@@ -4909,7 +4931,8 @@ async fn run_session(session: Session) {
                     injected.clear();
                     // A merged steer whose turn died interrupted leaves no
                     // boundary (same as abandoned queued steers).
-                    pending_steer_boundaries = 0;
+                    pending_steer_boundaries.clear();
+                    refused_steers.clear();
                 } else {
                     // The steer merged into this turn: its deferred
                     // boundary is confirmed now — ahead of the turn's close,
@@ -4926,44 +4949,47 @@ async fn run_session(session: Session) {
                     let grace = tokio::time::Instant::now() + Duration::from_millis(500);
                     while !injected.is_empty() {
                         match tokio::time::timeout_at(grace, injected.next()).await {
-                            Ok(Some((text, Err(error)))) => {
+                            Ok(Some((seq, text, message_id, Err(error)))) => {
                                 tracing::debug!(
                                     target: "zuse_providers::acp",
                                     "mid-turn prompt refused at turn end (redelivering): {error}"
                                 );
-                                queued_steers.push_back(text);
+                                // Its boundary never confirmed this steer:
+                                // drop any still-pending one and hold the
+                                // text for ordered redelivery after Done.
+                                pending_steer_boundaries.retain(|(s, _)| *s != seq);
+                                refused_steers.insert(seq, (text, message_id));
                             }
-                            Ok(Some((_, Ok(_)))) | Ok(None) => {}
+                            Ok(Some((_, _, _, Ok(_)))) | Ok(None) => {}
                             Err(_) => break,
                         }
                     }
                     if !injected.is_empty() {
-                        let pending = std::mem::take(&mut injected);
-                        turn = Some(Box::pin(async move {
-                            let mut pending = pending;
-                            let mut last = Ok(json!({ "stopReason": "end_turn" }));
-                            while let Some((_text, res)) = pending.next().await {
-                                last = res;
-                            }
-                            last
-                        }));
-                        done_current = false;
-                        prompt_seq += 1;
-                        last_update_at = tokio::time::Instant::now();
-                        continue 'main;
+                        if status == DoneStatus::Completed {
+                            let pending = std::mem::take(&mut injected);
+                            turn = Some(Box::pin(async move {
+                                let mut pending = pending;
+                                let mut last = Ok(json!({ "stopReason": "end_turn" }));
+                                while let Some((_seq, _text, _id, res)) = pending.next().await {
+                                    last = res;
+                                }
+                                last
+                            }));
+                            done_current = false;
+                            prompt_seq += 1;
+                            last_update_at = tokio::time::Instant::now();
+                            continue 'main;
+                        }
+                        // The primary turn failed: its still-outstanding
+                        // injected prompts die with it — the turn's own
+                        // Done/error path runs as if they never existed.
+                        injected.clear();
                     }
                 }
                 // A sidekick chip opened this turn settles before the
                 // turn's untagged Done (Devin Fusion; empty for every
                 // other observer).
-                let settle_status = if interrupted || stopping {
-                    DoneStatus::Interrupted
-                } else if res.is_err() {
-                    DoneStatus::Errored
-                } else {
-                    DoneStatus::Completed
-                };
-                for ev in subagents.turn_settled(settle_status) {
+                for ev in subagents.turn_settled(status) {
                     if !send(&event_tx, ev).await {
                         break 'main;
                     }
@@ -4991,10 +5017,9 @@ async fn run_session(session: Session) {
                     && !interrupted
                     && !stopped
                     && res.is_ok()
-                    && !queued_steers.is_empty();
+                    && (!queued_steers.is_empty() || !refused_steers.is_empty());
                 preempt_pending = false;
                 if !preempted {
-                    let (status, mut error) = stop_outcome(&res, interrupted || stopped);
                     if !interrupted
                         && auth_method.is_some()
                         && res.as_ref().is_err_and(is_auth_required)
@@ -5022,14 +5047,33 @@ async fn run_session(session: Session) {
                         break 'main;
                     }
                 }
-                // Persistent session: queued steers become the next prompt —
-                // all of them at once, each confirmed by its own Steered
-                // boundary; otherwise stay alive for the mailbox — the caller
-                // owns teardown (mirrors the codex harness).
-                if !queued_steers.is_empty() {
-                    let mut texts = Vec::with_capacity(queued_steers.len() + 1);
+                // Persistent session: steers become the next prompt — all
+                // of them at once. Refused mid-turn injections go first, in
+                // admission order, each confirmed by a Steered naming its
+                // message id; queued steers follow with the oldest-entry
+                // confirmation. Otherwise stay alive for the mailbox — the
+                // caller owns teardown (mirrors the codex harness).
+                if !queued_steers.is_empty() || !refused_steers.is_empty() {
+                    let mut texts =
+                        Vec::with_capacity(queued_steers.len() + refused_steers.len() + 1);
                     if preempted && resend_unstarted && progress_seq != prompt_seq {
                         texts.push(std::mem::take(&mut current_prompt_text));
+                    }
+                    for (_seq, (text, message_id)) in std::mem::take(&mut refused_steers) {
+                        let (prev, next) = rotate(&mut assistant_message_id);
+                        if !send(
+                            &event_tx,
+                            AgentEvent::Steered {
+                                assistant_message_id: Some(prev),
+                                next_assistant_message_id: Some(next),
+                                message_id,
+                            },
+                        )
+                        .await
+                        {
+                            break 'main;
+                        }
+                        texts.push(text);
                     }
                     while let Some(text) = queued_steers.pop_front() {
                         let (prev, next) = rotate(&mut assistant_message_id);
@@ -5038,6 +5082,7 @@ async fn run_session(session: Session) {
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
+                                message_id: None,
                             },
                         )
                         .await
@@ -5171,7 +5216,7 @@ async fn run_session(session: Session) {
                     // A mid-turn steer's `Steered` boundary was deferred
                     // while lead tools were open; it lands now that they
                     // are idle (a synthesized sidekick chip does not count).
-                    if pending_steer_boundaries > 0
+                    if !pending_steer_boundaries.is_empty()
                         && !lead_tools_open(&open_tools)
                         && !flush_steer_boundaries(
                             &event_tx,
@@ -5324,6 +5369,7 @@ async fn run_session(session: Session) {
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
+                                message_id: None,
                             },
                         )
                         .await
@@ -5365,6 +5411,7 @@ async fn run_session(session: Session) {
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
+                            message_id: None,
                         },
                     )
                     .await
@@ -5400,20 +5447,24 @@ async fn run_session(session: Session) {
 
             // Devin mid-turn prompt responses: `Ok` means the steer merged
             // into the running turn (nothing to do); `Err` means the agent
-            // refused it — redeliver at the turn boundary unless the run is
-            // winding down.
+            // refused it — hold it for ordered redelivery at the turn
+            // boundary unless the run is winding down. A refusal whose
+            // boundary already went out confirms as a no-op there; one
+            // still pending loses its boundary so its ledger entry stays
+            // unconfirmed until the redelivery `Steered` names it.
             res = async { injected.next().await }, if !injected.is_empty() => {
                 match res {
-                    Some((text, Err(error))) => {
+                    Some((seq, text, message_id, Err(error))) => {
                         tracing::debug!(
                             target: "zuse_providers::acp",
                             "mid-turn prompt refused (redelivering): {error}"
                         );
                         if !(interrupted || stopping) {
-                            queued_steers.push_back(text);
+                            pending_steer_boundaries.retain(|(s, _)| *s != seq);
+                            refused_steers.insert(seq, (text, message_id));
                         }
                     }
-                    Some((_, Ok(_))) | None => {}
+                    Some((_, _, _, Ok(_))) | None => {}
                 }
             },
 
@@ -5425,15 +5476,24 @@ async fn run_session(session: Session) {
                 cancel_flush_deadline.unwrap_or_else(tokio::time::Instant::now)
             ), if cancel_flush_deadline.is_some() && !interrupted => {
                 cancel_flush_deadline = None;
-                if turn.is_none()
-                    && let Some(text) = queued_steers.pop_front()
-                {
+                // Refused mid-turn injections promote ahead of queued
+                // steers, each confirming its own ledger entry.
+                let promoted = if turn.is_none() {
+                    refused_steers
+                        .pop_first()
+                        .map(|(_seq, (text, message_id))| (text, message_id))
+                        .or_else(|| queued_steers.pop_front().map(|text| (text, None)))
+                } else {
+                    None
+                };
+                if let Some((text, steer_message_id)) = promoted {
                     let (prev, next) = rotate(&mut assistant_message_id);
                     if !send(
                         &event_tx,
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
+                            message_id: steer_message_id,
                         },
                     )
                     .await
@@ -5455,7 +5515,7 @@ async fn run_session(session: Session) {
                         text,
                         current_prompt_id.clone(),
                     ));
-                } else if turn.is_none() && !steering_open {
+                } else if turn.is_none() && !steering_open && refused_steers.is_empty() {
                     // Mailbox closed while the flush waited: nothing left.
                     break 'main;
                 }
@@ -5511,13 +5571,21 @@ async fn run_session(session: Session) {
                 {
                     break 'main;
                 }
-                if let Some(text) = queued_steers.pop_front() {
+                // Refused mid-turn injections were admitted first: they
+                // promote ahead of queued steers, each confirming its own
+                // ledger entry.
+                let promoted = refused_steers
+                    .pop_first()
+                    .map(|(_seq, (text, message_id))| (text, message_id))
+                    .or_else(|| queued_steers.pop_front().map(|text| (text, None)));
+                if let Some((text, steer_message_id)) = promoted {
                     let (prev, next) = rotate(&mut assistant_message_id);
                     if !send(
                         &event_tx,
                         AgentEvent::Steered {
                             assistant_message_id: Some(prev),
                             next_assistant_message_id: Some(next),
+                            message_id: steer_message_id,
                         },
                     )
                     .await
@@ -5539,7 +5607,7 @@ async fn run_session(session: Session) {
                         text,
                         current_prompt_id.clone(),
                     ));
-                } else if !steering_open {
+                } else if !steering_open && refused_steers.is_empty() {
                     // Mirror the normal turn-settled exit: mailbox closed
                     // and nothing left to run — the session is over.
                     break 'main;
@@ -5606,6 +5674,7 @@ async fn run_session(session: Session) {
                                 if !send(&event_tx, AgentEvent::Steered {
                                     assistant_message_id: Some(prev),
                                     next_assistant_message_id: Some(next),
+                                    message_id: None,
                                 }).await
                                     || !send(&event_tx, AgentEvent::Error { message: message.clone() }).await
                                     || !send(&event_tx, AgentEvent::Done {
@@ -5657,6 +5726,7 @@ async fn run_session(session: Session) {
                             AgentEvent::Steered {
                                 assistant_message_id: Some(prev),
                                 next_assistant_message_id: Some(next),
+                                message_id: msg.message_id.clone(),
                             },
                         )
                         .await
@@ -5702,11 +5772,17 @@ async fn run_session(session: Session) {
                         {
                             break 'main;
                         }
+                        steer_seq += 1;
+                        let seq = steer_seq;
+                        let message_id = msg.message_id.clone();
                         let fut =
                             prompt_turn(client.clone(), session_id.clone(), text.clone(), None);
-                        injected.push(Box::pin(async move {
-                            let res = fut.await;
-                            (text, res)
+                        injected.push(Box::pin({
+                            let message_id = message_id.clone();
+                            async move {
+                                let res = fut.await;
+                                (seq, text, message_id, res)
+                            }
                         }));
                         // Devin applies the injected prompt at the lead's
                         // next model call — after its in-flight tools
@@ -5716,7 +5792,7 @@ async fn run_session(session: Session) {
                         // post-steer segment (the engine drops stale tool
                         // echoes and the pre-steer chip would never
                         // resolve). Flush now only when nothing is open.
-                        pending_steer_boundaries += 1;
+                        pending_steer_boundaries.push_back((seq, message_id));
                         if !lead_tools_open(&open_tools)
                             && !flush_steer_boundaries(
                                 &event_tx,
@@ -5757,7 +5833,7 @@ async fn run_session(session: Session) {
                 }
                 None => {
                     steering_open = false;
-                    if turn.is_none() && queued_steers.is_empty() {
+                    if turn.is_none() && queued_steers.is_empty() && refused_steers.is_empty() {
                         break 'main;
                     }
                 }
@@ -5769,6 +5845,7 @@ async fn run_session(session: Session) {
             // waiting for this turn's end go with it.
             _ = turn_control.stop_requested(), if !interrupted => {
                 queued_steers.clear();
+                refused_steers.clear();
                 steer_backlog.clear();
                 // A steer still in flight goes with the turn too: its answer
                 // (promptRequired, once the turn is cancelled) would queue it
@@ -5779,6 +5856,7 @@ async fn run_session(session: Session) {
                 preempt_pending = false;
                 if turn.is_some() {
                     stopping = true;
+                    pending_steer_boundaries.clear();
                     if !preempt_sent {
                         client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
                     }
@@ -5787,7 +5865,7 @@ async fn run_session(session: Session) {
                     // host sees the turn over. A mid-turn steer's deferred
                     // boundary is abandoned like queued steers.
                     done_current = true;
-                    pending_steer_boundaries = 0;
+                    pending_steer_boundaries.clear();
                     for ev in subagents.turn_settled(DoneStatus::Interrupted) {
                         if !send(&event_tx, ev).await {
                             break 'main;

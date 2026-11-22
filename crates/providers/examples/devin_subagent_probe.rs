@@ -201,6 +201,11 @@ async fn main() {
         .next()
         .unwrap_or_else(|| "/tmp/devin-probe/repo".into());
     let scenario = args.next().unwrap_or_else(|| "all".into());
+    // Validate the selector before creating the directory or starting a run.
+    if !matches!(scenario.as_str(), "1" | "2" | "all") {
+        eprintln!("usage: devin_subagent_probe [cwd] [1|2|all]");
+        std::process::exit(2);
+    }
     std::fs::create_dir_all(&cwd).unwrap();
     let harness = AcpHarness::devin();
 

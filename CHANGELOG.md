@@ -18,7 +18,7 @@
 
 - Devin chats no longer show a stray "Waiting for 1 subagent" from the lead's own usage updates, and sidekick chips settle before the turn ends.
 - A steered Devin turn no longer leaves the running command's chip stuck before the steer.
-- Devin retries reopening a conversation another process still holds instead of starting over without its context.
+- Devin retries reopening a conversation another process still holds for about five seconds before starting a fresh session; if it stays locked, the new session starts without the earlier context.
 
 ## 0.27.3 - 2026-11-20
 

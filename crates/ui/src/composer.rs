@@ -13452,6 +13452,14 @@ impl Render for Composer {
             .filter(|chat| chat.archived)
             .cloned();
         if let Some(chat) = archived {
+            // This early return skips the mounted call below; with the
+            // setting off a game in play must still release here, or it
+            // would resume after re-enabling.
+            if !crate::settings::runner_game_enabled(cx) {
+                self.runner.update(cx, |runner, cx| {
+                    runner.mounted(false, false, window, cx);
+                });
+            }
             return self.render_archived_footer(&chat, cx);
         }
         if self.dictation_blur.is_none() {
