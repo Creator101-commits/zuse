@@ -11371,6 +11371,11 @@ impl Shell {
             .read(cx)
             .release_notes()
             .map(|(version, sections)| (version.to_owned(), sections.to_vec()));
+        let progress = update.read(cx).download_progress();
+        let downloading = matches!(flow, Flow::Downloading { .. });
+        let percent = progress.total.map(|total| {
+            ((u128::from(progress.downloaded) * 100 / u128::from(total.max(1))).min(100)) as u8
+        });
         let working = self.working_agent_count(cx);
 
         enum Tone {
@@ -11384,9 +11389,22 @@ impl Shell {
                 (Flow::Installed, _) => (None, "Restarting", Tone::Quiet, status),
                 (Flow::Downloading { .. }, _) => (
                     None,
-                    "Updating",
+                    "Downloading update",
                     Tone::Quiet,
-                    format!("{status} You can keep working.").into(),
+                    match (percent, progress.total) {
+                        (Some(100), _) => "Download complete · Preparing update…".into(),
+                        (Some(percent), Some(total)) => format!(
+                            "Downloading · {percent}% · {:.1} / {:.1} MB",
+                            progress.downloaded as f64 / 1_000_000.0,
+                            total as f64 / 1_000_000.0,
+                        )
+                        .into(),
+                        _ => format!(
+                            "Downloading · {:.1} MB received",
+                            progress.downloaded as f64 / 1_000_000.0,
+                        )
+                        .into(),
+                    },
                 ),
                 (_, StripAction::Restart) => (
                     Some(icons::RESTART),
@@ -11424,8 +11442,9 @@ impl Shell {
         };
         let interactive = action != StripAction::None;
         let focus_ring = theme.accent;
+        let download_hover = theme.glass_hover();
         // Icon only, the same size as the footer's other buttons, so update
-        // status never adds a row; the label and notes live in the hover card.
+        // status never adds a row; its label lives in the hover card.
         let _ = label;
         let glyph = glyph.unwrap_or(match flow {
             Flow::Installed => icons::RESTART,
@@ -11443,11 +11462,43 @@ impl Shell {
             Tone::Solid => theme.accent.opacity(0.18),
             _ => bg_hover,
         };
-        let lead = icon(glyph)
-            .size(px(14.0))
-            .flex_none()
-            .text_color(fg)
-            .into_any_element();
+        let lead = if downloading {
+            match percent {
+                Some(percent) => div()
+                    .relative()
+                    .size(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().absolute().child(crate::loaders::upload_progress_arc(
+                        percent,
+                        24.0,
+                        theme.accent.opacity(0.2),
+                        theme.accent,
+                    )))
+                    .child(
+                        div()
+                            .text_size(px(8.0))
+                            .text_color(theme.accent)
+                            .child(format!("{percent}%")),
+                    )
+                    .into_any_element(),
+                None => crate::loaders::mini_mono_spinner(
+                    "sidebar-update-progress",
+                    2.0,
+                    theme.accent,
+                    cx.entity_id(),
+                    cx,
+                )
+                .into_any_element(),
+            }
+        } else {
+            icon(glyph)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(fg)
+                .into_any_element()
+        };
         Some(
             div()
                 .id("sidebar-update")
@@ -11466,7 +11517,12 @@ impl Shell {
                 .rounded(px(8.0))
                 .border_1()
                 .border_color(gpui::transparent_black())
-                .bg(bg)
+                .bg(if downloading {
+                    gpui::transparent_black()
+                } else {
+                    bg
+                })
+                .when(downloading, |el| el.hover(move |el| el.bg(download_hover)))
                 .map(|el| match notes {
                     // Hoverable so the pointer can reach the card's link. It
                     // sits at the window's bottom edge, so gpui flips it up.
