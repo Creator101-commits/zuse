@@ -7315,7 +7315,7 @@ impl Composer {
             let state = self.state.read(cx);
             state
                 .selected_chat_row()
-                .filter(|_| !state.selected_chat_is_zot_coordinator())
+                .filter(|_| !state.selected_chat_is_zapper_coordinator())
                 .and_then(|chat| {
                     let summary = state.change_request_for_chat(chat)?;
                     (summary.state == zuse_protocol::ChangeRequestState::Open).then(|| {
@@ -14057,7 +14057,7 @@ impl Render for Composer {
         let permission = self
             .render_permission_control(&theme, cx)
             .opacity(beneath_voice);
-        let zapper_coordinator = self.state.read(cx).selected_chat_is_zot_coordinator();
+        let zapper_coordinator = self.state.read(cx).selected_chat_is_zapper_coordinator();
         let plan_chip = self
             .render_plan_chip(&theme, cx)
             .map(|chip| chip.opacity(beneath_voice));
