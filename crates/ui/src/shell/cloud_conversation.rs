@@ -106,6 +106,13 @@ pub(super) struct CloudConversation {
     /// A message's files asked for a wake while a sleep was still running.
     wake_after_sleep: bool,
     computer: computer::State,
+    /// The computer's conversations the server has registered, including
+    /// ones its computer has not installed yet.
+    registered: Vec<zuse_protocol::Chat>,
+    /// This conversation was opened before the server finished recording it.
+    pub(super) registering: bool,
+    /// The request that records it, retried until the server confirms.
+    registration: Option<(Value, Task<()>)>,
     _subscriptions: Vec<Subscription>,
 }
 impl gpui::EventEmitter<CloudConversationEvent> for CloudConversation {}
@@ -245,13 +252,18 @@ impl CloudConversation {
             }),
         ];
         let first_message = launch["firstMessage"].as_str().map(str::to_owned);
+        // A conversation added beside the computer's first one starts
+        // untitled, like a new chat tab in a local thread.
+        let added = config["initialSessionId"]
+            .as_str()
+            .is_some_and(|first| first != target.initial_session);
         let title = config["title"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned)
             .or_else(|| first_message.clone())
             .map(|title| zuse_protocol::file_mentions::mention_display_text(&title))
-            .unwrap_or_else(|| "Cloud chat".into());
+            .unwrap_or_else(|| if added { "New chat" } else { "Cloud chat" }.into());
         let initial_metadata = config.clone();
         let learned_harness = cloud_harness(&config);
         let remembered_harness = crate::settings::remembered_cloud_agent(&target.workspace, cx);
@@ -287,6 +299,9 @@ impl CloudConversation {
             sleep_command: None,
             wake_after_sleep: false,
             computer: computer::State::default(),
+            registered: Vec::new(),
+            registering: false,
+            registration: None,
             _subscriptions: subscriptions,
         };
         this.computer.metadata = initial_metadata;
@@ -597,8 +612,163 @@ impl CloudConversation {
         }
         button.into_any_element()
     }
-    pub(super) fn project_id(&self) -> Option<&str> {
-        self.config["projectId"].as_str()
+    /// The workspace's thread: every conversation on this computer belongs
+    /// to it, as every conversation tab of a local thread does.
+    pub(super) fn thread_id(&self) -> Option<String> {
+        self.computer.metadata["chatId"]
+            .as_str()
+            .or_else(|| self.config["chatId"].as_str())
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    }
+    /// This computer's active conversations, oldest first: the computer's
+    /// own thread members and those the server has registered.
+    pub(super) fn conversations(&self, cx: &App) -> Vec<zuse_protocol::Chat> {
+        let Some(thread) = self.thread_id() else {
+            return Vec::new();
+        };
+        let mut rows: Vec<zuse_protocol::Chat> = Vec::new();
+        for chat in self.state.read(cx).chats.iter().chain(&self.registered) {
+            if chat.thread_id.as_deref() == Some(thread.as_str())
+                && chat.parent_chat_id.is_none()
+                && !chat.archived
+                && !rows.iter().any(|row| row.id == chat.id)
+            {
+                rows.push(chat.clone());
+            }
+        }
+        rows.sort_by_key(|chat| chat.created_at);
+        rows
+    }
+    /// The chat a new conversation on this computer copies its agent and
+    /// model from: this conversation's own.
+    pub(super) fn template_chat(&self, cx: &App) -> Value {
+        let state = self.state.read(cx);
+        state
+            .chats
+            .iter()
+            .chain(&self.registered)
+            .find(|chat| chat.id == self.target.initial_session)
+            .and_then(|chat| serde_json::to_value(chat).ok())
+            .unwrap_or_else(|| json!({}))
+    }
+    /// The computer record for another conversation on this computer: this
+    /// one's, without this conversation's title.
+    pub(super) fn sibling_row(&self) -> Value {
+        let mut row = self.config.clone();
+        if let Some(row) = row.as_object_mut() {
+            row.remove("title");
+            row.remove("firstMessage");
+        }
+        row
+    }
+    /// Opened at once, before the server has recorded this conversation:
+    /// sends and history reads wait until `request` (the `CloudRpc` that
+    /// records it) is confirmed.
+    pub(super) fn start_registering(
+        &mut self,
+        chat: zuse_protocol::Chat,
+        request: Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.registering = true;
+        self.remember_conversation(chat.clone());
+        self.state.update(cx, |state, cx| {
+            state.pending_cloud_conversation = Some(chat.clone());
+            if !state.chats.iter().any(|row| row.id == chat.id) {
+                state.chats.push(chat);
+            }
+            cx.notify();
+        });
+        self.composer
+            .update(cx, |composer, cx| composer.set_cloud_registering(true, cx));
+        self.register(request, std::time::Duration::ZERO, cx);
+    }
+    /// Send the request that records this conversation, after `delay`. A
+    /// failure shows and is retried with the same request (so the same
+    /// conversation), backing off to half a minute, while the tab is open.
+    fn register(&mut self, request: Value, delay: std::time::Duration, cx: &mut Context<Self>) {
+        let controller = self.target.controller.clone();
+        let session = self.target.initial_session.clone();
+        let started = std::time::Instant::now();
+        let params = request.clone();
+        let task = cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let result = async {
+                let mut reply = controller
+                    .client()
+                    .subscribe_scoped(methods::CLOUD_RPC, params)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let frame = reply
+                    .recv()
+                    .await
+                    .ok_or_else(|| "The new chat was not confirmed.".to_owned())?;
+                if let Some(error) = frame["err"].as_str() {
+                    return Err(error.to_owned());
+                }
+                serde_json::from_value::<zuse_protocol::Chat>(frame["ok"].clone())
+                    .ok()
+                    .filter(|chat| chat.id == session)
+                    .map(|_| ())
+                    .ok_or_else(|| "The new chat was not confirmed.".to_owned())
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                tracing::info!(workspace = %this.target.workspace,
+                    ms = started.elapsed().as_millis() as u64, ok = result.is_ok(),
+                    "Cloud conversation recorded");
+                this.registered(result, delay, cx)
+            });
+        });
+        self.registration = Some((request, task));
+    }
+    /// The server recorded this conversation, or the attempt failed.
+    fn registered(
+        &mut self,
+        result: Result<(), String>,
+        delay: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.registering {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.registering = false;
+                self.registration = None;
+                self.error = None;
+                self.composer
+                    .update(cx, |composer, cx| composer.set_cloud_registering(false, cx));
+                if std::mem::take(&mut self.read_again) {
+                    self.refresh_history(cx);
+                }
+            }
+            Err(error) => {
+                let message =
+                    format!("This chat isn't open on its computer yet: {error} Retrying…");
+                self.error = Some(message.clone());
+                self.composer
+                    .update(cx, |composer, cx| composer.show_error(message, cx));
+                if let Some((request, _)) = self.registration.take() {
+                    let next = (delay * 2).clamp(
+                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(30),
+                    );
+                    self.register(request, next, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+    /// Learn a conversation just added to this computer before the server's
+    /// list is read again.
+    pub(super) fn remember_conversation(&mut self, chat: zuse_protocol::Chat) {
+        if !self.registered.iter().any(|row| row.id == chat.id) {
+            self.registered.push(chat);
+        }
     }
     fn params(&self) -> Value {
         json!({"workspaceId":self.target.workspace,"sessionId":self.target.initial_session,
@@ -723,6 +893,11 @@ impl CloudConversation {
         if !self.authorized {
             return;
         }
+        if self.registering {
+            // Its history exists once the server has recorded it.
+            self.read_again = true;
+            return;
+        }
         if self.history_read.is_some() {
             self.read_again = true;
             return;
@@ -835,6 +1010,23 @@ impl CloudConversation {
             self.learn_harness(cx);
         }
         self.config["queueRunSelectionVersion"] = value["queueRunSelectionVersion"].clone();
+        if let Ok(registered) = serde_json::from_value::<Vec<zuse_protocol::Chat>>(
+            value["registeredConversations"].clone(),
+        ) {
+            self.registered = registered;
+        }
+        // Registered here but not yet on the computer: keep its row while
+        // the computer's chat list catches up, or attaching drops it.
+        // The row lives until the computer lists the conversation (then
+        // `apply_chats` drops it) or this tab closes with its state.
+        let registered_only = value["source"] == "admission"
+            && value["session"].is_object()
+            && value["admission"].is_null();
+        if registered_only {
+            self.state.update(cx, |state, _| {
+                state.pending_cloud_conversation = Some(head.chat.clone());
+            });
+        }
         // Never inject saved pages into the live watch's delta baseline.
         self.project_saved_history(&head, cx);
         self.composer.update(cx, |composer, cx| {
