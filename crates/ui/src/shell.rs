@@ -29,6 +29,7 @@ use gpui_tokio::Tokio;
 use zuse_engine::InstanceLock;
 #[cfg(test)]
 use zuse_protocol::HarnessId;
+use zuse_protocol::presentation::zapper_panel;
 use zuse_protocol::{AuthState, WorkspaceScope};
 use zuse_rpc::methods;
 
@@ -114,10 +115,11 @@ mod thread_search;
 mod usage_dashboard;
 mod workspace_layout;
 mod workspace_storage;
-mod zot_avatar;
-mod zot_forms;
-mod zots;
+mod zapper_avatar;
+mod zapper_forms;
+mod zappers;
 use side_chats::SideChatTab;
+mod cloud_activity;
 mod cloud_conversation;
 mod cloud_info;
 mod cloud_sidebar;
@@ -558,20 +560,10 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    /// Grouped by where things run: agents on this computer, the cloud
-    /// computer, what it all costs, then the app itself. See [`Self::heading`].
+    /// App settings first, followed by plan, local agents and cloud computer.
+    /// See [`Self::heading`].
     pub const ALL: [SettingsSection; 19] = [
         SettingsSection::General,
-        SettingsSection::Harnesses,
-        SettingsSection::Defaults,
-        SettingsSection::Plugins,
-        SettingsSection::Cloud,
-        SettingsSection::CloudRepositories,
-        SettingsSection::CloudEnvironments,
-        SettingsSection::CloudMachine,
-        SettingsSection::CloudAgents,
-        SettingsSection::Usage,
-        SettingsSection::Billing,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Voice,
@@ -580,15 +572,30 @@ impl SettingsSection {
         SettingsSection::Devices,
         SettingsSection::Appshots,
         SettingsSection::Archived,
+        SettingsSection::Usage,
+        SettingsSection::Billing,
+        SettingsSection::Harnesses,
+        SettingsSection::Defaults,
+        SettingsSection::Plugins,
+        SettingsSection::Cloud,
+        SettingsSection::CloudRepositories,
+        SettingsSection::CloudEnvironments,
+        SettingsSection::CloudMachine,
+        SettingsSection::CloudAgents,
     ];
 
-    /// The sidebar heading this section opens, if it starts a group.
-    fn heading(self) -> Option<&'static str> {
+    /// The sidebar heading this section opens for `access`, if it starts a
+    /// group. Plan & usage opens on Usage, or on Billing when Usage (Cloud
+    /// compute, subscribers only) is not listed.
+    fn heading(self, access: CloudAccess) -> Option<&'static str> {
         match self {
             SettingsSection::Harnesses => Some("Local agents"),
             SettingsSection::Cloud => Some("Cloud computer"),
             SettingsSection::Usage => Some("Plan & usage"),
-            SettingsSection::Appearance => Some("App"),
+            SettingsSection::Billing if !SettingsSection::Usage.visible_in_nav(access) => {
+                Some("Plan & usage")
+            }
+            SettingsSection::General => Some("App"),
             _ => None,
         }
     }
@@ -602,6 +609,7 @@ impl SettingsSection {
             SettingsSection::CloudEnvironments => CloudView::Environments,
             SettingsSection::CloudMachine => CloudView::Machine,
             SettingsSection::CloudAgents => CloudView::Agents,
+            SettingsSection::Usage => CloudView::Compute,
             SettingsSection::Billing => CloudView::Billing,
             _ => return None,
         })
@@ -631,12 +639,13 @@ impl SettingsSection {
     }
 
     /// Whether the Settings menu lists this section for `access`. The Cloud
-    /// computer group needs an active Cloud subscription; Billing needs a
-    /// signed-in account (so it can sell one). Local agents, Usage (model
-    /// usage) and App sections are always listed.
+    /// computer group and Usage (Cloud compute) need an active Cloud
+    /// subscription; Billing needs a signed-in account (so it can sell one).
+    /// Local agents and App sections are always listed. Local model usage
+    /// lives in the sidebar footer's usage menu, not here.
     fn visible_in_nav(self, access: CloudAccess) -> bool {
         self.offered_by_build()
-            && (!self.cloud_computer() || access.subscribed())
+            && (!self.needs_subscription() || access.subscribed())
             && (self != Self::Billing || access.signed_in())
     }
 
@@ -646,7 +655,7 @@ impl SettingsSection {
     fn offered_by_build(self) -> bool {
         self != Self::Agents
             && (self != Self::Appshots || crate::appshots::is_desktop())
-            && (!(self.cloud_computer() || matches!(self, Self::Billing | Self::Plugins))
+            && (!(self.needs_subscription() || matches!(self, Self::Billing | Self::Plugins))
                 || zuse_viewport::cloud_gate::enabled())
             && (self != Self::Devices || zuse_viewport::cloud_gate::remote_enabled())
     }
@@ -657,6 +666,12 @@ impl SettingsSection {
     /// section the menu hides is not reachable.
     fn reachable(self, access: CloudAccess) -> bool {
         self.visible_in_nav(access) || (!access.settled() && self.offered_by_build())
+    }
+
+    /// Sections only a Cloud subscriber sees: the Cloud computer group and
+    /// Usage, which shows Cloud compute.
+    fn needs_subscription(self) -> bool {
+        self.cloud_computer() || self == Self::Usage
     }
 
     /// The Cloud computer group: cloud computers, their repositories,
@@ -682,7 +697,7 @@ impl SettingsSection {
         let section = self.canonical();
         if section.reachable(access) {
             section
-        } else if section.cloud_computer() && Self::Billing.reachable(access) {
+        } else if section.needs_subscription() && Self::Billing.reachable(access) {
             Self::Billing
         } else {
             Self::General
@@ -812,8 +827,8 @@ pub enum Route {
     Plugins,
     Archives,
     Usage,
-    /// The New Zot page; [`zots::ZotUi`] holds the form.
-    Zot,
+    /// The New Zapper page; [`zappers::ZapperUi`] holds the form.
+    Zapper,
     Settings(SettingsSection),
 }
 
@@ -1011,7 +1026,7 @@ pub enum NavEntry {
     Settings(SettingsSection),
     Plugins,
     Archives(String),
-    NewZot,
+    NewZapper,
     Usage {
         project: Option<String>,
         project_scope: bool,
@@ -1338,8 +1353,8 @@ const GITHUB_REPO_URL: &str = "https://github.com/opcodehq/zuse";
 /// hero reaches below the composer, giving its lower mask room to dissolve
 /// gradually into the otherwise empty lower canvas.
 const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
-const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.72;
-const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 760.0;
+const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.91;
+const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 960.0;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -1606,7 +1621,7 @@ fn bottom_stack_measurement_matches(
     measured_has_composer == expected_has_composer
 }
 
-fn new_thread_background_opacity(is_frost: bool) -> f32 {
+pub(crate) fn new_thread_background_opacity(is_frost: bool) -> f32 {
     if is_frost {
         NEW_THREAD_BACKGROUND_FROSTED_OPACITY
     } else {
@@ -1619,14 +1634,17 @@ pub(crate) fn new_thread_background_height(viewport_height: f32) -> f32 {
         .min(NEW_THREAD_BACKGROUND_MAX_HEIGHT)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_thread_background(
     artwork: Option<std::sync::Arc<gpui::RenderImage>>,
+    frame: crate::new_thread_background_mask::AnimationFrame,
     adjustment: settings::NewThreadBackgroundAdjustment,
     viewport_height: f32,
     hero_width: f32,
     composer_bounds: crate::new_thread_background_mask::SurfaceBounds,
     dissolve: f32,
     opacity: f32,
+    look: settings::WallpaperLook,
 ) -> AnyElement {
     let Some(artwork) = artwork else {
         return Empty.into_any_element();
@@ -1643,40 +1661,14 @@ fn new_thread_background(
         .w(px(hero_width))
         .h(px(hero_height))
         .overflow_hidden()
-        .opacity((1.0 - dissolve) * opacity)
-        // Alpha resolves into the real canvas, including translucent themes;
-        // no theme-colored overlay bleaches or darkens the source pixels.
-        .children([false, true].into_iter().map(|cutout| {
-            let artwork = artwork.clone();
-            let composer_bounds = composer_bounds.clone();
-            div()
-                .absolute()
-                .inset_0()
-                .opacity(if cutout {
-                    1.0
-                } else {
-                    crate::new_thread_background_mask::CUTOUT_REVEAL_OPACITY
-                })
-                .child(
-                    gpui::canvas(
-                        |_, _, _| {},
-                        move |bounds, _, window, _cx| {
-                            if let Some(composer) = composer_bounds.get() {
-                                crate::new_thread_background_mask::paint(
-                                    artwork.clone(),
-                                    bounds,
-                                    composer,
-                                    adjustment,
-                                    cutout,
-                                    window,
-                                );
-                            }
-                        },
-                    )
-                    .absolute()
-                    .inset_0(),
-                )
-        }))
+        .child(crate::new_thread_background_mask::artwork(
+            artwork,
+            adjustment,
+            look,
+            composer_bounds,
+            (1.0 - dissolve) * opacity,
+            Some(frame),
+        ))
         .into_any_element()
 }
 
@@ -2197,11 +2189,13 @@ fn dismiss_update_prompt(cx: &mut App) {
 pub struct Shell {
     update_restart: Option<update_restart::RestartPlan>,
     update_restart_task: Option<Task<()>>,
-    zot_ui: zots::ZotUi,
+    zapper_ui: zappers::ZapperUi,
     state: Entity<AppState>,
     cloud_conversation: Option<Entity<cloud_conversation::CloudConversation>>,
     cloud_conversation_events: Option<Subscription>,
     cloud_tabs: cloud_tabs::CloudTabs,
+    /// Live status reports from every open cloud conversation.
+    cloud_activity: cloud_activity::CloudActivity,
     desktop_import: Entity<crate::desktop_import::Onboarding>,
     onboarding: Entity<crate::onboarding::Wizard>,
     /// A chat onboarding asked to open before its row synced in.
@@ -2346,8 +2340,6 @@ pub struct Shell {
     cloud_page_sub: Option<Subscription>,
     /// The first cloud chat onboarding opened, for its guide.
     cloud_first_chat: Option<settings_cloud::FirstCloudChat>,
-    /// Settings → Usage shows Cloud compute instead of model usage.
-    usage_settings_compute: bool,
     /// The account was last seen signed in without a subscription, so the
     /// next subscribed answer is a fresh purchase (see `follow_cloud_access`).
     cloud_seen_unsubscribed: bool,
@@ -2759,6 +2751,12 @@ impl Shell {
                     organization,
                     launch,
                 } => {
+                    // The tab's pending row goes with the launch: the sidebar
+                    // lists the created chat from here on, without a gap.
+                    this.state.update(cx, |state, cx| {
+                        state.note_created_cloud_workspace(workspace, launch, cx);
+                        cx.notify();
+                    });
                     let controller = this
                         .state
                         .read(cx)
@@ -2813,6 +2811,17 @@ impl Shell {
                     // Route observation drives the dock once selection commits.
                     cx.notify();
                 }
+                ComposerEvent::OpenSubagent {
+                    chat_id,
+                    doc_id,
+                    title,
+                } => this.add_subagent_surface(
+                    chat_id.clone(),
+                    doc_id.clone(),
+                    title.clone(),
+                    false,
+                    cx,
+                ),
                 ComposerEvent::Sent {
                     chat_id,
                     message_id,
@@ -2870,7 +2879,7 @@ impl Shell {
         let route = match open_route.as_deref() {
             Some("pull-requests") => Route::PullRequests,
             Some("plugins") => Route::Plugins,
-            Some("zots/new") => Route::Zot,
+            Some("zappers/new") => Route::Zapper,
             Some(route) if route == "settings" || route.starts_with("settings/") => {
                 match settings_open_route(
                     route,
@@ -2919,7 +2928,7 @@ impl Shell {
             Route::PullRequests => NavEntry::PullRequests,
             Route::Plugins => NavEntry::Plugins,
             Route::Archives => NavEntry::Archives(String::new()),
-            Route::Zot => NavEntry::NewZot,
+            Route::Zapper => NavEntry::NewZapper,
             Route::Usage => NavEntry::Usage {
                 project: None,
                 project_scope: false,
@@ -2942,10 +2951,11 @@ impl Shell {
             cloud_conversation: None,
             cloud_conversation_events: None,
             cloud_tabs: Default::default(),
+            cloud_activity: Default::default(),
             desktop_import,
             onboarding,
             pending_open_chat: None,
-            zot_ui: zots::ZotUi::default(),
+            zapper_ui: zappers::ZapperUi::default(),
             sidebar_pane,
             sidebar_controls,
             workspace_sidebar_focus: cx.focus_handle().tab_stop(true),
@@ -3032,7 +3042,6 @@ impl Shell {
             cloud_billing_page: None,
             cloud_page_sub: None,
             cloud_first_chat: None,
-            usage_settings_compute: false,
             cloud_seen_unsubscribed: false,
             devices_page: None,
             archived_page: None,
@@ -3041,7 +3050,7 @@ impl Shell {
             usage_tasks: Default::default(),
             usage_project: None,
             usage_project_scope: false,
-            usage_pending: route == Route::Settings(SettingsSection::Usage),
+            usage_pending: false,
             project_archives: std::collections::HashMap::new(),
             project_archive_events: std::collections::HashMap::new(),
             appearance_page: None,
@@ -3849,9 +3858,9 @@ impl Shell {
     /// Open surface tabs (a subagent chip's transcript) take the side over
     /// until they close, so the titlebar's surface strip always lists what
     /// the pane below it shows.
-    fn zot_panel_on_right(&self, cx: &App) -> bool {
+    fn zapper_panel_on_right(&self, cx: &App) -> bool {
         matches!(self.route, Route::Chat)
-            && self.selected_zot(cx).is_some()
+            && self.selected_zapper(cx).is_some()
             && !self.right_pane_shown(cx)
     }
 
@@ -3926,14 +3935,14 @@ impl Shell {
     /// it opens the surface host beside it, and it never hides the explorer —
     /// only the explorer's own toggle undocks that portion.
     fn toggle_right_pane(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.route, Route::Chat) && self.selected_zot(cx).is_some() {
+        if matches!(self.route, Route::Chat) && self.selected_zapper(cx).is_some() {
             // Surface tabs (a subagent opened from a chip) stand in for the
             // Zapper panel; the toggle closes them back to it first.
             if self.right_pane_open(cx) {
                 self.set_surfaces_open(false, cx);
                 return;
             }
-            self.zot_ui.panel_hidden = !self.zot_ui.panel_hidden;
+            self.zapper_ui.panel_hidden = !self.zapper_ui.panel_hidden;
             cx.notify();
             return;
         }
@@ -4295,6 +4304,76 @@ impl Shell {
         }
     }
 
+    /// Whether the focused chat is a Zapper coordinator, whose right side is
+    /// the Zapper panel.
+    fn zapper_hosts_surfaces(&self, cx: &App) -> bool {
+        matches!(self.route, Route::Chat) && self.selected_zapper(cx).is_some()
+    }
+
+    /// The Zapper panel page that hosts `surface` in a coordinator chat:
+    /// its subagents and diffs open as tabs in the panel's own strip, beside
+    /// Overview and the issues, instead of in the surface host.
+    fn zapper_page_for(&self, surface: RightSurface, cx: &App) -> Option<zapper_panel::ZapperPage> {
+        if !self.zapper_hosts_surfaces(cx) {
+            return None;
+        }
+        match surface {
+            RightSurface::Subagent(id) => Some(zapper_panel::ZapperPage::Subagent(id)),
+            RightSurface::Diff(id) => Some(zapper_panel::ZapperPage::Diff(id)),
+            _ => None,
+        }
+    }
+
+    /// Add a new surface to this chat's strip and show it. Every opener (a
+    /// subagent chip, a workflow agent, a diff) goes through here.
+    fn add_right_tab(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        if self.zapper_page_for(surface, cx).is_none() {
+            let key = self.panel_key(cx);
+            self.right_tabs.entry(key).or_default().push(surface);
+        }
+        self.show_right_surface(surface, cx);
+    }
+
+    /// Show an open surface: focus its tab in the surface host, opening the
+    /// host, or in a Zapper coordinator chat its tab in the Zapper panel.
+    fn show_right_surface(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
+        if let Some(page) = self.zapper_page_for(surface, cx) {
+            if let RightSurface::Subagent(id) = surface
+                && let Some(tab) = self.subagent_tabs.get(&id)
+            {
+                let doc_id = tab.doc_id.clone();
+                self.state
+                    .update(cx, |state, cx| state.focus_subagent_sync(&doc_id, cx));
+            }
+            self.show_in_zapper_panel(page, cx);
+            return;
+        }
+        self.set_surfaces_open(true, cx);
+        self.set_right_active(surface, cx);
+    }
+
+    /// Drop what a closed Zapper panel tab held: a subagent's transcript
+    /// (and its doc watch) unless a surface strip still lists it, a diff and
+    /// its watch.
+    fn release_zapper_page(&mut self, page: &zapper_panel::ZapperPage, cx: &mut Context<Self>) {
+        match *page {
+            zapper_panel::ZapperPage::Subagent(id) => {
+                let surface = RightSurface::Subagent(id);
+                if !self.right_tabs.values().any(|tabs| tabs.contains(&surface))
+                    && let Some(tab) = self.subagent_tabs.remove(&id)
+                {
+                    self.state
+                        .update(cx, |s, _| s.unwatch_subagent_doc(&tab.doc_id));
+                }
+            }
+            zapper_panel::ZapperPage::Diff(id) => {
+                self.diffs.remove(&id);
+                self.diff_subs.remove(&id);
+            }
+            _ => {}
+        }
+    }
+
     fn set_right_active(&mut self, surface: RightSurface, cx: &mut Context<Self>) {
         if let RightSurface::Subagent(id) = surface
             && let Some(tab) = self.subagent_tabs.get(&id)
@@ -4502,9 +4581,16 @@ impl Shell {
         let Some(source) = activation.source_session.clone() else {
             return LinkOutcome::Rejected;
         };
+        // A cloud chat's selection lives in its own conversation state; the
+        // shell's state has no chat selected while one is open.
         let from_main = !self.active_chat.is_empty()
             && source == self.active_chat
-            && self.state.read(cx).selected_chat.as_deref() == Some(self.active_chat.as_str());
+            && self
+                .conversation_state(cx)
+                .read(cx)
+                .selected_chat
+                .as_deref()
+                == Some(self.active_chat.as_str());
         if !from_main && !self.side_chat_open_here(&source, cx) {
             return LinkOutcome::Rejected;
         }
@@ -4985,12 +5071,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let id = self.subscribe_diff(changes, window, cx);
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Diff(id));
-        self.set_right_active(RightSurface::Diff(id), cx);
+        self.add_right_tab(RightSurface::Diff(id), cx);
     }
 
     /// Keep `changes` under a fresh diff handle (a key of [`Self::diffs`]),
@@ -5157,7 +5238,6 @@ impl Shell {
         title: String,
         cx: &mut Context<Self>,
     ) {
-        self.set_surfaces_open(true, cx);
         let doc_id = format!("workflow-agent:{row_id}:{index}");
         if self.focus_open_subagent_tab(&doc_id, cx) {
             return;
@@ -5217,12 +5297,7 @@ impl Shell {
                 _feed: Some(feed),
             },
         );
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Subagent(id));
-        self.set_right_active(RightSurface::Subagent(id), cx);
+        self.add_right_tab(RightSurface::Subagent(id), cx);
     }
 
     /// Focus the tab already showing `doc_id`, if any. The tab must sit in
@@ -5238,6 +5313,10 @@ impl Shell {
             return false;
         };
         let surface = RightSurface::Subagent(id);
+        if self.zapper_page_for(surface, cx).is_some() {
+            self.show_right_surface(surface, cx);
+            return true;
+        }
         let key = self.panel_key(cx);
         if !self
             .right_tabs
@@ -5251,7 +5330,7 @@ impl Shell {
             }
             self.right_tabs.entry(key).or_default().push(surface);
         }
-        self.set_right_active(surface, cx);
+        self.show_right_surface(surface, cx);
         true
     }
 
@@ -5267,9 +5346,6 @@ impl Shell {
         frozen: bool,
         cx: &mut Context<Self>,
     ) {
-        // The chip lives in the conversation column — the pane it opens into
-        // may still be closed.
-        self.set_surfaces_open(true, cx);
         if self.focus_open_subagent_tab(&doc_id, cx) {
             return;
         }
@@ -5326,12 +5402,7 @@ impl Shell {
                 _feed: None,
             },
         );
-        let key = self.panel_key(cx);
-        self.right_tabs
-            .entry(key)
-            .or_default()
-            .push(RightSurface::Subagent(id));
-        self.set_right_active(RightSurface::Subagent(id), cx);
+        self.add_right_tab(RightSurface::Subagent(id), cx);
     }
 
     /// Fetch a finished subagent's frozen transcript blob
@@ -5953,7 +6024,7 @@ impl Shell {
             Route::Plugins => (Screen::Plugins, None),
             Route::Archives => (Screen::Archives, None),
             Route::Usage => (Screen::Usage, None),
-            Route::Zot => (Screen::Zot, None),
+            Route::Zapper => (Screen::Zapper, None),
             Route::Settings(section) => (
                 Screen::Settings,
                 Some(match section.canonical() {
@@ -6011,21 +6082,16 @@ impl Shell {
                 page.update(cx, |page, cx| page.on_hidden(cx));
             }
         }
-        // The model-usage dashboard shows on the Usage route and on
-        // Settings → Usage → Models; it loads on entry and stops on exit.
-        let shows_usage = |route: Route, compute: bool| {
-            matches!(route, Route::Usage)
-                || (route == Route::Settings(SettingsSection::Usage) && !compute)
-        };
-        let compute = self.usage_settings_compute;
-        if shows_usage(self.route, compute) && !shows_usage(route, compute) {
+        // The model-usage dashboard shows on the Usage route only; it loads
+        // on entry and stops on exit.
+        let shows_usage = matches!(self.route, Route::Usage);
+        let will_show_usage = matches!(route, Route::Usage);
+        if shows_usage && !will_show_usage {
             if let Some(dashboard) = self.usage_dashboard.clone() {
                 dashboard.update(cx, |dashboard, cx| dashboard.hide(cx));
             }
         }
-        if shows_usage(route, compute) && !shows_usage(self.route, compute)
-            || matches!(route, Route::Usage) && !matches!(self.route, Route::Usage)
-        {
+        if will_show_usage && !shows_usage {
             self.usage_pending = true;
         }
         self.route = route;
@@ -6033,6 +6099,12 @@ impl Shell {
             if let Some(page) = self.pull_requests_page.as_ref().cloned() {
                 page.update(cx, |page, cx| page.on_visible(cx));
             }
+        }
+        // Back on the chat: a cloud turn that finished meanwhile is seen.
+        if matches!(self.route, Route::Chat)
+            && let Some(view) = self.cloud_conversation.clone()
+        {
+            self.mark_cloud_conversation_seen(&view, cx);
         }
     }
 
@@ -6504,7 +6576,7 @@ impl Shell {
                 self.pending_pull_request = Some((url, device));
             }
             NavEntry::Plugins => self.set_route(Route::Plugins, cx),
-            NavEntry::NewZot => self.show_new_zot(cx),
+            NavEntry::NewZapper => self.show_new_zapper(cx),
             NavEntry::Usage {
                 project,
                 project_scope,
@@ -6584,13 +6656,13 @@ impl Shell {
             | SettingsSection::CloudEnvironments
             | SettingsSection::CloudMachine
             | SettingsSection::CloudAgents
+            | SettingsSection::Usage
             | SettingsSection::Billing => {
                 let view = section.cloud_view().unwrap_or_default();
                 let page = self.ensure_cloud_page(window, cx);
                 page.update(cx, |page, cx| page.set_view(view, cx));
                 page.into_any_element()
             }
-            SettingsSection::Usage => self.usage_settings(window, cx),
             SettingsSection::Devices => {
                 if self.devices_page.is_none() {
                     self.devices_page = Some(self.create_devices_page(cx));
@@ -7409,14 +7481,14 @@ impl Shell {
         };
         // Take a Zapper thread off its Zapper first, so the Zapper stops
         // counting it and sending it work.
-        if let Some(zot) = self.zot_of_thread(&chat_id, cx) {
-            self.send_zot_command(
-                zot.id.clone(),
-                Some(zot.revision),
-                zuse_protocol::zots::ZotAction::ReleaseWorker {
+        if let Some(zapper) = self.zapper_of_thread(&chat_id, cx) {
+            self.send_zapper_command(
+                zapper.id.clone(),
+                Some(zapper.revision),
+                zuse_protocol::zappers::ZapperAction::ReleaseWorker {
                     chat_id: chat_id.clone(),
                 },
-                zot_forms::ZotAfter::Stay,
+                zapper_forms::ZapperAfter::Stay,
                 cx,
             );
         }
@@ -8334,7 +8406,7 @@ impl Shell {
                 .titlebar_drag_region("plugins-titlebar", div().size_full(), cx)
                 .into_any_element();
         }
-        if matches!(self.route, Route::Archives | Route::Usage | Route::Zot) {
+        if matches!(self.route, Route::Archives | Route::Usage | Route::Zapper) {
             return self
                 .titlebar_drag_region("plugins-titlebar", div().size_full(), cx)
                 .into_any_element();
@@ -9200,7 +9272,7 @@ impl Shell {
                                 .into_iter()
                                 .filter(|item| item.visible_in_nav(access))
                                 .flat_map(|item| {
-                                    let heading = item.heading().map(|heading| {
+                                    let heading = item.heading(access).map(|heading| {
                                         if compact {
                                             div()
                                                 .mx(px(8.))
@@ -9342,7 +9414,7 @@ impl Shell {
         let selected = selected
             && !matches!(
                 self.route,
-                Route::Plugins | Route::Archives | Route::Usage | Route::Zot
+                Route::Plugins | Route::Archives | Route::Usage | Route::Zapper
             );
         // Activity, not position: status is a small colored
         // word + glyph in the row's top-right corner — Working animates the
@@ -9406,12 +9478,12 @@ impl Shell {
         let cloud_locked = cloud
             && (self.state.read(cx).cloud_organization_id().is_some()
                 || id[CLOUD_ROW_PREFIX.len()..].starts_with(cloud_sidebar::PENDING_LAUNCH_PREFIX));
-        // Cloud rows wear a small cloud beside their age, green while the
-        // computer is up (the catalog's own state; nothing is polled).
+        // Cloud rows wear a small cloud beside their age, green only while
+        // the computer is up. An open conversation follows the computer's
+        // live state; otherwise the account list's row decides.
         let cloud_online = id
             .strip_prefix(CLOUD_ROW_PREFIX)
-            .and_then(|workspace| self.state.read(cx).cloud_sidebar_workspace(workspace))
-            .is_some_and(|row| chat_peek::cloud_machine(row["state"].as_str()).1);
+            .is_some_and(|workspace| self.cloud_row_online(workspace, cx));
         let corner_hovered = !preview
             && !cloud_locked
             && !(cloud && archived)
@@ -11032,7 +11104,7 @@ impl Shell {
             // (No titlebar strip: the unified window titlebar spans the whole
             // window above this column.)
             .child(self.render_sidebar_nav(theme, cx))
-            .child(self.render_zot_sidebar(theme, cx))
+            .child(self.render_zapper_sidebar(theme, cx))
             .child(self.render_sidebar_modes(theme, cx))
             .children(self.render_cloud_sidebar_status(theme, cx))
             .child(filter_row)
@@ -11316,6 +11388,11 @@ impl Shell {
             .read(cx)
             .release_notes()
             .map(|(version, sections)| (version.to_owned(), sections.to_vec()));
+        let progress = update.read(cx).download_progress();
+        let downloading = matches!(flow, Flow::Downloading { .. });
+        let percent = progress.total.map(|total| {
+            ((u128::from(progress.downloaded) * 100 / u128::from(total.max(1))).min(100)) as u8
+        });
         let working = self.working_agent_count(cx);
 
         enum Tone {
@@ -11329,9 +11406,22 @@ impl Shell {
                 (Flow::Installed, _) => (None, "Restarting", Tone::Quiet, status),
                 (Flow::Downloading { .. }, _) => (
                     None,
-                    "Updating",
+                    "Downloading update",
                     Tone::Quiet,
-                    format!("{status} You can keep working.").into(),
+                    match (percent, progress.total) {
+                        (Some(100), _) => "Download complete · Preparing update…".into(),
+                        (Some(percent), Some(total)) => format!(
+                            "Downloading · {percent}% · {:.1} / {:.1} MB",
+                            progress.downloaded as f64 / 1_000_000.0,
+                            total as f64 / 1_000_000.0,
+                        )
+                        .into(),
+                        _ => format!(
+                            "Downloading · {:.1} MB received",
+                            progress.downloaded as f64 / 1_000_000.0,
+                        )
+                        .into(),
+                    },
                 ),
                 (_, StripAction::Restart) => (
                     Some(icons::RESTART),
@@ -11369,8 +11459,9 @@ impl Shell {
         };
         let interactive = action != StripAction::None;
         let focus_ring = theme.accent;
+        let download_hover = theme.glass_hover();
         // Icon only, the same size as the footer's other buttons, so update
-        // status never adds a row; the label and notes live in the hover card.
+        // status never adds a row; its label lives in the hover card.
         let _ = label;
         let glyph = glyph.unwrap_or(match flow {
             Flow::Installed => icons::RESTART,
@@ -11388,11 +11479,43 @@ impl Shell {
             Tone::Solid => theme.accent.opacity(0.18),
             _ => bg_hover,
         };
-        let lead = icon(glyph)
-            .size(px(14.0))
-            .flex_none()
-            .text_color(fg)
-            .into_any_element();
+        let lead = if downloading {
+            match percent {
+                Some(percent) => div()
+                    .relative()
+                    .size(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(div().absolute().child(crate::loaders::upload_progress_arc(
+                        percent,
+                        24.0,
+                        theme.accent.opacity(0.2),
+                        theme.accent,
+                    )))
+                    .child(
+                        div()
+                            .text_size(px(8.0))
+                            .text_color(theme.accent)
+                            .child(format!("{percent}%")),
+                    )
+                    .into_any_element(),
+                None => crate::loaders::mini_mono_spinner(
+                    "sidebar-update-progress",
+                    2.0,
+                    theme.accent,
+                    cx.entity_id(),
+                    cx,
+                )
+                .into_any_element(),
+            }
+        } else {
+            icon(glyph)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(fg)
+                .into_any_element()
+        };
         Some(
             div()
                 .id("sidebar-update")
@@ -11411,7 +11534,12 @@ impl Shell {
                 .rounded(px(8.0))
                 .border_1()
                 .border_color(gpui::transparent_black())
-                .bg(bg)
+                .bg(if downloading {
+                    gpui::transparent_black()
+                } else {
+                    bg
+                })
+                .when(downloading, |el| el.hover(move |el| el.bg(download_hover)))
                 .map(|el| match notes {
                     // Hoverable so the pointer can reach the card's link. It
                     // sits at the window's bottom edge, so gpui flips it up.
@@ -12433,11 +12561,11 @@ impl Shell {
         {
             return true;
         }
-        if self.zot_ui.dialog.take().is_some() {
+        if self.zapper_ui.dialog.take().is_some() {
             cx.notify();
             return true;
         }
-        if self.dismiss_zot_overlay(cx) {
+        if self.dismiss_zapper_overlay(cx) {
             return true;
         }
         if self.harness_update_expanded {
@@ -12500,8 +12628,8 @@ impl Shell {
             self.close_conversation_history(cx);
             return true;
         }
-        if matches!(self.route, Route::Zot) || self.zot_editor_open(cx) {
-            self.leave_zot_page(cx);
+        if matches!(self.route, Route::Zapper) || self.zapper_editor_open(cx) {
+            self.leave_zapper_page(cx);
             return true;
         }
         self.active_changes(cx)
@@ -12678,8 +12806,8 @@ impl Shell {
         let mut overlays: Vec<AnyElement> = Vec::new();
         overlays.push(self.desktop_import.clone().into_any_element());
         overlays.extend(self.render_shortcuts_panel(viewport, cx));
-        overlays.extend(self.render_zot_dialog(viewport, window, cx));
-        overlays.extend(self.render_zot_overlays(viewport, cx));
+        overlays.extend(self.render_zapper_dialog(viewport, window, cx));
+        overlays.extend(self.render_zapper_overlays(viewport, cx));
 
         if let Some(menu_state) = self.chat_menu.get().cloned() {
             let chat_id = menu_state.chat_id;
@@ -12695,7 +12823,7 @@ impl Shell {
             let is_pinned = self.active_sidebar_pins(cx).contains(&chat_id);
             // A Zapper thread lives under its Zapper, so it has no pin, and
             // archiving goes through the Zapper so it stops sending work.
-            let thread_zot = self.zot_of_thread(&chat_id, cx);
+            let thread_zapper = self.zapper_of_thread(&chat_id, cx);
             let rename_id = chat_id.clone();
             let pin_id = chat_id.clone();
             let archive_id = chat_id.clone();
@@ -12760,11 +12888,11 @@ impl Shell {
                         popover::menu_row(&theme, false, format!("chat-menu-archive-{chat_id}"))
                             .id("chat-menu-archive")
                             .on_click({
-                                let thread_zot = thread_zot.clone();
-                                cx.listener(move |this, _, _, cx| match &thread_zot {
-                                    Some(zot) => {
+                                let thread_zapper = thread_zapper.clone();
+                                cx.listener(move |this, _, _, cx| match &thread_zapper {
+                                    Some(zapper) => {
                                         this.close_chat_menu(cx);
-                                        this.archive_zot_thread(zot, archive_id.clone(), cx);
+                                        this.archive_zapper_thread(zapper, archive_id.clone(), cx);
                                     }
                                     None => this.archive_chat(archive_id.clone(), cx),
                                 })
@@ -12783,7 +12911,7 @@ impl Shell {
                         &theme,
                         cx,
                     );
-                    let menu = if thread_zot.is_some() {
+                    let menu = if thread_zapper.is_some() {
                         menu
                     } else {
                         menu.child(self.chat_menu_hover_row(CHAT_MENU_ROW_PIN, pin, cx))
@@ -13135,8 +13263,8 @@ impl Shell {
         // Cloud setup is offered to Cloud subscribers.
         let cloud_subscribed = self.state.read(cx).cloud_access().subscribed();
 
-        if matches!(self.route, Route::Zot) {
-            return self.render_zot_page(window, cx);
+        if matches!(self.route, Route::Zapper) {
+            return self.render_zapper_page(window, cx);
         }
 
         if matches!(self.route, Route::PullRequests) {
@@ -13208,6 +13336,11 @@ impl Shell {
                 .children(card)
                 .into_any_element();
         }
+        // A Zapper thread waiting for a slot (or still starting) has no
+        // conversation yet; say so instead of showing an empty transcript.
+        if let Some(placeholder) = self.selected_thread_placeholder(cx) {
+            return self.render_thread_placeholder(placeholder, cx);
+        }
         let _ = (text, border);
         let has_selection = self.state.read(cx).selected_chat.is_some();
         let has_spaces = !self.state.read(cx).spaces.is_empty()
@@ -13222,6 +13355,7 @@ impl Shell {
         let ui_settings = settings::current(cx);
         let new_thread_background_setting = ui_settings.new_thread_composer_background;
         let new_thread_background_effect = ui_settings.new_thread_background_effect;
+        let wallpaper_look = ui_settings.wallpaper_look;
         let new_thread_background_adjustment = new_thread_background_setting
             .as_ref()
             .map(|background| background.adjustment)
@@ -13232,10 +13366,12 @@ impl Shell {
         let artwork = new_thread_background_setting
             .as_ref()
             .and_then(|background| {
-                crate::new_thread_background_effects::prepare(
+                crate::new_thread_background_effects::prepare_look_with_contrast(
                     new_thread_background_effect,
                     theme,
                     std::path::Path::new(&background.path),
+                    wallpaper_look,
+                    background.adjustment.quarter_turns,
                     cx,
                 )
             });
@@ -13254,6 +13390,48 @@ impl Shell {
             self.reduced_motion,
             frame_time,
         );
+        let sample_artwork = |raster: &Option<
+            std::sync::Arc<crate::new_thread_background_effects::WallpaperRaster>,
+        >| {
+            raster.as_ref().map_or_else(Default::default, |raster| {
+                crate::new_thread_background_mask::animation_frame(
+                    &raster.image,
+                    !self.reduced_motion,
+                    frame_time,
+                )
+            })
+        };
+        let previous_frame = sample_artwork(&artwork_frame.previous);
+        let current_frame = sample_artwork(&artwork_frame.current);
+        // The heading uses the same prepared layers and animation frames as
+        // the painter, including the plain fallback and visible crossfade.
+        let hero_ink = artwork_frame
+            .backdrop_is_dark(
+                gpui::Bounds::new(
+                    gpui::point(px(self.sidebar_now()), px(0.0)),
+                    gpui::size(
+                        px((self.viewport_width - self.sidebar_now()).max(1.0)),
+                        px(new_thread_background_height(self.viewport_height)),
+                    ),
+                ),
+                self.composer.read(cx).surface_bounds().get(),
+                wallpaper_look,
+                theme.bg,
+                new_thread_background_opacity(theme.is_frost())
+                    * (1.0 - dock_frame.dissolve())
+                    * f32::from(wallpaper_look.opacity)
+                    / 100.0,
+                previous_frame,
+                current_frame,
+            )
+            .map(|dark| {
+                let ink = if dark {
+                    gpui::white()
+                } else {
+                    gpui::hsla(0.0, 0.0, 0.08, 1.0)
+                };
+                (ink, ink.opacity(0.72))
+            });
         if dock_frame.active {
             self.motion_active.set(true);
         }
@@ -13263,14 +13441,14 @@ impl Shell {
         let session_reveal = self.session_info_reveal(has_selection);
         // Panel open/close glides the composer width; a window resize or a
         // seam drag is direct manipulation, so the width tracks the pointer.
-        // The Zot panel leaves a narrow column; keep the composer off its edges.
-        let zot_coordinator = self.state.read(cx).selected_chat_is_zot_coordinator();
+        // The Zapper panel leaves a narrow column; keep the composer off its edges.
+        let zapper_coordinator = self.state.read(cx).selected_chat_is_zapper_coordinator();
         let direct_width =
             self.reduced_motion || self.viewport_resized || self.pane_resize_dragging.is_some();
         let composer_width = self.composer_dock.borrow_mut().layout_width(
             composer_target_width(
                 main_content_width
-                    - if (has_selection && !zot_coordinator) || cloud_starting {
+                    - if (has_selection && !zapper_coordinator) || cloud_starting {
                         0.
                     } else {
                         2. * if self.viewport_width <= 800. {
@@ -13304,7 +13482,8 @@ impl Shell {
         let term_h = self.terminal_geometry.get().height;
         let new_thread_background_layer =
             (!cloud_starting && (!has_selection || dock_frame.active)).then(|| {
-                if artwork_frame.active {
+                if artwork_frame.active && wallpaper_look.opacity > 0 && dock_frame.dissolve() < 1.0
+                {
                     window.request_animation_frame();
                 }
                 let width = (self.viewport_width - self.sidebar_now()).max(0.0);
@@ -13315,22 +13494,26 @@ impl Shell {
                     .absolute()
                     .inset_0()
                     .child(new_thread_background(
-                        artwork_frame.previous,
+                        artwork_frame.previous.map(|raster| raster.image.clone()),
+                        previous_frame,
                         artwork_frame.previous_adjustment,
                         self.viewport_height,
                         width,
                         bounds.clone(),
                         dock_frame.dissolve(),
                         (1.0 - artwork_frame.mix) * opacity,
+                        wallpaper_look,
                     ))
                     .child(new_thread_background(
-                        artwork_frame.current,
+                        artwork_frame.current.map(|raster| raster.image.clone()),
+                        current_frame,
                         artwork_frame.current_adjustment,
                         self.viewport_height,
                         width,
                         bounds,
                         dock_frame.dissolve(),
                         artwork_frame.mix * opacity,
+                        wallpaper_look,
                     ))
                     // Without artwork, invaders march across a dim band
                     // under the titlebar; it leaves with the canvas on send.
@@ -13504,7 +13687,7 @@ impl Shell {
                         .relative()
                         .top(px(-1.))
                         .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text_strong)
+                        .text_color(hero_ink.map_or(theme.text_strong, |ink| ink.0))
                         .child(project.as_ref().map_or_else(
                             || "What should we build today?".to_owned(),
                             |name| format!("What should we build in {name}?"),
@@ -13516,10 +13699,12 @@ impl Shell {
                         div()
                             .id("landing-without-project")
                             .role(gpui::Role::Button)
+                            // Sit closer to the heading than the stack's gap.
+                            .mt(px(-4.))
                             .cursor_pointer()
                             .text_size(px(12.))
-                            .text_color(theme.text_muted)
-                            .hover(|d| d.text_color(theme.text))
+                            .text_color(hero_ink.map_or(theme.text_muted, |ink| ink.1))
+                            .hover(move |d| d.text_color(hero_ink.map_or(theme.text, |ink| ink.0)))
                             .child(tr(cx, msg::chat::start_without_project))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 let pickers = this.composer.read(cx).pickers().clone();
@@ -13655,7 +13840,7 @@ impl Shell {
                                     .w(px(composer_width))
                                     .pb(px(if cloud_starting {
                                         16.
-                                    } else if zot_coordinator {
+                                    } else if zapper_coordinator {
                                         12.
                                     } else {
                                         0.
@@ -14000,6 +14185,67 @@ impl Shell {
     /// default, drag-resizable. Content is the ACTIVE surface — the Diff
     /// page (its options row + the lazy [`Changes`] viewer), workspace Files,
     /// an embedded terminal, or the surface picker when no tabs exist.
+    /// A diff's or a subagent's content, for the surface host or the Zapper
+    /// panel tab that shows it. `None` once its entity is gone.
+    fn render_surface_body(
+        &mut self,
+        surface: RightSurface,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let theme = Theme::of(cx).clone();
+        Some(match surface {
+            RightSurface::Diff(id) => {
+                let changes = self.diffs.get(&id).cloned()?;
+                // Idempotent — also covers a persisted-open pane on boot.
+                changes.update(cx, |changes, cx| changes.ensure_content(cx));
+                // The diff options (scope dropdown, ref selector,
+                // fold-all) moved DOWN from the titlebar band — the
+                // surface tabs own that row now; the expand/close
+                // buttons stayed up there (user request).
+                let controls = changes.update(cx, |changes, cx| changes.render_header_controls(cx));
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .child(crate::surface_chrome::toolbar(&theme).child(controls))
+                    .child(div().flex_1().min_h_0().child(changes))
+                    .into_any_element()
+            }
+            RightSurface::Subagent(id) => {
+                let transcript = self.subagent_tabs.get(&id)?.transcript.clone();
+                // The pane hosts its own jump pill: the conversation
+                // overlay's is bound to the PRIMARY transcript, and this
+                // one anchors to the pane (no composer stack to clear).
+                let pill = transcript.read(cx).jump_button_shown().then(|| {
+                    div()
+                        .absolute()
+                        .bottom(px(16.0))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .child(self.jump_pill(
+                            "subagent-jump-to-bottom",
+                            "subagent-jump-pill",
+                            transcript.clone(),
+                            cx,
+                        ))
+                });
+                // Read-only surface: the transcript fills the pane — no
+                // composer, no status strip.
+                div()
+                    .size_full()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1().min_h_0().child(transcript))
+                    .children(pill)
+                    .into_any_element()
+            }
+            _ => return None,
+        })
+    }
+
     fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let exiting = self.fit_exit_width(1).is_some();
         let visible = self.horizontal_fit().right || exiting;
@@ -14046,24 +14292,9 @@ impl Shell {
                         self.render_surface_picker(cx)
                     }
                 }
-                RightSurface::Diff(id) if self.diffs.contains_key(&id) => {
-                    let changes = self.diffs.get(&id).cloned().expect("checked");
-                    // Idempotent — also covers a persisted-open pane on boot.
-                    changes.update(cx, |changes, cx| changes.ensure_content(cx));
-                    // The diff options (scope dropdown, ref selector,
-                    // fold-all) moved DOWN from the titlebar band — the
-                    // surface tabs own that row now; the expand/close
-                    // buttons stayed up there (user request).
-                    let controls =
-                        changes.update(cx, |changes, cx| changes.render_header_controls(cx));
-                    div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .child(crate::surface_chrome::toolbar(&theme).child(controls))
-                        .child(div().flex_1().min_h_0().child(changes))
-                        .into_any_element()
-                }
+                surface @ (RightSurface::Diff(_) | RightSurface::Subagent(_)) => self
+                    .render_surface_body(surface, cx)
+                    .unwrap_or_else(|| self.render_surface_picker(cx)),
                 RightSurface::Simulator(id) => self
                     .simulators
                     .get(&id)
@@ -14093,42 +14324,6 @@ impl Shell {
                 RightSurface::PullRequest(id) => self
                     .render_chat_pull_request(id, cx)
                     .unwrap_or_else(|| self.render_surface_picker(cx)),
-                RightSurface::Subagent(id) if self.subagent_tabs.contains_key(&id) => {
-                    let transcript = self
-                        .subagent_tabs
-                        .get(&id)
-                        .expect("checked")
-                        .transcript
-                        .clone();
-                    // The pane hosts its own jump pill: the conversation
-                    // overlay's is bound to the PRIMARY transcript, and this
-                    // one anchors to the pane (no composer stack to clear).
-                    let pill = transcript.read(cx).jump_button_shown().then(|| {
-                        div()
-                            .absolute()
-                            .bottom(px(16.0))
-                            .left_0()
-                            .right_0()
-                            .flex()
-                            .justify_center()
-                            .child(self.jump_pill(
-                                "subagent-jump-to-bottom",
-                                "subagent-jump-pill",
-                                transcript.clone(),
-                                cx,
-                            ))
-                    });
-                    // Read-only surface: the transcript fills the pane — no
-                    // composer, no status strip.
-                    div()
-                        .size_full()
-                        .relative()
-                        .flex()
-                        .flex_col()
-                        .child(div().flex_1().min_h_0().child(transcript))
-                        .children(pill)
-                        .into_any_element()
-                }
                 _ => self.render_surface_picker(cx),
             }
         } else {
@@ -14393,7 +14588,7 @@ impl Shell {
                     })
                     .unwrap_or(icons::LIST),
                 RightSurface::SideChat(_) => icons::CHAT_ROUND_LINE,
-                RightSurface::Subagent(_) => icons::BOT,
+                RightSurface::Subagent(_) => icons::AGENT,
                 RightSurface::Terminal(_) => icons::TERMINAL,
                 RightSurface::Simulator(_) => icons::SMARTPHONE,
                 RightSurface::Browser(_) => icons::GLOBE,
@@ -16097,13 +16292,13 @@ impl Render for Shell {
                 } else {
                     0.0
                 };
-                // The Zot panel replaces the right pane but takes the same room.
-                let on_zot_panel = on_chat && self.zot_panel_on_right(cx);
-                let right_target_width = if on_zot_panel {
-                    if self.zot_ui.panel_hidden {
+                // The Zapper panel replaces the right pane but takes the same room.
+                let on_zapper_panel = on_chat && self.zapper_panel_on_right(cx);
+                let right_target_width = if on_zapper_panel {
+                    if self.zapper_ui.panel_hidden {
                         0.0
                     } else {
-                        zots::ZOT_PANEL_WIDTH
+                        zappers::ZAPPER_PANEL_WIDTH
                     }
                 } else {
                     right_target_width
@@ -16177,7 +16372,7 @@ impl Render for Shell {
                 // never renders it (zuse __root.tsx `!isSettings && activeChat`
                 // around the diff column) — the per-session open flags stay
                 // intact for the return trip.
-                let right_open = on_chat && !on_zot_panel && self.right_pane_shown(cx);
+                let right_open = on_chat && !on_zapper_panel && self.right_pane_shown(cx);
                 // Takeover mode derives its width from the viewport, so a
                 // manual drag handle would fight the expanded target.
                 let right_handle = (right_open
@@ -16201,10 +16396,10 @@ impl Render for Shell {
                         .then(|| self.pull_request_pane_handle(cx))
                         .flatten()
                 });
-                let right: AnyElement = if on_zot_panel && self.zot_ui.panel_hidden {
+                let right: AnyElement = if on_zapper_panel && self.zapper_ui.panel_hidden {
                     Empty.into_any_element()
-                } else if on_zot_panel {
-                    self.render_zot_inspector(window, cx)
+                } else if on_zapper_panel {
+                    self.render_zapper_inspector(window, cx)
                 } else if on_chat {
                     self.render_right_pane(window, cx)
                 } else if on_pull_requests {
@@ -22190,11 +22385,10 @@ mod settings_modal_regressions {
 
     #[test]
     fn cloud_settings_follow_the_account_and_its_subscription() {
-        // Every group heading but Cloud computer's is listed for everyone.
+        // App and Local agents are listed for everyone.
         let always = [
             SettingsSection::General,
             SettingsSection::Harnesses,
-            SettingsSection::Usage,
             SettingsSection::Appearance,
         ];
         for access in [
@@ -22210,25 +22404,35 @@ mod settings_modal_regressions {
             }
             let cloud = CLOUD_GROUP.iter().filter(|s| sections.contains(s)).count();
             assert_eq!(cloud, if access.subscribed() { 5 } else { 0 }, "{access:?}");
+            // Usage is Cloud compute only; local model usage lives in the
+            // sidebar footer's usage menu.
+            assert_eq!(
+                sections.contains(&SettingsSection::Usage),
+                access.subscribed(),
+                "{access:?}"
+            );
             assert_eq!(
                 sections.contains(&SettingsSection::Billing),
                 access.signed_in(),
                 "{access:?}"
             );
         }
-        let headings: Vec<_> = listed(CloudAccess::Subscribed)
-            .into_iter()
-            .filter_map(SettingsSection::heading)
-            .collect();
+        let headings = |access| -> Vec<_> {
+            listed(access)
+                .into_iter()
+                .filter_map(|section| section.heading(access))
+                .collect()
+        };
         assert_eq!(
-            headings,
-            ["Local agents", "Cloud computer", "Plan & usage", "App"]
+            headings(CloudAccess::Subscribed),
+            ["App", "Plan & usage", "Local agents", "Cloud computer"]
         );
-        let headings: Vec<_> = listed(CloudAccess::SignedIn)
-            .into_iter()
-            .filter_map(SettingsSection::heading)
-            .collect();
-        assert_eq!(headings, ["Local agents", "Plan & usage", "App"]);
+        // Without Usage, Plan & usage opens on Billing.
+        assert_eq!(
+            headings(CloudAccess::SignedIn),
+            ["App", "Plan & usage", "Local agents"]
+        );
+        assert_eq!(headings(CloudAccess::SignedOut), ["App", "Local agents"]);
     }
 
     #[test]
@@ -22256,8 +22460,21 @@ mod settings_modal_regressions {
             SettingsSection::Billing.reopenable(CloudAccess::SignedOut),
             SettingsSection::General
         );
+        // Usage (Cloud compute) follows the Cloud computer pages.
+        assert_eq!(
+            SettingsSection::Usage.reopenable(CloudAccess::Subscribed),
+            SettingsSection::Usage
+        );
+        assert_eq!(
+            SettingsSection::Usage.reopenable(CloudAccess::SignedIn),
+            SettingsSection::Billing
+        );
         assert_eq!(
             SettingsSection::Usage.reopenable(CloudAccess::SignedOut),
+            SettingsSection::General
+        );
+        assert_eq!(
+            SettingsSection::Usage.reopenable(CloudAccess::Checking),
             SettingsSection::Usage
         );
     }

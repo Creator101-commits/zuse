@@ -7,8 +7,7 @@
 - Add opt-in Slack cloud tasks with threaded status/results, sender/channel attribution, and a workspace/repository connection flow in Cloud settings. Server credentials stay encrypted; enablement requires the Slack migration and a rebuilt compatible runtime image.
 - Link a chat or a Zapper to a Slack channel from its right-click menu. Finished replies post into a Slack thread, your replies in that thread come back to the chat, and Zappers post under their own name and avatar. Their worker threads get their own threads in the same channel. Requires the new Slack migration and re-authorizing the Slack app for its added scopes.
 - Devin Fusion's sidekick shows up as a subagent: each handoff gets a Sidekick chip you can open to watch its commands and edits, instead of its work mixing into the lead's.
-- The web app opens subagent chips in the right panel, like desktop, with the subagent's live transcript.
-- Settings → Keyboard shortcuts → Composer: turn off the runner game that plays above the composer while an agent works.
+- Settings → General → Composer: turn off the runner game that plays above the composer while an agent works.
 
 ### Changed
 
@@ -19,6 +18,46 @@
 - Devin chats no longer show a stray "Waiting for 1 subagent" from the lead's own usage updates, and sidekick chips settle before the turn ends.
 - A steered Devin turn no longer leaves the running command's chip stuck before the steer.
 - Devin retries reopening a conversation another process still holds for about five seconds before starting a fresh session; if it stays locked, the new session starts without the earlier context.
+
+## 0.27.6 - 2026-11-22
+
+### Added
+
+- Model picker with a provider rail, search, favorites and a hover card per model: set reasoning with a slider, fast mode and other options, add to favorites, or make it the default.
+
+### Changed
+
+- One composer chip shows the model and its reasoning level; the separate reasoning menu is gone.
+- The access picker is a single icon with a short three-level menu; saved permission rules open with `/permissions`.
+- Zapper chats open PRs, diffs and subagents as Zapper panel tabs, Threads lists show working threads first, and your own messages in a Zapper chat read as normal messages.
+
+## 0.27.5 - 2026-11-22
+
+### Changed
+
+- Settings → Usage shows cloud compute only and appears for Cloud subscribers; local agent usage stays in the sidebar footer and its Full usage view.
+
+## 0.27.4 - 2026-11-22
+
+### Added
+
+- Appearance: themes, an Add theme dialog and animated wallpapers.
+- Zappers: soft pixel avatars that react (or your own picture), a PR tab with Merge, Open on GitHub and the missing PR facts, and a visible archive button.
+- A background work row in the tray for running subagents and tasks.
+
+### Changed
+
+- Cloud is chosen in one place, the computer picker: one "This computer" row, the cloud size inline on the Cloud row, and the Worktree/Local chip only for chats on this computer.
+- The first message of a new cloud chat pins to the top like any send and stays there when the computer starts and the reply arrives.
+- Cloud chats show a working spinner on their tab and sidebar row; the cloud icon is green only while the computer is up.
+- Settings navigation is reordered and the account card matches the other cards.
+
+### Fixed
+
+- New cloud chats appear in the sidebar right away and stay there.
+- The Queued panel lists every queued cloud message and drops only the ones the agent picked up.
+- Cloud usage loads for accounts with image builds.
+- Usage settings page scrolling and chart tooltip.
 
 ## 0.27.3 - 2026-11-20
 

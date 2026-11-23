@@ -1,3 +1,4 @@
+import { workerRank, workerStatus } from "./threads-model";
 import { createMemo, For, Show } from "solid-js";
 import { state } from "@/core/store";
 import { navigate, openChat, setView, view } from "@/core/view";
@@ -49,37 +50,37 @@ export function ZapperSidebar() {
           <p class="zp-error">Zappers unavailable: {state.zappersError}</p>
         </Show>
         <For each={zappers()}>
-          {(zot) => {
+          {(zapper) => {
             const waiting = () =>
-              zot.decisions.filter((d) => d.answer === null).length;
+              zapper.decisions.filter((d) => d.answer === null).length;
             const workers = createMemo(() =>
-              zot.workers.filter(
-                (w) => workerVisible(w.chatId) && threadActive(w.chatId),
-              ),
+              zapper.workers.filter(
+                (w) => workerVisible(w.chatId) && (w.queuePosition !== undefined || threadActive(w.chatId)),
+              ).sort((a,b)=>workerRank(a)-workerRank(b)||(a.queuePosition ?? 0)-(b.queuePosition ?? 0)||a.chatId.localeCompare(b.chatId)),
             );
             return (
-              <div class="zp-sidebar-group" data-zapper-id={zot.id}>
+              <div class="zp-sidebar-group" data-zapper-id={zapper.id}>
                 <div
                   class="zp-sidebar-row"
-                  data-selected={owner()?.id === zot.id ? "true" : undefined}
+                  data-selected={owner()?.id === zapper.id ? "true" : undefined}
                 >
                   <button
                     type="button"
                     class="zp-sidebar-open"
-                    aria-label={`Open Zapper ${zot.config.name}`}
-                    onClick={() => openZapper(zot)}
+                    aria-label={`Open Zapper ${zapper.config.name}`}
+                    onClick={() => openZapper(zapper)}
                   >
-                    <Avatar avatar={avatarOf(zot)} size={17} />
-                    <span>{zot.config.name}</span>
+                    <Avatar avatar={avatarOf(zapper)} image={zapper.config.avatarImage} size={17} />
+                    <span>{zapper.config.name}</span>
                     <Show when={waiting()}>
                       <span class="zp-badge" title="Decisions waiting for you">
                         {waiting()}
                       </span>
                     </Show>
-                    <Show when={zot.status !== "active"}>
+                    <Show when={zapper.status !== "active"}>
                       <span
                         class="zp-status-dot"
-                        title={statusLabel(zot.status)}
+                        title={statusLabel(zapper.status)}
                       />
                     </Show>
                   </button>
@@ -89,7 +90,7 @@ export function ZapperSidebar() {
                         {...attrs}
                         type="button"
                         class="zp-icon zp-sidebar-more"
-                        aria-label={`Actions for ${zot.config.name}`}
+                        aria-label={`Actions for ${zapper.config.name}`}
                       >
                         <Icon name="menu-dots" size={13} />
                       </button>
@@ -99,18 +100,18 @@ export function ZapperSidebar() {
                         label: "Zapper settings",
                         icon: "settings",
                         onSelect: () =>
-                          navigate({ kind: "newZapper", zapperId: zot.id }),
+                          navigate({ kind: "newZapper", zapperId: zapper.id }),
                       },
                       {
-                        label: zot.status === "active" ? "Pause" : "Resume",
+                        label: zapper.status === "active" ? "Pause" : "Resume",
                         onSelect: () =>
-                          act(zot.id, {
+                          act(zapper.id, {
                             type: "setStatus",
                             status:
-                              zot.status === "active" ? "paused" : "active",
+                              zapper.status === "active" ? "paused" : "active",
                           }),
                       },
-                      { label: "Open Zapper", onSelect: () => openZapper(zot) },
+                      { label: "Open Zapper", onSelect: () => openZapper(zapper) },
                     ]}
                   />
                 </div>
@@ -124,11 +125,12 @@ export function ZapperSidebar() {
                             ? "true"
                             : undefined
                         }
+                        title={workerStatus(worker)}
                         onClick={() => openChat(worker.chatId)}
                       >
                         <Icon
                           name={
-                            state.sessions[worker.chatId]?.status === "working"
+                            worker.queuePosition !== undefined || state.sessions[worker.chatId]?.status === "working"
                               ? "clock-circle"
                               : "git-branch"
                           }
@@ -136,14 +138,14 @@ export function ZapperSidebar() {
                         />
                         <span class="zp-sidebar-worker-label">
                           {threadTitle(worker.chatId, worker.objective)}
-                        </span>
+                        </span><Show when={worker.queuePosition !== undefined}><small class="zp-queued-badge">Queued</small></Show>
                       </button>
                       <button
                         type="button"
                         class="zp-icon"
                         aria-label={`Archive ${threadTitle(worker.chatId, worker.objective)}`}
                         onClick={() =>
-                          act(zot.id, {
+                          act(zapper.id, {
                             type: "archiveWorker",
                             chatId: worker.chatId,
                           })

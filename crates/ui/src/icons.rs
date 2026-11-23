@@ -111,6 +111,9 @@ icon_assets![
     (DITHER_SEND, "dither-send"),
     (DITHER_MIC, "dither-mic"),
     (DITHER_FOLDER, "dither-folder"),
+    (DITHER_BOOKMARK, "dither-bookmark"),
+    (DITHER_BOLT, "dither-bolt"),
+    (DITHER_FLAG, "dither-flag"),
     (DITHER_BRANCH, "dither-branch"),
     (DITHER_TERMINAL, "dither-term"),
     (DITHER_NOTE, "dither-note"),
@@ -251,6 +254,9 @@ icon_assets![
     (SITE_LINEAR, "site-linear"),
     // A skill chip's stacked-block mark.
     (SKILL, "skill"),
+    // Zuse's own agent mark: a pixel-stepped face with square eyes and an
+    // antenna stub, for subagents and agent hand-offs.
+    (AGENT, "agent"),
 ];
 
 pub const BROWSER_SELECT: &str = "icons/browser-select.svg";

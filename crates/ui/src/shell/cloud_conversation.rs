@@ -106,6 +106,13 @@ pub(super) struct CloudConversation {
     /// A message's files asked for a wake while a sleep was still running.
     wake_after_sleep: bool,
     computer: computer::State,
+    /// The computer's conversations the server has registered, including
+    /// ones its computer has not installed yet.
+    registered: Vec<zuse_protocol::Chat>,
+    /// This conversation was opened before the server finished recording it.
+    pub(super) registering: bool,
+    /// The request that records it, retried until the server confirms.
+    registration: Option<(Value, Task<()>)>,
     _subscriptions: Vec<Subscription>,
 }
 impl gpui::EventEmitter<CloudConversationEvent> for CloudConversation {}
@@ -163,6 +170,7 @@ impl CloudConversation {
             let mut state = AppState::new();
             // Account-owned rendering is available before a guest connects.
             state.connection = ConnectionStatus::Ready;
+            state.hosted_on_cloud_computer = true;
             state.selected_chat = Some(session);
             state.auto_selected = true;
             // The last transcript this app showed for the chat paints at
@@ -233,6 +241,9 @@ impl CloudConversation {
             cx.observe(&composer, |_: &mut Self, _, cx| cx.notify()),
             cx.observe(&state, |this: &mut Self, state, cx| {
                 this.history.observe_live(state.read(cx));
+                // New transcript or admissions reconcile the first message's
+                // stand-in and the working lines right away.
+                this.sync_progress(cx);
                 let transcript = state.read(cx).transcript.clone();
                 this.composer.update(cx, |composer, cx| {
                     composer.apply_cloud_response_activity(&transcript, cx)
@@ -241,13 +252,18 @@ impl CloudConversation {
             }),
         ];
         let first_message = launch["firstMessage"].as_str().map(str::to_owned);
+        // A conversation added beside the computer's first one starts
+        // untitled, like a new chat tab in a local thread.
+        let added = config["initialSessionId"]
+            .as_str()
+            .is_some_and(|first| first != target.initial_session);
         let title = config["title"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned)
             .or_else(|| first_message.clone())
             .map(|title| zuse_protocol::file_mentions::mention_display_text(&title))
-            .unwrap_or_else(|| "Cloud chat".into());
+            .unwrap_or_else(|| if added { "New chat" } else { "Cloud chat" }.into());
         let initial_metadata = config.clone();
         let learned_harness = cloud_harness(&config);
         let remembered_harness = crate::settings::remembered_cloud_agent(&target.workspace, cx);
@@ -283,6 +299,9 @@ impl CloudConversation {
             sleep_command: None,
             wake_after_sleep: false,
             computer: computer::State::default(),
+            registered: Vec::new(),
+            registering: false,
+            registration: None,
             _subscriptions: subscriptions,
         };
         this.computer.metadata = initial_metadata;
@@ -290,6 +309,29 @@ impl CloudConversation {
         // Paint the saved copy now; the fresh read follows the account check.
         this.read_provisional_history(cx);
         this
+    }
+    /// Route the transcript's links through the shell: file links open on
+    /// this computer's own files, web links keep their normal handling.
+    pub(super) fn set_link_handler(
+        &mut self,
+        links: crate::markdown::render::LinkUi,
+        cx: &mut Context<Self>,
+    ) {
+        self.transcript.update(cx, |transcript, _| {
+            transcript.set_workspace_link_handler(links)
+        });
+    }
+    #[cfg(test)]
+    pub(super) fn set_computer_metadata_for_test(&mut self, metadata: Value) {
+        self.computer.metadata = metadata;
+    }
+    #[cfg(test)]
+    pub(super) fn set_admissions_for_test(&mut self, rows: Value) {
+        self.admissions = rows;
+    }
+    #[cfg(test)]
+    pub(super) fn transcript_for_test(&self) -> &Entity<Transcript> {
+        &self.transcript
     }
     #[cfg(test)]
     fn activity(&self, cx: &App) -> Option<activity::Activity> {
@@ -338,6 +380,24 @@ impl CloudConversation {
                 }));
         activity::preparation(&self.computer.metadata, initial)
     }
+    /// The agent is mid-turn: a message it is working on whose turn the
+    /// transcript doesn't show finished. Tabs and sidebar rows spin on it,
+    /// like a local chat's.
+    pub(super) fn agent_working(&self, cx: &App) -> bool {
+        self.agent_activity(cx)
+            .is_some_and(|activity| activity.busy)
+    }
+    /// What this conversation reports for its chat's sidebar row and tab.
+    pub(super) fn live_activity(&self, cx: &App) -> crate::state::CloudLiveActivity {
+        let activity = self.agent_activity(cx);
+        crate::state::CloudLiveActivity {
+            working: activity.as_ref().is_some_and(|activity| activity.busy),
+            awaiting_input: activity
+                .as_ref()
+                .is_some_and(|activity| activity.label == activity::NEEDS_INPUT),
+            online: self.computer_online(),
+        }
+    }
     /// The message's progress once it is with the agent.
     fn agent_activity(&self, cx: &App) -> Option<activity::Activity> {
         if self.access_revoked {
@@ -376,6 +436,25 @@ impl CloudConversation {
                 .pending_echoes()
                 .iter()
                 .any(|entry| entry.id == echo);
+            // The first message's stand-in is in the server's transcript now
+            // (under its own id): the send anchor moves to it, then the
+            // stand-in goes, so the message keeps its place with no jump.
+            if pending.is_none() && shown {
+                let real = self
+                    .state
+                    .read(cx)
+                    .transcript
+                    .iter()
+                    .find(|entry| entry.role == zuse_model::MessageRole::User)
+                    .map(|entry| entry.id.clone());
+                if let Some(real) = real {
+                    self.transcript.update(cx, |transcript, cx| {
+                        transcript.retarget_own_send(&echo, &real, cx)
+                    });
+                }
+            }
+            let anchor = pending.is_some() && !shown;
+            let pending_changed = pending.is_some() != shown;
             match (pending, shown) {
                 (Some(text), false) => self.state.update(cx, |state, cx| {
                     let device = state.local_device_id.clone().unwrap_or_default();
@@ -402,6 +481,19 @@ impl CloudConversation {
                     cx.notify();
                 }),
                 _ => {}
+            }
+            if pending_changed {
+                // This can run while the conversation renders, where the
+                // transcript would not hear the state change: tell it, so it
+                // rebuilds its rows (the stand-in never lingers).
+                self.transcript.update(cx, |_, cx| cx.notify());
+            }
+            if anchor {
+                // Like any send: the first message moves to the top and the
+                // reply streams in below it.
+                self.transcript.update(cx, |transcript, cx| {
+                    transcript.on_own_first_send(session.clone(), echo.clone(), cx)
+                });
             }
         }
         let computer = self.computer_activity(cx);
@@ -466,7 +558,9 @@ impl CloudConversation {
     /// unavailable. Follows the workspace state the history and environment
     /// streams already deliver.
     pub(super) fn computer_online(&self) -> bool {
-        !self.access_revoked && matches!(self.computer_summary().tone, Tone::Running)
+        !self.access_revoked
+            && matches!(self.computer_summary().tone, Tone::Running)
+            && self.computer.metadata["runtimeState"].as_str() != Some("offline")
     }
 
     /// The same cloud icon placement as an ordinary conversation. Computer
@@ -529,8 +623,163 @@ impl CloudConversation {
         }
         button.into_any_element()
     }
-    pub(super) fn project_id(&self) -> Option<&str> {
-        self.config["projectId"].as_str()
+    /// The workspace's thread: every conversation on this computer belongs
+    /// to it, as every conversation tab of a local thread does.
+    pub(super) fn thread_id(&self) -> Option<String> {
+        self.computer.metadata["chatId"]
+            .as_str()
+            .or_else(|| self.config["chatId"].as_str())
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+    }
+    /// This computer's active conversations, oldest first: the computer's
+    /// own thread members and those the server has registered.
+    pub(super) fn conversations(&self, cx: &App) -> Vec<zuse_protocol::Chat> {
+        let Some(thread) = self.thread_id() else {
+            return Vec::new();
+        };
+        let mut rows: Vec<zuse_protocol::Chat> = Vec::new();
+        for chat in self.state.read(cx).chats.iter().chain(&self.registered) {
+            if chat.thread_id.as_deref() == Some(thread.as_str())
+                && chat.parent_chat_id.is_none()
+                && !chat.archived
+                && !rows.iter().any(|row| row.id == chat.id)
+            {
+                rows.push(chat.clone());
+            }
+        }
+        rows.sort_by_key(|chat| chat.created_at);
+        rows
+    }
+    /// The chat a new conversation on this computer copies its agent and
+    /// model from: this conversation's own.
+    pub(super) fn template_chat(&self, cx: &App) -> Value {
+        let state = self.state.read(cx);
+        state
+            .chats
+            .iter()
+            .chain(&self.registered)
+            .find(|chat| chat.id == self.target.initial_session)
+            .and_then(|chat| serde_json::to_value(chat).ok())
+            .unwrap_or_else(|| json!({}))
+    }
+    /// The computer record for another conversation on this computer: this
+    /// one's, without this conversation's title.
+    pub(super) fn sibling_row(&self) -> Value {
+        let mut row = self.config.clone();
+        if let Some(row) = row.as_object_mut() {
+            row.remove("title");
+            row.remove("firstMessage");
+        }
+        row
+    }
+    /// Opened at once, before the server has recorded this conversation:
+    /// sends and history reads wait until `request` (the `CloudRpc` that
+    /// records it) is confirmed.
+    pub(super) fn start_registering(
+        &mut self,
+        chat: zuse_protocol::Chat,
+        request: Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.registering = true;
+        self.remember_conversation(chat.clone());
+        self.state.update(cx, |state, cx| {
+            state.pending_cloud_conversation = Some(chat.clone());
+            if !state.chats.iter().any(|row| row.id == chat.id) {
+                state.chats.push(chat);
+            }
+            cx.notify();
+        });
+        self.composer
+            .update(cx, |composer, cx| composer.set_cloud_registering(true, cx));
+        self.register(request, std::time::Duration::ZERO, cx);
+    }
+    /// Send the request that records this conversation, after `delay`. A
+    /// failure shows and is retried with the same request (so the same
+    /// conversation), backing off to half a minute, while the tab is open.
+    fn register(&mut self, request: Value, delay: std::time::Duration, cx: &mut Context<Self>) {
+        let controller = self.target.controller.clone();
+        let session = self.target.initial_session.clone();
+        let started = std::time::Instant::now();
+        let params = request.clone();
+        let task = cx.spawn(async move |this, cx| {
+            if !delay.is_zero() {
+                cx.background_executor().timer(delay).await;
+            }
+            let result = async {
+                let mut reply = controller
+                    .client()
+                    .subscribe_scoped(methods::CLOUD_RPC, params)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let frame = reply
+                    .recv()
+                    .await
+                    .ok_or_else(|| "The new chat was not confirmed.".to_owned())?;
+                if let Some(error) = frame["err"].as_str() {
+                    return Err(error.to_owned());
+                }
+                serde_json::from_value::<zuse_protocol::Chat>(frame["ok"].clone())
+                    .ok()
+                    .filter(|chat| chat.id == session)
+                    .map(|_| ())
+                    .ok_or_else(|| "The new chat was not confirmed.".to_owned())
+            }
+            .await;
+            let _ = this.update(cx, |this, cx| {
+                tracing::info!(workspace = %this.target.workspace,
+                    ms = started.elapsed().as_millis() as u64, ok = result.is_ok(),
+                    "Cloud conversation recorded");
+                this.registered(result, delay, cx)
+            });
+        });
+        self.registration = Some((request, task));
+    }
+    /// The server recorded this conversation, or the attempt failed.
+    fn registered(
+        &mut self,
+        result: Result<(), String>,
+        delay: std::time::Duration,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.registering {
+            return;
+        }
+        match result {
+            Ok(()) => {
+                self.registering = false;
+                self.registration = None;
+                self.error = None;
+                self.composer
+                    .update(cx, |composer, cx| composer.set_cloud_registering(false, cx));
+                if std::mem::take(&mut self.read_again) {
+                    self.refresh_history(cx);
+                }
+            }
+            Err(error) => {
+                let message =
+                    format!("This chat isn't open on its computer yet: {error} Retrying…");
+                self.error = Some(message.clone());
+                self.composer
+                    .update(cx, |composer, cx| composer.show_error(message, cx));
+                if let Some((request, _)) = self.registration.take() {
+                    let next = (delay * 2).clamp(
+                        std::time::Duration::from_secs(2),
+                        std::time::Duration::from_secs(30),
+                    );
+                    self.register(request, next, cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+    /// Learn a conversation just added to this computer before the server's
+    /// list is read again.
+    pub(super) fn remember_conversation(&mut self, chat: zuse_protocol::Chat) {
+        if !self.registered.iter().any(|row| row.id == chat.id) {
+            self.registered.push(chat);
+        }
     }
     fn params(&self) -> Value {
         json!({"workspaceId":self.target.workspace,"sessionId":self.target.initial_session,
@@ -655,6 +904,11 @@ impl CloudConversation {
         if !self.authorized {
             return;
         }
+        if self.registering {
+            // Its history exists once the server has recorded it.
+            self.read_again = true;
+            return;
+        }
         if self.history_read.is_some() {
             self.read_again = true;
             return;
@@ -767,6 +1021,23 @@ impl CloudConversation {
             self.learn_harness(cx);
         }
         self.config["queueRunSelectionVersion"] = value["queueRunSelectionVersion"].clone();
+        if let Ok(registered) = serde_json::from_value::<Vec<zuse_protocol::Chat>>(
+            value["registeredConversations"].clone(),
+        ) {
+            self.registered = registered;
+        }
+        // Registered here but not yet on the computer: keep its row while
+        // the computer's chat list catches up, or attaching drops it.
+        // The row lives until the computer lists the conversation (then
+        // `apply_chats` drops it) or this tab closes with its state.
+        let registered_only = value["source"] == "admission"
+            && value["session"].is_object()
+            && value["admission"].is_null();
+        if registered_only {
+            self.state.update(cx, |state, _| {
+                state.pending_cloud_conversation = Some(head.chat.clone());
+            });
+        }
         // Never inject saved pages into the live watch's delta baseline.
         self.project_saved_history(&head, cx);
         self.composer.update(cx, |composer, cx| {
@@ -1024,17 +1295,17 @@ impl Shell {
         // A failed start says why on the status line; nothing spins here.
         let working = self.composer.read(cx).cloud_launch_working();
         let width = crate::settings::transcript_width(cx);
-        let clearance = (self.bottom_stack.get() - self.terminal_geometry.get().height).max(0.0)
-            + Theme::TRANSCRIPT_FADE_BAND
-            + 8.0;
+        // The first message sits where the transcript puts a new chat's
+        // first message when its send anchors it (the top, the reply below),
+        // so the conversation that takes over shows it in the same place.
         div()
             .id("cloud-launch-outlet")
             .debug_selector(|| "cloud-launch-outlet".into())
             .size_full()
             .flex()
             .flex_col()
-            .justify_end()
-            .pb(px(clearance))
+            .justify_start()
+            .pt(px(crate::transcript::FIRST_ROW_TOP_GAP_PX))
             .child(
                 div().w_full().flex().justify_center().px(px(48.0)).child(
                     div()
@@ -1070,12 +1341,10 @@ impl Shell {
                                     .items_center()
                                     .gap(px(Theme::SPACE_SM))
                                     .pt(px(Theme::SPACE_LG))
-                                    .child(crate::loaders::mini_glyph_spinner(
+                                    .child(crate::loaders::retro_loader(
                                         "cloud-launch-working",
-                                        2.5,
+                                        11.0,
                                         theme.loader_glyph(),
-                                        cx.entity_id(),
-                                        cx,
                                     ))
                                     .child(
                                         div()
@@ -1117,6 +1386,7 @@ impl Shell {
         view: &Entity<CloudConversation>,
         cx: &mut Context<Self>,
     ) {
+        self.mark_cloud_conversation_seen(view, cx);
         self.cloud_conversation_events =
             Some(cx.subscribe(view, |this, _, event, cx| match event {
                 CloudConversationEvent::Terminal => this.add_terminal_surface(cx),
@@ -1171,7 +1441,11 @@ impl Shell {
             self.track_current_cloud_canvas(cx);
         }
         let session = target.initial_session.clone();
-        let view = self.new_cloud_conversation_view(target, row, launch, cx);
+        // A conversation still working in the background comes back as is.
+        let view = match self.background_cloud_conversation(&target, cx) {
+            Some(view) => view,
+            None => self.new_cloud_conversation_view(target, row, launch, cx),
+        };
         // A tab still creating a chat keeps it; this one opens beside it.
         self.ensure_free_cloud_tab(cx);
         self.subscribe_cloud_conversation(&view, cx);
@@ -1218,7 +1492,11 @@ impl Shell {
                 }
             }
         }
-        cx.new(|cx| CloudConversation::new(target, row, launch, self.boot.clone(), cx))
+        let links = Self::session_links(Some(target.initial_session.clone()), cx);
+        let view = cx.new(|cx| CloudConversation::new(target, row, launch, self.boot.clone(), cx));
+        view.update(cx, |view, cx| view.set_link_handler(links, cx));
+        self.track_cloud_conversation(&view, cx);
+        view
     }
 }
 
@@ -2012,6 +2290,11 @@ mod tests {
                     .any(|e| e.id == echo),
                 "the first message shows at once"
             );
+            assert_eq!(
+                view.transcript.read(cx).own_send_target().as_deref(),
+                Some(echo.as_str()),
+                "the first message anchors like any send"
+            );
             assert!(view.computer_activity(cx).is_some_and(|stage| stage.busy));
             // Ready; history and the live transcript arrive together.
             view.computer.metadata = json!({"workspaceId":"task","state":"ready"});
@@ -2046,6 +2329,11 @@ mod tests {
                 state.pending_echoes().is_empty(),
                 "the stand-in is replaced"
             );
+            assert_eq!(
+                view.transcript.read(cx).own_send_target().as_deref(),
+                Some("runtime-user"),
+                "the anchor moves to the server's copy, so nothing jumps"
+            );
             let users = state
                 .transcript
                 .iter()
@@ -2058,6 +2346,92 @@ mod tests {
                 "no stale waiting line"
             );
         });
+    }
+    /// The real server's order: the stand-in, then the admitted row (its
+    /// own id) while the computer starts, then the computer's own record
+    /// with the reply. The first message stays anchored through every
+    /// replacement instead of dropping to the bottom.
+    #[gpui::test]
+    fn first_message_stays_anchored_through_each_server_copy(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _entered = runtime.enter();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(initialize);
+        let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            std::sync::Arc::new(PendingController),
+        ));
+        let view = cx.new(|cx| {
+            CloudConversation::new(
+                CloudTarget {
+                    controller,
+                    subject: "owner".into(),
+                    organization: None,
+                    workspace: "task".into(),
+                    initial_session: "session".into(),
+                },
+                json!({"workspaceId":"task","state":"provisioning","statusCode":"allocating"}),
+                json!({"firstMessage":"yoo"}),
+                boot(dir.path()),
+                cx,
+            )
+        });
+        let entry = |id: &str, role, text: &str| zuse_model::SessionMessageEntry {
+            id: id.into(),
+            role,
+            parts: vec![zuse_model::MessagePart::Text {
+                id: format!("text:{id}"),
+                text: text.into(),
+            }],
+            created_at: 1,
+            device_id: String::new(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let target = |view: &Entity<CloudConversation>, cx: &mut TestAppContext| {
+            view.read_with(cx, |view, cx| view.transcript.read(cx).own_send_target())
+        };
+        view.update(cx, |view, cx| view.sync_progress(cx));
+        cx.run_until_parked();
+        assert_eq!(target(&view, cx).as_deref(), Some("launch-echo:task"));
+        // Admitted: the saved history lists the message under its admitted id.
+        view.update(cx, |view, cx| {
+            view.admissions = json!([{"commandId":"launch:task","messageId":"admitted-first",
+                "text":"yoo","executionState":"admitted"}]);
+            view.state.update(cx, |state, cx| {
+                state.apply_transcript(vec![entry(
+                    "admitted-first",
+                    zuse_model::MessageRole::User,
+                    "yoo",
+                )]);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        view.update(cx, |view, cx| view.sync_progress(cx));
+        cx.run_until_parked();
+        assert_eq!(target(&view, cx).as_deref(), Some("admitted-first"));
+        // Ready: the computer's own record replaces it, with the reply.
+        view.update(cx, |view, cx| {
+            view.computer.metadata = json!({"workspaceId":"task","state":"ready"});
+            view.state.update(cx, |state, cx| {
+                state.apply_transcript(vec![
+                    entry("runtime-user", zuse_model::MessageRole::User, "yoo"),
+                    entry(
+                        "runtime-reply",
+                        zuse_model::MessageRole::Assistant,
+                        "Yoo! What are we working on?",
+                    ),
+                ]);
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            target(&view, cx).as_deref(),
+            Some("runtime-user"),
+            "the anchor follows the server's copy instead of retiring"
+        );
     }
     struct OlderHistoryController {
         calls: std::sync::Mutex<Vec<Value>>,
@@ -2459,6 +2833,8 @@ mod tests {
         let _entered = runtime.enter();
         let dir = tempfile::tempdir().unwrap();
         cx.update(initialize);
+        // The admission refreshes the sidebar's account list.
+        cx.update(|cx| gpui_tokio::init_from_handle(cx, runtime.handle().clone()));
         let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
             std::sync::Arc::new(PendingController),
         ));
@@ -2556,6 +2932,105 @@ mod tests {
                     .child(shell.workspace_sidebar_header(cx))
             })
         }
+    }
+    #[gpui::test]
+    fn a_cloud_chats_file_links_open_on_its_own_computer(cx: &mut TestAppContext) {
+        use crate::markdown::render::{LinkAction, LinkActivation, LinkOutcome, LinkTarget};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let directory = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            initialize(cx);
+            settings::init(UiSettings::default(), directory.path(), cx);
+            crate::history::init(
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                cx,
+            );
+        });
+        let controller = crate::state::EngineHandle::from_test_client(zuse_rpc::memory_client(
+            std::sync::Arc::new(PendingController),
+        ));
+        let (host, cx) = cx.add_window_view(|_, cx| {
+            let shell = cx.new(|cx| {
+                let state = cx.new(|_| {
+                    let mut state = AppState::new();
+                    account(&mut state);
+                    state
+                });
+                let mut shell = Shell::new(state, boot(directory.path()), cx);
+                shell.reduced_motion = true;
+                shell.open_cloud_conversation(
+                    CloudTarget {
+                        controller,
+                        subject: "owner".into(),
+                        organization: None,
+                        workspace: "task".into(),
+                        initial_session: "session".into(),
+                    },
+                    json!({"workspaceId":"task","initialSessionId":"session"}),
+                    Value::Null,
+                    cx,
+                );
+                shell
+            });
+            CloudChromeHost {
+                shell,
+                _directory: directory,
+            }
+        });
+        let shell = host.read_with(cx, |host, _| host.shell.clone());
+        shell.update_in(cx, |shell, window, cx| {
+            let view = shell.cloud_conversation.clone().unwrap();
+            let state = view.read(cx).state.clone();
+            // The computer's engine reports its own device id; its paths are
+            // still never this desktop's.
+            state.update(cx, |state, _| {
+                state.local_device_id = Some("cloud-computer".into())
+            });
+            assert!(state.read(cx).hosted_on_cloud_computer);
+            assert!(!state.read(cx).chat_is_local("session"));
+            // Before the fix the cloud transcript had no link handler, so
+            // every file link fell back to web validation and was dropped.
+            let transcript = view.read(cx).transcript_for_test().clone();
+            let link = transcript
+                .update(cx, |transcript, cx| transcript.link_ui(cx))
+                .expect("a cloud chat's links are routed");
+            assert_eq!(link.source_session.as_deref(), Some("session"));
+            assert!(!link.source_local, "no desktop file actions");
+
+            // The shell's own state has no selection while a cloud chat is
+            // open; the link still counts as the open chat's.
+            assert!(shell.state.read(cx).selected_chat.is_none());
+            let page = "/home/zuse/workspace/artifacts/web-preview/onboarding.html";
+            let activation = LinkActivation {
+                target: LinkTarget::new("Web onboarding", page),
+                action: LinkAction::Primary,
+                source_session: Some("session".into()),
+            };
+            assert_eq!(
+                shell.activate_session_link(&activation, window, cx),
+                LinkOutcome::Internal
+            );
+            let id = shell.file_surface_seq;
+            assert_eq!(shell.file_surfaces[&id].read(cx).chat_id(), "session");
+            assert_eq!(shell.file_surface_paths[&id], page);
+            // Web links keep their normal handling.
+            let web = LinkActivation {
+                target: LinkTarget::new("Docs", "https://example.com/docs"),
+                action: LinkAction::External,
+                source_session: Some("session".into()),
+            };
+            assert_eq!(
+                shell.activate_session_link(&web, window, cx),
+                LinkOutcome::External("https://example.com/docs".into())
+            );
+        });
     }
     #[gpui::test]
     fn cloud_only_chat_paints_header_logo_and_opens_right_sidebar(cx: &mut TestAppContext) {

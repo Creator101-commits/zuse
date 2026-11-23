@@ -1,9 +1,11 @@
+import { Markdown } from "@/features/transcript/Markdown";
+import { Icon } from "@/ui/Icon";
 import { createMemo, createSignal, For, Show } from "solid-js";
 import type { Zapper, ZapperFile } from "@/core/zapper-types";
 import { Button, Dialog } from "@/ui/primitives";
 import { command, commandState, loadResources, resources } from "./state";
 
-export function Drive(props: { zot: Zapper; history: boolean }) {
+export function Drive(props: { zapper: Zapper; history: boolean; path?: string; onOpen?: (path:string)=>void }) {
   const current = createMemo(() => {
     const latest = new Map<string, ZapperFile>();
     for (const f of resources.files)
@@ -21,14 +23,14 @@ export function Drive(props: { zot: Zapper; history: boolean }) {
     const f = edit();
     if (!f) return;
     try {
-      await command(props.zot.id, {
+      await command(props.zapper.id, {
         type: "writeFile",
         path: f.path.trim(),
         content: f.content,
         expectedVersion: f.version,
       });
       setEdit(null);
-      await loadResources(props.zot);
+      await loadResources(props.zapper);
     } catch {
       /* shared alert */
     }
@@ -37,14 +39,14 @@ export function Drive(props: { zot: Zapper; history: boolean }) {
     const f = restore();
     if (!f) return;
     try {
-      await command(props.zot.id, {
+      await command(props.zapper.id, {
         type: "restoreFile",
         path: f.path,
         version: f.version,
         expectedVersion: current().find((c) => c.path === f.path)?.version ?? 0,
       });
       setRestore(null);
-      await loadResources(props.zot);
+      await loadResources(props.zapper);
     } catch {
       /* shared alert */
     }
@@ -52,8 +54,8 @@ export function Drive(props: { zot: Zapper; history: boolean }) {
   return (
     <>
       <div class="zp-section-heading">
-        <h3>{props.history ? "File history" : "Drive"}</h3>
-        <Show when={!props.history}>
+        <h3>{props.path ?? (props.history ? "File history" : "Drive")}</h3>
+        <Show when={!props.history && !props.path}>
           <Button
             size="sm"
             onClick={() => setEdit({ path: "", content: "", version: 0 })}
@@ -64,7 +66,7 @@ export function Drive(props: { zot: Zapper; history: boolean }) {
         <Button
           size="sm"
           disabled={resources.loading}
-          onClick={() => void loadResources(props.zot)}
+          onClick={() => void loadResources(props.zapper)}
         >
           Refresh
         </Button>
@@ -85,7 +87,7 @@ export function Drive(props: { zot: Zapper; history: boolean }) {
                 )
                 .slice()
                 .reverse()
-            : current()
+            : current().filter(file => props.path ? file.path === props.path : (file.path !== "INSTRUCTIONS.md" || file.version > 1) && file.content.trim())
         }
         fallback={
           <p class="zp-muted">
@@ -100,18 +102,11 @@ export function Drive(props: { zot: Zapper; history: boolean }) {
         {(file) => (
           <div class="zp-card">
             <div class="zp-section-heading">
-              <strong>{file.path}</strong>
+              <Show when={props.onOpen} fallback={<strong>{file.path}</strong>}><button type="button" class="zp-document-link" onClick={()=>props.onOpen?.(file.path)}><Icon name="document" size={15} />{file.path}</button></Show>
               <small>v{file.version}</small>
             </div>
-            <pre class="zp-file-preview">{file.content}</pre>
-            <Button
-              size="sm"
-              onClick={() =>
-                props.history ? setRestore(file) : setEdit({ ...file })
-              }
-            >
-              {props.history ? "Restore version" : "Edit document"}
-            </Button>
+            <Show when={props.path || props.history}><Show when={/\.md$/i.test(file.path)} fallback={<pre class="zp-file-preview">{file.content}</pre>}><Markdown text={file.content} live={false} /></Show></Show>
+            <Show when={!props.onOpen}><Button size="sm" onClick={()=>props.history ? setRestore(file) : setEdit({...file})}>{props.history ? "Restore version" : "Edit document"}</Button></Show>
           </div>
         )}
       </For>

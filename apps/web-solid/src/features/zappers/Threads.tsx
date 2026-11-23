@@ -1,3 +1,6 @@
+import { finishedThreads, workerRank, workerStatus } from "./threads-model";
+import { ZapperModelPicker } from "./Controls";
+import { Icon } from "@/ui/Icon";
 import { createMemo, createSignal, For, Show, untrack } from "solid-js";
 import { state } from "@/core/store";
 import { openChat } from "@/core/view";
@@ -8,18 +11,18 @@ import {
   act,
   command,
   commandState,
-  statusLabel,
   threadTitle,
   workerVisible,
 } from "./state";
 
-export function Threads(props: { zot: Zapper }) {
+export function Threads(props: { zapper: Zapper }) {
+  const [finishedOpen,setFinishedOpen]=createSignal(false);
   const [mode, setMode] = createSignal<"delegate" | "adopt" | null>(null);
   const [message, setMessage] = createSignal<string | null>(null);
   const [text, setText] = createSignal("");
   const sendMessage = async () => {
     try {
-      await command(props.zot.id, {
+      await command(props.zapper.id, {
         type: "messageWorker",
         chatId: message()!,
         text: text().trim(),
@@ -48,7 +51,7 @@ export function Threads(props: { zot: Zapper }) {
         </div>
       </div>
       <For
-        each={props.zot.workers.filter((w) => workerVisible(w.chatId))}
+        each={props.zapper.workers.filter((w) => workerVisible(w.chatId)).sort((a,b)=>workerRank(a)-workerRank(b)||(a.queuePosition ?? 0)-(b.queuePosition ?? 0)||a.chatId.localeCompare(b.chatId))}
         fallback={
           <p class="zp-muted">
             Delegate a task or adopt an existing project conversation.
@@ -68,7 +71,7 @@ export function Threads(props: { zot: Zapper }) {
                     size="sm"
                     aria-label={`Thread actions for ${threadTitle(worker.chatId, worker.objective)}`}
                   >
-                    •••
+                    <Icon name="more-horizontal" size={14} />
                   </Button>
                 )}
                 items={[
@@ -82,7 +85,7 @@ export function Threads(props: { zot: Zapper }) {
                   {
                     label: "Stop thread",
                     onSelect: () =>
-                      act(props.zot.id, {
+                      act(props.zapper.id, {
                         type: "stopWorker",
                         chatId: worker.chatId,
                       }),
@@ -90,7 +93,7 @@ export function Threads(props: { zot: Zapper }) {
                   {
                     label: "Archive thread",
                     onSelect: () =>
-                      act(props.zot.id, {
+                      act(props.zapper.id, {
                         type: "archiveWorker",
                         chatId: worker.chatId,
                       }),
@@ -98,7 +101,7 @@ export function Threads(props: { zot: Zapper }) {
                   {
                     label: "Release to project",
                     onSelect: () =>
-                      act(props.zot.id, {
+                      act(props.zapper.id, {
                         type: "releaseWorker",
                         chatId: worker.chatId,
                       }),
@@ -108,7 +111,7 @@ export function Threads(props: { zot: Zapper }) {
             </div>
             <p>{worker.objective}</p>
             <small class="zp-muted">
-              {statusLabel(state.sessions[worker.chatId]?.status)} ·{" "}
+              {workerStatus(worker)} ·{" "}
               {state.spaces[worker.spaceId]?.name ||
                 state.spaces[worker.spaceId]?.path ||
                 "Repository"}{" "}
@@ -117,23 +120,24 @@ export function Threads(props: { zot: Zapper }) {
           </div>
         )}
       </For>
+      <Show when={finishedThreads(props.zapper).length}><button type="button" class="zp-finished-toggle" aria-expanded={finishedOpen()?"true":"false"} onClick={()=>setFinishedOpen(value=>!value)}>Finished · {finishedThreads(props.zapper).length}<Icon name={finishedOpen()?"alt-arrow-down":"alt-arrow-right"} size={12} /></button><Show when={finishedOpen()}><For each={finishedThreads(props.zapper)}>{id=><button type="button" class="zp-history-row" onClick={()=>openChat(id)}>{threadTitle(id)}<span class="zp-muted">{props.zapper.issues.find(issue=>issue.threads.includes(id))?.number ? `ZAP-${props.zapper.issues.find(issue=>issue.threads.includes(id))!.number}` : "Finished"}</span></button>}</For></Show></Show>
       <h3>Coordinator conversations</h3>
       <For
         each={[
-          props.zot.coordinatorChatId,
-          ...props.zot.previousCoordinatorChats,
+          props.zapper.coordinatorChatId,
+          ...props.zapper.previousCoordinatorChats,
         ]}
       >
         {(id) => (
           <button class="zp-history-row" onClick={() => openChat(id)}>
             {threadTitle(
               id,
-              id === props.zot.coordinatorChatId
+              id === props.zapper.coordinatorChatId
                 ? "Current coordinator"
                 : "Previous coordinator",
             )}
             <span class="zp-muted">
-              {id === props.zot.coordinatorChatId ? "Current" : "Previous"}
+              {id === props.zapper.coordinatorChatId ? "Current" : "Previous"}
             </span>
           </button>
         )}
@@ -141,7 +145,7 @@ export function Threads(props: { zot: Zapper }) {
       <Show when={mode()}>
         {(value) => (
           <WorkerDialog
-            zot={props.zot}
+            zapper={props.zapper}
             mode={value()}
             close={() => setMode(null)}
           />
@@ -179,7 +183,7 @@ export function Threads(props: { zot: Zapper }) {
   );
 }
 export function WorkerDialog(props: {
-  zot: Zapper;
+  zapper: Zapper;
   mode: "delegate" | "adopt";
   close: () => void;
   issueId?: string;
@@ -188,7 +192,7 @@ export function WorkerDialog(props: {
   const [objective, setObjective] = createSignal(() =>
     untrack(() =>
       props.issueId
-        ? (props.zot.issues.find((i) => i.id === props.issueId)?.details
+        ? (props.zapper.issues.find((i) => i.id === props.issueId)?.details
             .title ?? "")
         : "",
     ),
@@ -196,12 +200,12 @@ export function WorkerDialog(props: {
   const [chat, setChat] = createSignal("");
   const [base, setBase] = createSignal("HEAD");
   const [harness, setHarness] = createSignal(() =>
-    untrack(() => props.zot.config.coordinatorModel.harness),
+    untrack(() => props.zapper.config.coordinatorModel.harness),
   );
   const [model, setModel] = createSignal(() =>
-    untrack(() => props.zot.config.coordinatorModel.model ?? ""),
+    untrack(() => props.zapper.config.coordinatorModel.model ?? ""),
   );
-  const repository = () => props.zot.config.repositories[repo()];
+  const repository = () => props.zapper.config.repositories[repo()];
   const candidates = createMemo(() =>
     Object.values(state.chats).filter(
       (c) =>
@@ -215,7 +219,7 @@ export function WorkerDialog(props: {
   const save = async (event: SubmitEvent) => {
     event.preventDefault();
     const r = repository();
-    if (!r || !objective().trim()) return;
+    if (!r || !objective().trim() || (props.mode === "adopt" && !chat())) return;
     const worker = {
       chatId: props.mode === "adopt" ? chat() : "",
       deviceId: r.deviceId,
@@ -225,7 +229,7 @@ export function WorkerDialog(props: {
     };
     try {
       const result = await command(
-        props.zot.id,
+        props.zapper.id,
         props.mode === "adopt"
           ? { type: "adoptWorker", worker }
           : {
@@ -269,7 +273,7 @@ export function WorkerDialog(props: {
               setChat("");
             }}
           >
-            <For each={props.zot.config.repositories}>
+            <For each={props.zapper.config.repositories}>
               {(r, i) => (
                 <option value={i()}>
                   {state.spaces[r.spaceId]?.name ||
@@ -281,7 +285,7 @@ export function WorkerDialog(props: {
             </For>
           </select>
         </label>
-        <Show when={!props.zot.config.repositories.length}>
+        <Show when={!props.zapper.config.repositories.length}>
           <p>Add a repository in Zapper settings before delegating work.</p>
         </Show>
         <Show when={props.mode === "adopt"}>
@@ -310,25 +314,7 @@ export function WorkerDialog(props: {
           />
         </label>
         <Show when={props.mode === "delegate"}>
-          <label>
-            Agent
-            <select
-              value={harness()}
-              onChange={(e) => setHarness(e.currentTarget.value)}
-            >
-              <For each={state.harnesses}>
-                {(h) => <option value={h.id}>{h.name || h.id}</option>}
-              </For>
-            </select>
-          </label>
-          <label>
-            Model
-            <input
-              placeholder="Agent default"
-              value={model()}
-              onInput={(e) => setModel(e.currentTarget.value)}
-            />
-          </label>
+          <label>Agent and model<ZapperModelPicker label="Worker model" deviceId={repository()?.deviceId ?? props.zapper.config.workerDeviceId} value={{harness:harness(),model:model() || null}} onChange={value => { setHarness(value.harness); setModel(value.model ?? ""); }} /></label>
           <label>
             Base branch or commit
             <input

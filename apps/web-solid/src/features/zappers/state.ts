@@ -1,3 +1,4 @@
+import { panelFor, showPage } from "./panel";
 import { createSignal, createStore, reconcile } from "solid-js";
 import { rpc } from "@/core/connection";
 import { M } from "@/core/methods";
@@ -6,6 +7,7 @@ import { state, setState } from "@/core/store";
 import { uuid, errorText } from "@/core/util";
 import { openChat, view } from "@/core/view";
 import { zapperForChat } from "@/core/zappers";
+import { eventsFromWire, wireMethod, wireParams } from "@/core/zapper-legacy";
 import type {
   Zapper,
   ZapperAction,
@@ -28,18 +30,18 @@ export const [commandState, setCommandState] = createStore({
 let pending = false;
 let retry: { command: ZapperCommand; targetDeviceId?: string } | null = null;
 
-function accept(zot: Zapper | null, id: string) {
+function accept(zapper: Zapper | null, id: string) {
   setState((draft) => {
     const index = draft.zappers.findIndex((z) => z.id === id);
-    if (!zot) {
+    if (!zapper) {
       if (index >= 0) draft.zappers.splice(index, 1);
-    } else if (index < 0) draft.zappers.push(zot);
+    } else if (index < 0) draft.zappers.push(zapper);
     else if (
-      draft.zappers[index]!.revision < zot.revision ||
-      (draft.zappers[index]!.revision === zot.revision &&
-        draft.zappers[index]!.activityRevision <= zot.activityRevision)
+      draft.zappers[index]!.revision < zapper.revision ||
+      (draft.zappers[index]!.revision === zapper.revision &&
+        draft.zappers[index]!.activityRevision <= zapper.activityRevision)
     )
-      reconcile(zot)(draft.zappers[index]!);
+      reconcile(zapper)(draft.zappers[index]!);
   });
 }
 async function execute(request: NonNullable<typeof retry>) {
@@ -51,11 +53,11 @@ async function execute(request: NonNullable<typeof retry>) {
     draft.uncertain = false;
   });
   try {
-    const result = await rpc.call<Zapper | null>(M.CONTROL_ZOT_COMMAND, {
-      ...request.command,
-      targetDeviceId: request.targetDeviceId,
-    });
-    accept(result, request.command.zotId);
+    const result = await rpc.call<Zapper | null>(
+      wireMethod(M.CONTROL_ZAPPER_COMMAND),
+      wireParams({ ...request.command, targetDeviceId: request.targetDeviceId }),
+    );
+    accept(result, request.command.zapperId);
     retry = null;
     return result;
   } catch (error) {
@@ -76,21 +78,21 @@ async function execute(request: NonNullable<typeof retry>) {
   }
 }
 export function command(id: string, action: ZapperAction, home?: string) {
-  const zot = state.zappers.find((z) => z.id === id);
+  const zapper = state.zappers.find((z) => z.id === id);
   const commandId = uuid();
   if (action.type === "delegate")
     action = {
       ...action,
-      worker: { ...action.worker, chatId: `zot-worker-${commandId}` },
+      worker: { ...action.worker, chatId: `zapper-worker-${commandId}` },
     };
   return execute({
     command: {
       commandId,
-      zotId: id,
-      expectedRevision: zot?.revision ?? null,
+      zapperId: id,
+      expectedRevision: zapper?.revision ?? null,
       action,
     },
-    targetDeviceId: home ?? zot?.config.homeDeviceId,
+    targetDeviceId: home ?? zapper?.config.homeDeviceId,
   });
 }
 export async function retryCommand() {
@@ -115,12 +117,13 @@ export const dismissError = () =>
 export function act(id: string, action: ZapperAction) {
   void command(id, action).catch(() => {});
 }
-export function openZapper(zot: Zapper) {
-  openChat(zot.coordinatorChatId);
+export function openZapper(zapper: Zapper) {
+  openChat(zapper.coordinatorChatId);
 }
 
 export type Tab = "overview" | "issues" | "threads" | "drive" | "history";
-export const [tab, setTab] = createSignal<Tab>("overview");
+export const tab = (): Tab | undefined => { const z=selectedZapper();const page=panelFor(z?.id ?? "").active;return page.kind === "section" ? page.name : page.kind === "history" ? "history" : undefined; };
+export function setTab(next: Tab) { const z=selectedZapper(); if(z)showPage(z.id,next === "history" ? {kind:"history"} : {kind:"section",name:next}); }
 export const [inspectorOpen, setInspectorOpen] = createSignal(true);
 export const [resources, setResources] = createStore({
   id: "",
@@ -134,12 +137,12 @@ let displayedZapperId = "";
 let refreshTask: Promise<void> | null = null;
 let queuedRefresh: Zapper | null = null;
 /** Collapse bursts of watch updates into one in-flight read and one trailing refresh. */
-export function loadResources(zot: Zapper): Promise<void> {
-  queuedRefresh = zot;
-  displayedZapperId = zot.id;
+export function loadResources(zapper: Zapper): Promise<void> {
+  queuedRefresh = zapper;
+  displayedZapperId = zapper.id;
   setResources((draft) => {
-    if (draft.id !== zot.id) {
-      draft.id = zot.id;
+    if (draft.id !== zapper.id) {
+      draft.id = zapper.id;
       draft.files = [];
       draft.events = [];
     }
@@ -158,10 +161,10 @@ export function loadResources(zot: Zapper): Promise<void> {
   }
   return refreshTask;
 }
-async function fetchResources(zot: Zapper) {
+async function fetchResources(zapper: Zapper) {
   const mine = ++requestNumber;
-  const id = zot.id;
-  const target = { zotId: id, targetDeviceId: zot.config.homeDeviceId };
+  const id = zapper.id;
+  const target = { zapperId: id, targetDeviceId: zapper.config.homeDeviceId };
   setResources((draft) => {
     if (draft.id !== id) {
       draft.files = [];
@@ -173,8 +176,8 @@ async function fetchResources(zot: Zapper) {
   });
   try {
     const [files, events] = await Promise.all([
-      rpc.call<ZapperFile[]>(M.CONTROL_ZOT_FILES, { ...target, history: true }),
-      rpc.call<ZapperEvent[]>(M.CONTROL_ZOT_EVENTS, target),
+      rpc.call<ZapperFile[]>(wireMethod(M.CONTROL_ZAPPER_FILES), wireParams({ ...target, history: true })),
+      rpc.call<ZapperEvent[]>(wireMethod(M.CONTROL_ZAPPER_EVENTS), wireParams(target)).then(eventsFromWire),
     ]);
     if (mine !== requestNumber || displayedZapperId !== id) return;
     setResources((draft) => {
@@ -207,7 +210,7 @@ export const statusLabel = (value: string | undefined) =>
   )[value ?? ""] ?? "Idle";
 export const threadTitle = (id: string, fallback = "Conversation") => {
   const title = state.chats[id]?.title?.trim();
-  return title && !/^\[Message from (?:Zapper|Zot) /.test(title) ? title : fallback;
+  return title && !/^\[Message from (?:Zapper|Zapper) /.test(title) ? title : fallback;
 };
 export const workerVisible = (id: string) => !state.chats[id]?.archived;
 export const threadStarted = (id: string) =>

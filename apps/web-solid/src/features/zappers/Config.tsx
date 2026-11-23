@@ -1,3 +1,4 @@
+import { ZapperModelPicker } from "./Controls";
 import {
   createMemo,
   createSignal,
@@ -67,6 +68,20 @@ function ConfigForm(props: { existing?: Zapper }) {
     value: ZapperConfig[K],
   ) => setDraft((d) => ({ ...d, [key]: value }));
   const avatar = () => draft().avatar ?? defaultAvatar(id);
+  const uploadAvatar = async (file: File | undefined) => {
+    if(!file) return;
+    if(!["image/png","image/jpeg"].includes(file.type) || file.size>10*1024*1024) {setError("Choose a PNG or JPEG under 10 MB.");return;}
+    let bitmap: ImageBitmap | undefined;
+    try {
+      bitmap=await createImageBitmap(file);
+      const canvas=document.createElement("canvas");canvas.width=128;canvas.height=128;
+      const context=canvas.getContext("2d");if(!context)throw new Error("Image preview is unavailable.");
+      const edge=Math.min(bitmap.width,bitmap.height);
+      context.drawImage(bitmap,(bitmap.width-edge)/2,(bitmap.height-edge)/2,edge,edge,0,0,128,128);
+      const image=canvas.toDataURL("image/png");if(image.length>96*1024)throw new Error("This picture is too large. Try a smaller image.");
+      change("avatarImage",image);setError(null);
+    } catch {setError("Could not read this picture. Choose a different PNG or JPEG.");} finally {bitmap?.close();}
+  };
   const devices = createMemo(() => Object.values(state.devices));
   const save = async (event: SubmitEvent) => {
     event.preventDefault();
@@ -76,14 +91,14 @@ function ConfigForm(props: { existing?: Zapper }) {
       return void setError("Choose the coordinator and worker computers.");
     setError(null);
     try {
-      const zot = await command(
+      const zapper = await command(
         id,
         { type: props.existing ? "configure" : "create", config },
         config.homeDeviceId,
       );
-      if (zot) {
+      if (zapper) {
         await Promise.resolve();
-        openZapper(zot);
+        openZapper(zapper);
       }
     } catch {
       /* The shared command alert retains the exact retry, if delivery is uncertain. */
@@ -125,7 +140,8 @@ function ConfigForm(props: { existing?: Zapper }) {
           />
         </label>
         <fieldset>
-          <legend>Character</legend>
+          <legend>Picture</legend><div class="zp-avatar-upload"><Avatar avatar={avatar()} image={draft().avatarImage} size={48} /><label class="zp-upload-button">Upload picture<input type="file" aria-label="Upload Zapper picture" accept="image/png,image/jpeg" onChange={event=>{ void uploadAvatar(event.currentTarget.files?.[0]);event.currentTarget.value=""; }} /></label><Show when={draft().avatarImage}><Button size="sm" onClick={()=>change("avatarImage",undefined)}>Use character</Button></Show></div><p class="zp-muted">PNG or JPEG. Cropped to a 128px square.</p>
+          <h3>Character</h3>
           <div class="zp-avatar-options">
             <For each={mascots}>
               {(mascot) => (
@@ -243,46 +259,7 @@ function ConfigForm(props: { existing?: Zapper }) {
           </Show>
         </fieldset>
         <div class="zp-form-grid">
-          <label>
-            Coordinator agent
-            <select
-              value={draft().coordinatorModel.harness}
-              onChange={(e) =>
-                change("coordinatorModel", {
-                  harness: e.currentTarget.value,
-                  model: null,
-                })
-              }
-            >
-              <For each={state.harnesses}>
-                {(h) => <option value={h.id}>{h.name || h.id}</option>}
-              </For>
-              <Show
-                when={
-                  !state.harnesses.some(
-                    (h) => h.id === draft().coordinatorModel.harness,
-                  )
-                }
-              >
-                <option value={draft().coordinatorModel.harness}>
-                  {draft().coordinatorModel.harness}
-                </option>
-              </Show>
-            </select>
-          </label>
-          <label>
-            Model
-            <input
-              value={draft().coordinatorModel.model ?? ""}
-              placeholder="Agent default"
-              onInput={(e) =>
-                change("coordinatorModel", {
-                  ...draft().coordinatorModel,
-                  model: e.currentTarget.value || null,
-                })
-              }
-            />
-          </label>
+          <label>Coordinator model<ZapperModelPicker label="Coordinator model" deviceId={draft().homeDeviceId} value={draft().coordinatorModel} onChange={value => change("coordinatorModel",value)} /></label>
           <label>
             Concurrent threads
             <input

@@ -4,7 +4,6 @@ import { registerShortcut } from "@/core/keys";
 import type { SessionMessageEntry } from "@/core/protocol";
 import { state } from "@/core/store";
 import { openChat, view } from "@/core/view";
-import { openSubagent } from "@/features/workspace/store";
 import { Icon } from "@/ui/Icon";
 import { DitherRing } from "@/ui/loaders";
 import { createVirtualizer } from "@/ui/virtualizer";
@@ -250,7 +249,6 @@ function ChatTranscript(props: { chatId: string }) {
     device: () => chat()?.deviceId ?? null,
     harness: () => chat()?.config?.harness,
     last: () => index() === messages().length - 1,
-    openSubagent: (ref, title) => openSubagent({ chatId: props.chatId, ref, title }),
   });
 
   // Prompts only arrive or leave with the list's length, so the outline rebuilds from plain rows then.

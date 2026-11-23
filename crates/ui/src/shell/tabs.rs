@@ -9,6 +9,34 @@ pub(super) fn active_tab_text_color(theme: &Theme) -> gpui::Hsla {
     crate::theme::mix(theme.text, theme.text_muted, 0.3)
 }
 
+/// The chip every conversation, file and diff tab in the titlebar strip
+/// shares.
+pub(super) fn conversation_tab_chip(
+    id: SharedString,
+    title: SharedString,
+    active: bool,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    crate::surface_chrome::workspace_tab(id, active, theme)
+        .role(gpui::Role::Tab)
+        .aria_label(title)
+        .aria_selected(active)
+        .cursor_pointer()
+        .flex_none()
+        .w(px(160.))
+        .h(px(28.))
+        .px(px(9.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(crate::typography::text_md())
+        .when(active, |d| {
+            d.text_color(active_tab_text_color(theme))
+                .font_weight(gpui::FontWeight::MEDIUM)
+        })
+        .when(!active, |d| d.text_color(theme.text_muted))
+}
+
 /// The × every closable tab shares: shown on the active tab, revealed on
 /// hover (of `group`) for the rest.
 pub(super) fn tab_close_button(
@@ -199,8 +227,8 @@ impl Shell {
         self.overlay_owns_keyboard(cx)
             || self.sync_flow.has_visible_overlay()
             || self.delete_confirm.is_some()
-            || self.zot_ui.dialog.is_some()
-            || self.zot_overlay_open()
+            || self.zapper_ui.dialog.is_some()
+            || self.zapper_overlay_open()
             || self.delete_space_confirm.is_some()
             || self.chat_rename.is_some()
             || self.rename_space_dialog.is_some()
@@ -683,6 +711,14 @@ impl Shell {
 
     /// Reopen a closed conversation from the history menu as the active tab.
     fn restore_thread_conversation(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        if self.cloud_conversation.is_some() {
+            // A cloud chat's conversations live on its computer, not in this
+            // device's thread list: reopen it in a tab of its own.
+            self.close_conversation_history(cx);
+            self.restore_cloud_conversation(chat_id, cx);
+            self.activate_main_tab(None, cx);
+            return;
+        }
         if let Some((root, ..)) = self.thread_conversation_tabs(cx)
             && let Some(closed) = self.settings.closed_thread_conversations.get_mut(&root)
         {
@@ -703,83 +739,20 @@ impl Shell {
         }
     }
 
-    pub(super) fn render_thread_conversations(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The open chat's file and commit-diff tabs as titlebar chips. Local and
+    /// cloud conversation strips both end with them, so a file opened from
+    /// the Files panel always gets a tab beside the chat it belongs to.
+    pub(super) fn render_main_tab_chips(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = Theme::of(cx).clone();
-        let Some((_, rows, closed_rows)) = self.thread_conversation_tabs(cx) else {
-            return Empty.into_any_element();
-        };
-        let state = self.state.read(cx);
-        let Some(selected) = state.selected_chat_row() else {
-            return Empty.into_any_element();
-        };
-        // Side chats of the open conversation list after its siblings; they
-        // open in the right pane, beside the conversation they branch from.
-        let mut side_chats: Vec<_> = state
-            .chats
-            .iter()
-            .filter(|chat| {
-                chat.parent_chat_id.as_deref() == Some(selected.id.as_str()) && !chat.archived
-            })
-            .cloned()
-            .collect();
-        side_chats.sort_by_key(|chat| chat.created_at);
-        // Tabs whose agent is mid-turn trade their harness icon for the
-        // activity glyph, so work in a background tab stays visible.
-        let now = Utc::now();
-        let working: std::collections::HashSet<String> = rows
-            .iter()
-            .chain(&side_chats)
-            .filter(|chat| {
-                state.display_status_for(chat, now) == zuse_protocol::ChatIndicator::Working
-            })
-            .map(|chat| chat.id.clone())
-            .collect();
-        let selected_id = selected.id.clone();
-        let archived = selected.archived;
         let main_tab = self.active_main_tab(cx);
-        let main_tabs = self.main_tab_rows(cx);
-        let closable = rows.len() > 1;
-        let tab_spinner = |id: &str, cx: &mut Context<Self>| {
-            div()
-                .size(px(14.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(crate::loaders::mini_glyph_spinner(
-                    format!("thread-conversation-working-{id}"),
-                    2.0,
-                    theme.loader_glyph(),
-                    cx.entity_id(),
-                    cx,
-                ))
-                .into_any_element()
-        };
         let tab_chip = |id: SharedString, title: SharedString, active: bool| {
-            crate::surface_chrome::workspace_tab(id, active, &theme)
-                .role(gpui::Role::Tab)
-                .aria_label(title)
-                .aria_selected(active)
-                .cursor_pointer()
-                .flex_none()
-                .w(px(160.))
-                .h(px(28.))
-                .px(px(9.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .text_size(crate::typography::text_md())
-                .when(active, |d| {
-                    d.text_color(active_tab_text_color(&theme))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                })
-                .when(!active, |d| d.text_color(theme.text_muted))
+            conversation_tab_chip(id, title, active, &theme)
         };
         let close_button =
             |id: SharedString, label: &'static str, active: bool, group: SharedString| {
                 tab_close_button(id, label, active, group, &theme)
             };
-        let main_chips = main_tabs
+        self.main_tab_rows(cx)
             .into_iter()
             .map(|row| {
                 let main_tabs::MainTabRow {
@@ -879,7 +852,68 @@ impl Shell {
                     }))
                     .into_any_element()
             })
-            .collect::<Vec<_>>();
+            .collect::<Vec<_>>()
+    }
+
+    pub(super) fn render_thread_conversations(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = Theme::of(cx).clone();
+        let Some((_, rows, closed_rows)) = self.thread_conversation_tabs(cx) else {
+            return Empty.into_any_element();
+        };
+        let state = self.state.read(cx);
+        let Some(selected) = state.selected_chat_row() else {
+            return Empty.into_any_element();
+        };
+        // Side chats of the open conversation list after its siblings; they
+        // open in the right pane, beside the conversation they branch from.
+        let mut side_chats: Vec<_> = state
+            .chats
+            .iter()
+            .filter(|chat| {
+                chat.parent_chat_id.as_deref() == Some(selected.id.as_str()) && !chat.archived
+            })
+            .cloned()
+            .collect();
+        side_chats.sort_by_key(|chat| chat.created_at);
+        // Tabs whose agent is mid-turn trade their harness icon for the
+        // activity glyph, so work in a background tab stays visible.
+        let now = Utc::now();
+        let working: std::collections::HashSet<String> = rows
+            .iter()
+            .chain(&side_chats)
+            .filter(|chat| {
+                state.display_status_for(chat, now) == zuse_protocol::ChatIndicator::Working
+            })
+            .map(|chat| chat.id.clone())
+            .collect();
+        let selected_id = selected.id.clone();
+        let archived = selected.archived;
+        let main_tab = self.active_main_tab(cx);
+        let closable = rows.len() > 1;
+        let tab_spinner = |id: &str, cx: &mut Context<Self>| {
+            div()
+                .size(px(14.))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(crate::loaders::mini_glyph_spinner(
+                    format!("thread-conversation-working-{id}"),
+                    2.0,
+                    theme.loader_glyph(),
+                    cx.entity_id(),
+                    cx,
+                ))
+                .into_any_element()
+        };
+        let tab_chip = |id: SharedString, title: SharedString, active: bool| {
+            conversation_tab_chip(id, title, active, &theme)
+        };
+        let close_button =
+            |id: SharedString, label: &'static str, active: bool, group: SharedString| {
+                tab_close_button(id, label, active, group, &theme)
+            };
+        let main_chips = self.render_main_tab_chips(cx);
         let conversation_chips = rows
             .into_iter()
             .map(|chat| {
@@ -1009,63 +1043,10 @@ impl Shell {
                 .into_any_element()
             })
             .collect::<Vec<_>>();
-        // Quiet 24px strip buttons: the `+` after the last tab and the
-        // history clock at the strip's right end.
         let strip_button = |id: &'static str, glyph: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .size(px(24.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(7.))
-                .cursor_pointer()
-                .hover(|d| d.bg(theme.muted_fill().opacity(0.6)))
-                .tip(label)
-                .child(icon(glyph).size(px(14.)).text_color(theme.text_muted))
+            strip_button(&theme, id, glyph, label)
         };
-        let history_open = self.conversation_history.get().is_some();
-        let history = strip_button(
-            "thread-conversation-history",
-            icons::HISTORY,
-            "Earlier chats",
-        )
-        .aria_expanded(history_open)
-        .when(history_open, |d| d.bg(theme.muted_fill().opacity(0.6)))
-        .block_mouse_except_scroll()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, window, _| {
-                window.prevent_default();
-                this.conversation_history.note_trigger_press();
-            }),
-        )
-        .on_click(cx.listener(|this, _, _, cx| {
-            cx.stop_propagation();
-            if this.conversation_history.take_press_was_open() {
-                this.close_conversation_history(cx);
-            } else {
-                this.conversation_history.open(());
-                cx.notify();
-            }
-        }));
-        let history = if history_open {
-            let closing = self.conversation_history.closing_since();
-            let menu = self.render_conversation_history(&closed_rows, &theme, cx);
-            history
-                .relative()
-                .child(popover::anchored_menu_below_end(
-                    "thread-conversation-history-menu",
-                    menu,
-                    closing,
-                ))
-                .into_any_element()
-        } else {
-            history.into_any_element()
-        };
+        let history = self.render_conversation_history_button(&closed_rows, &theme, cx);
         div()
             .w_full()
             .flex()
@@ -1100,6 +1081,55 @@ impl Shell {
             .child(div().flex_1())
             .child(history)
             .into_any_element()
+    }
+
+    /// The strip's history clock and its menu of `closed` conversations.
+    pub(super) fn render_conversation_history_button(
+        &self,
+        closed: &[zuse_protocol::Chat],
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let history_open = self.conversation_history.get().is_some();
+        let history = strip_button(
+            theme,
+            "thread-conversation-history",
+            icons::HISTORY,
+            "Earlier chats",
+        )
+        .aria_expanded(history_open)
+        .when(history_open, |d| d.bg(theme.muted_fill().opacity(0.6)))
+        .block_mouse_except_scroll()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, window, _| {
+                window.prevent_default();
+                this.conversation_history.note_trigger_press();
+            }),
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            cx.stop_propagation();
+            if this.conversation_history.take_press_was_open() {
+                this.close_conversation_history(cx);
+            } else {
+                this.conversation_history.open(());
+                cx.notify();
+            }
+        }));
+        if history_open {
+            let closing = self.conversation_history.closing_since();
+            let menu = self.render_conversation_history(closed, theme, cx);
+            history
+                .relative()
+                .child(popover::anchored_menu_below_end(
+                    "thread-conversation-history-menu",
+                    menu,
+                    closing,
+                ))
+                .into_any_element()
+        } else {
+            history.into_any_element()
+        }
     }
 
     /// The history menu: this thread's closed conversations, most recent
@@ -1298,10 +1328,10 @@ impl Shell {
                                 icons::sidebar_glyph(
                                     motion::state_t(
                                         "toggle-changes",
-                                        self.selected_zot(cx).map_or(
+                                        self.selected_zapper(cx).map_or(
                                             self.right_pane_open(cx) && fit.right,
                                             |_| {
-                                                !self.zot_ui.panel_hidden
+                                                !self.zapper_ui.panel_hidden
                                                     || self.right_pane_open(cx)
                                             },
                                         ),
@@ -1326,11 +1356,11 @@ impl Shell {
         // The conversation's own top-bar actions, in the reference order:
         // Open in, the environment summary, then the bottom terminal; the
         // right pane's toggle anchors the far edge.
-        // A Zot's coordinator has no repository, branch or environment to show.
-        let zot_coordinator = self.state.read(cx).selected_chat_is_zot_coordinator();
-        // Neither does a Zot thread that hasn't created its worktree yet.
+        // A Zapper's coordinator has no repository, branch or environment to show.
+        let zapper_coordinator = self.state.read(cx).selected_chat_is_zapper_coordinator();
+        // Neither does a Zapper thread that hasn't created its worktree yet.
         let no_checkout =
-            zot_coordinator || self.state.read(cx).selected_chat_awaits_zot_worktree();
+            zapper_coordinator || self.state.read(cx).selected_chat_awaits_zapper_worktree();
         let session_info_toggle = (!takeover && !on_canvas && !no_checkout).then(|| {
             let open = self.session_info_visible();
             header_icon_button(
@@ -1442,6 +1472,30 @@ impl Shell {
         self.titlebar_drag_region("chat-titlebar", bar, cx)
             .into_any_element()
     }
+}
+
+/// A quiet 24px strip button: the `+` after the last tab and the history
+/// clock at the strip's right end.
+pub(super) fn strip_button(
+    theme: &Theme,
+    id: &'static str,
+    glyph: &'static str,
+    label: &'static str,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .role(gpui::Role::Button)
+        .aria_label(label)
+        .size(px(24.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(7.))
+        .cursor_pointer()
+        .hover(|d| d.bg(theme.muted_fill().opacity(0.6)))
+        .tip(label)
+        .child(icon(glyph).size(px(14.)).text_color(theme.text_muted))
 }
 
 #[cfg(test)]

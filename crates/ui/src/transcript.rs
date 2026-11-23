@@ -236,6 +236,9 @@ pub const GLIDE_MAX_VIEWPORTS: f32 = 2.5;
 /// The titlebar overlays the full-height list, so its height is part of the
 /// inset; the extra 10px matches the first row's breathing room.
 pub(crate) const OWN_SEND_TOP_INSET_PX: f32 = Theme::TITLEBAR_HEIGHT + 10.0;
+/// The first row's top gap in a full-window transcript: it rests below the
+/// titlebar it fades under. A new chat's anchored first message sits here.
+pub(crate) const FIRST_ROW_TOP_GAP_PX: f32 = Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0;
 /// Epsilon of extra height under the reservation. The runway ends AT the
 /// app's bottom — this is not scroll room (24px of it read as a janky
 /// overshoot-and-fight zone, user report) — it exists only to keep the held
@@ -1140,7 +1143,7 @@ pub enum RowKind {
         spec: Arc<str>,
     },
     User {
-        sender: Option<zuse_protocol::presentation::zot_message::ZotSender>,
+        sender: Option<zuse_protocol::presentation::zapper_message::ZapperSender>,
         /// Visible prompt (attachment-ref trailer already stripped). When the
         /// prompt carries file mentions this is the *projected* display text —
         /// chip labels in place of the raw Markdown links.
@@ -1161,8 +1164,11 @@ pub enum RowKind {
         pending: bool,
         /// A coordinator turn the Zapper engine assembled: `text` is its
         /// short version and this is everything the agent received, shown
-        /// only behind "Show full prompt".
+        /// only behind "Show full prompt", when it differs from `text`.
         full_prompt: Option<SharedString>,
+        /// An engine-generated Zapper turn: its header reads "Sent from
+        /// Zapper". The owner's own coordinator messages are not.
+        zapper: bool,
     },
     /// One top-level markdown block of a completed message.
     Markdown {
@@ -1430,14 +1436,17 @@ pub fn user_resize_spec(height_delta: f32) -> motion::MotionSpec {
 #[cfg(test)]
 thread_local! { static FORBID_ROW_PREPARATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
-/// The whole prompt behind a Zapper coordinator turn, when the entry is one.
-/// Slack requests and ordinary messages show their text as before.
+/// The whole prompt behind an engine-generated Zapper turn, when it says more
+/// than the short text shown. The owner's own messages, Slack requests and
+/// ordinary messages show their text as before.
 fn zapper_full_prompt(
     source: Option<&zuse_protocol::slack::MessageSource>,
     raw: &str,
 ) -> Option<SharedString> {
     match source {
-        Some(zuse_protocol::slack::MessageSource::Zapper { .. }) if !raw.trim().is_empty() => {
+        Some(source @ zuse_protocol::slack::MessageSource::Zapper { typed: false, .. })
+            if !raw.trim().is_empty() && raw.trim() != source.text().trim() =>
+        {
             Some(raw.to_owned().into())
         }
         _ => None,
@@ -1489,6 +1498,10 @@ pub fn rows_for_entry(
             .collect::<Vec<_>>()
             .join("\n\n");
         let full_prompt = zapper_full_prompt(source.as_ref(), &raw);
+        let zapper = matches!(
+            source,
+            Some(zuse_protocol::slack::MessageSource::Zapper { typed: false, .. })
+        );
         let raw = source.as_ref().map(|s| s.text().to_owned()).unwrap_or(raw);
         // Attachment refs ride the plain text (the `withAttachments`
         // transport); split them back out for the thumbnail strip.
@@ -1499,12 +1512,19 @@ pub fn rows_for_entry(
         // Lifted before the mention projection, so a comment body's own
         // Markdown never lands in the bubble.
         let (body, badges) = crate::badges::split(&parsed.text);
-        let (sender, body) = match zuse_protocol::presentation::zot_message::parse_display(&body) {
+        let (sender, body) = match zuse_protocol::presentation::zapper_message::parse_display(&body)
+        {
             Some((sender, body)) => (Some(sender), body.to_owned()),
             None => (None, agent_message_display(&body)),
         };
         // A Slack request reads like any message sent on someone's behalf.
-        let sender = sender.or_else(|| source.as_ref().map(|s| s.sender()));
+        // The owner's own coordinator message reads as theirs, unattributed.
+        let sender = sender.or_else(|| {
+            source
+                .as_ref()
+                .filter(|s| !s.is_typed())
+                .map(|s| s.sender())
+        });
         // Draft chips become attachment references above the sent bubble.
         // Resolve uploads before lifting their spans so ordinary text and links
         // keep their original meaning; the draft editor is unaffected.
@@ -1579,6 +1599,7 @@ pub fn rows_for_entry(
                 files: Arc::new(files),
                 pending,
                 full_prompt,
+                zapper,
             },
             entry_id,
             // User rows always carry the strip (chat-view.tsx: whenever
@@ -2773,9 +2794,10 @@ pub fn chips_height(count: usize) -> f32 {
 
 /// Analytic height an open detail adds to its chip's card (separator + body)
 /// — output blocks by line count, diff blocks via the changes pane's own
-/// [`crate::changes::body_height`]. The chip's own [`CHIP_HEIGHT`] is already
-/// counted by [`chips_height`].
-pub fn detail_height(detail: &ToolDetail) -> f32 {
+/// [`crate::changes::body_height_with`] in the diff `mode` shown, since a
+/// split diff pairs lines and needs fewer rows than unified. The chip's own
+/// [`CHIP_HEIGHT`] is already counted by [`chips_height`].
+pub fn detail_height(detail: &ToolDetail, mode: crate::changes::DiffMode) -> f32 {
     let body = match detail {
         ToolDetail::Output {
             lines,
@@ -2791,7 +2813,13 @@ pub fn detail_height(detail: &ToolDetail) -> f32 {
             let rows = lines.len() + usize::from(*truncated_by > 0);
             rows as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD
         }
-        ToolDetail::Diff { file, .. } => crate::changes::body_height(file),
+        ToolDetail::Diff { file, .. } => crate::changes::body_height_with(
+            file,
+            &[],
+            None,
+            mode,
+            crate::changes::DIFF_LINE_HEIGHT,
+        ),
         ToolDetail::Stats { stats } => stats.len() as f32 * OUTPUT_LINE_HEIGHT + OUTPUT_BODY_PAD,
     };
     DETAIL_SEPARATOR + body
@@ -3811,6 +3839,7 @@ pub struct Transcript {
     /// Each instance owns separate scroll handles and list measurements, so
     /// every one must reset itself after a global Fit-mode transition.
     code_fences_generation: u64,
+    split_diffs: bool,
     /// Compact mode as last applied to this instance's row split. Render
     /// polls the setting each frame; a flip rebuilds every row.
     compact_mode: bool,
@@ -3843,6 +3872,11 @@ pub struct Transcript {
     /// Queue rows authored in this window. They become own-turn anchors only
     /// after the host promotes their stable id into a transcript message.
     pending_queued_turns: PendingQueuedTurns,
+    /// The own-turn prompt is a new chat's first message, which the server
+    /// may record under another id than the stand-in shown at send: when the
+    /// anchored copy goes, the anchor moves to the chat's first message
+    /// instead of retiring (see [`Self::on_own_first_send`]).
+    own_turn_follows_first: bool,
     /// A layout-affecting change needs one post-layout own-turn measurement.
     own_turn_kick: bool,
     /// One own-turn `on_next_frame` callback in flight at most.
@@ -3910,6 +3944,9 @@ pub struct Transcript {
     gallery_swipe: Rc<std::cell::Cell<crate::image_viewer::Swipe>>,
     /// A gallery was opened and waits for its first image to load.
     gallery_opening: bool,
+    /// Shown if the opening gallery's first image cannot be read (a linked
+    /// file that moved, or a machine that went offline).
+    gallery_failure_notice: Option<SharedString>,
     /// Mermaid fences drawn as diagrams in settled Markdown blocks. Each
     /// row's media handler requests its fences while laying out, so only
     /// painted diagrams are rendered (see [`MermaidCache`]).
@@ -4059,12 +4096,130 @@ impl Transcript {
     ) -> Option<render::LinkUi> {
         let roots = self.file_link_roots(source_chat_id, cx);
         let source_local = self.state.read(cx).chat_is_local(source_chat_id);
+        let owner = cx.weak_entity();
         self.workspace_link.clone().map(|mut link| {
             link.source_session = Some(source_chat_id.to_string());
             link.source_local = source_local;
             link.file_roots = Some(roots);
+            // Links to files on the chat's machine are read from that machine:
+            // images open in the viewer here, everything else falls through to
+            // the shell's file preview. Web links pass straight through.
+            let probe = link.clone();
+            let inner = link.handler.clone();
+            link.handler = Rc::new(move |activation, window, cx| {
+                if let Some(file) = linked_file(&probe, activation)
+                    && owner
+                        .update(cx, |this, cx| this.open_linked_file(file, window, cx))
+                        .unwrap_or(false)
+                {
+                    return render::LinkOutcome::Internal;
+                }
+                inner(activation, window, cx)
+            });
             link
         })
+    }
+
+    /// Open a file link the transcript can serve itself. `false` hands the
+    /// link on to the shell. A cloud chat whose computer is not connected
+    /// answers every file link with a quiet notice instead of an empty tab.
+    fn open_linked_file(
+        &mut self,
+        file: LinkedFile,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let state = self.state.read(cx);
+        if state.hosted_on_cloud_computer && state.engine().is_none() {
+            let path = match &file {
+                LinkedFile::Image { path, .. } | LinkedFile::Other(path) => path,
+            };
+            crate::toast::show(
+                cx,
+                crate::toast::ToastKind::Info,
+                format!(
+                    "Couldn't open {}. Its computer is offline.",
+                    file_badge_name(path)
+                ),
+            );
+            return true;
+        }
+        match file {
+            LinkedFile::Image { path, chat } => {
+                self.open_linked_image(path, chat.as_deref(), window, cx)
+            }
+            LinkedFile::Other(_) => false,
+        }
+    }
+
+    /// The one machine a linked file is read from: the device of `chat`
+    /// (the chat owning the file's checkout), else the linking chat's. No
+    /// fallback to this desktop — a same-named local file must never stand
+    /// in for the chat's. A chat row not synced yet falls back to the
+    /// engine's own device, which is the chat's for a cloud computer.
+    fn linked_file_device(&self, chat: Option<&str>, cx: &gpui::App) -> Option<String> {
+        let state = self.state.read(cx);
+        let row = match chat {
+            Some(id) => state.chats.iter().find(|row| row.id == id),
+            // An override (subagent) transcript has no chat row of its own.
+            None if self.doc_override.is_some() => return None,
+            None => state.selected_chat_row(),
+        };
+        row.map(|row| row.device_id.clone())
+            .or_else(|| state.local_device_id.clone())
+    }
+
+    /// An inline Markdown image's file: resolved through the chat's roots
+    /// like a link, so a relative source joins the checkout that owns it.
+    /// A source no root resolves is read as written from the chat's machine.
+    fn inline_image_file(&mut self, source: &str, cx: &mut Context<Self>) -> LinkedFile {
+        let activation = render::LinkActivation {
+            target: render::LinkTarget::new("", source),
+            action: render::LinkAction::Primary,
+            source_session: None,
+        };
+        match self
+            .link_ui(cx)
+            .and_then(|link| linked_file(&link, &activation))
+        {
+            Some(LinkedFile::Image { path, chat }) => LinkedFile::Image { path, chat },
+            Some(LinkedFile::Other(path)) => LinkedFile::Image { path, chat: None },
+            None => LinkedFile::Image {
+                path: source.to_owned(),
+                chat: None,
+            },
+        }
+    }
+
+    /// Show an image the chat linked to, read from the chat's own machine —
+    /// never from this desktop's disk unless the chat runs here. A missing
+    /// file or unreachable machine ends in a quiet notice, not a dead click.
+    fn open_linked_image(
+        &mut self,
+        path: String,
+        chat: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(device) = self.linked_file_device(chat, cx) else {
+            return false;
+        };
+        let devices = vec![device];
+        let notice = format!(
+            "Couldn't open {}. It may have moved, or its computer is offline.",
+            file_badge_name(&path)
+        );
+        self.open_gallery_with_notice(
+            vec![GalleryEntry {
+                source: Some((devices, path)),
+                preview: None,
+            }],
+            0,
+            Some(notice.into()),
+            window,
+            cx,
+        );
+        true
     }
 
     /// The ordered checkouts a file link from `chat_id` may open against:
@@ -4253,6 +4408,7 @@ impl Transcript {
             #[cfg(feature = "browser-fixture")]
             fixture_open_groups: false,
             code_fences_generation: crate::settings::code_fences_generation(cx),
+            split_diffs: crate::settings::split_diffs(cx),
             compact_mode: crate::settings::transcript_compact_mode(cx),
             compact_last_elapsed: HashMap::new(),
             compact_fold_heights: HashMap::new(),
@@ -4264,6 +4420,7 @@ impl Transcript {
             pinned,
             own_turn: None,
             pending_queued_turns: PendingQueuedTurns::default(),
+            own_turn_follows_first: false,
             own_turn_kick: false,
             own_turn_scheduled: false,
             own_turn_last_tick: None,
@@ -4296,6 +4453,7 @@ impl Transcript {
             attachment_gallery_index: 0,
             gallery_swipe: Rc::default(),
             gallery_opening: false,
+            gallery_failure_notice: None,
             diagrams: Rc::default(),
             diagram_media: None,
             diagram_worker: None,
@@ -4573,7 +4731,7 @@ impl Transcript {
             if self.doc_override.is_some() {
                 Theme::SPACE_LG
             } else {
-                Theme::TITLEBAR_HEIGHT + Theme::SPACE_LG + 10.0
+                FIRST_ROW_TOP_GAP_PX
             }
         } else {
             top_gap_for(ix.checked_sub(1).and_then(|i| self.rows.get(i)), row)
@@ -4951,8 +5109,46 @@ impl Transcript {
         });
         self.own_turn_last_tick = None;
         self.own_turn_kick = true;
+        self.own_turn_follows_first = false;
         self.remeasure_last_row();
         cx.notify();
+    }
+
+    /// [`Self::on_own_send`] for a new chat's first message. Its stand-in
+    /// is replaced by the server's copy, possibly more than once and under
+    /// other ids (an admitted row, then the computer's own record): the
+    /// anchor follows the chat's first message through each, so it never
+    /// drops to the bottom.
+    pub fn on_own_first_send(
+        &mut self,
+        chat_id: String,
+        message_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_own_send(chat_id, message_id, cx);
+        self.own_turn_follows_first = true;
+        // The launch view already showed the message at the top: hold it
+        // there from the first frame instead of gliding up from below.
+        if let Some(anchor) = self.own_turn.as_mut() {
+            anchor.positioned = true;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn own_send_target(&self) -> Option<String> {
+        self.own_turn
+            .as_ref()
+            .map(|anchor| anchor.message_id.to_string())
+    }
+    /// The prompt an own send is anchored to was replaced by the server's
+    /// copy under another id: keep the anchor on it, with no jump.
+    pub fn retarget_own_send(&mut self, from: &str, to: &str, cx: &mut Context<Self>) {
+        if let Some(anchor) = self.own_turn.as_mut()
+            && anchor.message_id.as_ref() == from
+        {
+            anchor.message_id = SharedString::from(to.to_owned());
+            cx.notify();
+        }
     }
 
     /// Remember a locally-authored queue row without touching the active
@@ -5064,6 +5260,19 @@ impl Transcript {
             .rows
             .iter()
             .any(|row| row.turn_start && row.entry_id == message_id);
+        if !exists && self.own_turn_follows_first {
+            let first = self
+                .rows
+                .iter()
+                .find(|row| row.turn_start && matches!(row.kind, RowKind::User { .. }))
+                .map(|row| row.entry_id.clone());
+            if let (Some(first), Some(anchor)) = (first, self.own_turn.as_mut()) {
+                anchor.message_id = first;
+                anchor.seen_prompt = true;
+                self.own_turn_kick = true;
+                return;
+            }
+        }
         let keep = self
             .own_turn
             .as_mut()
@@ -5073,6 +5282,7 @@ impl Transcript {
         }
 
         self.own_turn = None;
+        self.own_turn_follows_first = false;
         self.own_turn_kick = false;
         self.own_turn_last_tick = None;
         self.remeasure_last_row();
@@ -5154,7 +5364,12 @@ impl Transcript {
             return;
         }
         let inset = Self::own_send_inset(anchor_ix);
-        if self.is_glued() && self.own_turn.as_ref().is_some_and(|anchor| anchor.held) {
+        // A new chat's first message is held at the top from its first frame
+        // (it never glides), so it needs no glide runway.
+        if !self.own_turn_follows_first
+            && self.is_glued()
+            && self.own_turn.as_ref().is_some_and(|anchor| anchor.held)
+        {
             self.list.scroll_by(px(-viewport_height));
         }
         let anchor_bounds = self.list.bounds_for_item(anchor_ix);
@@ -5220,6 +5435,15 @@ impl Transcript {
                 // (user report). Bounds-less flicker still snaps — there is
                 // nothing to ease against.
                 match anchor_bounds {
+                    // A new chat's first message stays exactly where the
+                    // launch view showed it: snap, never ease into place.
+                    _ if self.own_turn_follows_first => {
+                        self.list.scroll_to(ListOffset {
+                            item_ix: anchor_ix,
+                            offset_in_item: px(-inset),
+                        });
+                        self.own_turn_last_tick = None;
+                    }
                     Some(b) => {
                         let err = f32::from(b.top()) - (f32::from(viewport.top()) + inset);
                         let now = Instant::now();
@@ -6811,9 +7035,23 @@ impl Transcript {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_gallery_with_notice(entries, index, None, window, cx);
+    }
+
+    /// Open the lightbox on `entries`. `failure_notice`, when given, is shown
+    /// if the first image cannot be read, so the click is never silent.
+    fn open_gallery_with_notice(
+        &mut self,
+        entries: Vec<GalleryEntry>,
+        index: usize,
+        failure_notice: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if index >= entries.len() {
             return;
         }
+        self.gallery_failure_notice = failure_notice;
         self.close_diagram_zoom(cx);
         self.dismiss_sent_pdf();
         self.attachment_preview = None;
@@ -6842,6 +7080,7 @@ impl Transcript {
         if foreign {
             self.attachment_gallery.clear();
             self.gallery_opening = false;
+            self.gallery_failure_notice = None;
             return;
         }
         let index = self.attachment_gallery_index;
@@ -6865,6 +7104,9 @@ impl Transcript {
                         if self.gallery_opening {
                             self.gallery_opening = false;
                             self.attachment_gallery.clear();
+                            if let Some(notice) = self.gallery_failure_notice.take() {
+                                crate::toast::show(cx, crate::toast::ToastKind::Info, notice);
+                            }
                         }
                         return;
                     }
@@ -6879,6 +7121,7 @@ impl Transcript {
         if !current {
             preview.viewer.reset();
             self.attachment_preview = Some(preview);
+            self.gallery_failure_notice = None;
             if std::mem::take(&mut self.gallery_opening) {
                 window.focus(&self.attachment_preview_focus, cx);
             }
@@ -7971,12 +8214,44 @@ impl Transcript {
 
     /// Media wiring for settled Markdown: Mermaid fences become diagrams
     /// once rendered and keep their source until then (or on failure).
-    /// Inline images keep their ordinary chat rendering.
+    /// Local inline images open through the attachment viewer on the chat's host.
     fn diagram_media(&mut self, cx: &Context<Self>) -> render::MediaUi {
         let cache = self.diagrams.clone();
         let owner = cx.weak_entity();
+        let image_owner = owner.clone();
         let media = self.diagram_media.get_or_insert_with(|| render::MediaUi {
-            image: None,
+            image: Some(Rc::new(move |image, id, theme| {
+                let source = image.source.clone();
+                let owner = image_owner.clone();
+                let label = if image.alt.is_empty() {
+                    "Preview image".to_owned()
+                } else {
+                    image.alt.clone()
+                };
+                div()
+                    .id(id)
+                    .role(gpui::Role::Button)
+                    .aria_label(SharedString::from(format!("Preview {label}")))
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .text_color(theme.accent)
+                    .hover(|style| style.underline())
+                    .child(label)
+                    .on_click(move |_, window, cx| {
+                        let _ = owner.update(cx, |this, cx| {
+                            // Web images retain normal validated web navigation.
+                            // Local paths must be read on the chat's device, never
+                            // interpreted as paths on the desktop running the UI.
+                            if let Ok(url) = crate::browser::model::transcript_address(&source) {
+                                cx.open_url(&url);
+                                return;
+                            }
+                            let file = this.inline_image_file(&source, cx);
+                            this.open_linked_file(file, window, cx);
+                        });
+                    })
+                    .into_any_element()
+            })),
             diagram: Some(Rc::new(move |code, id, _theme| {
                 let lookup = cache.borrow_mut().request(code, &id);
                 match lookup {
@@ -9220,8 +9495,10 @@ impl Transcript {
                 files,
                 pending,
                 full_prompt,
+                zapper,
             } => {
                 let full_prompt = full_prompt.clone();
+                let zapper = *zapper;
                 let attachments = attachments.clone();
                 let badges = badges.clone();
                 let files = files.clone();
@@ -9232,7 +9509,7 @@ impl Transcript {
                 // first, then attachments and mentioned files. A message with
                 // no text of its own shows no bubble at all.
                 if let Some(sender) = sender.as_ref().filter(|s| s.activity) {
-                    zuse_viewport::zot_issues::activity_notice(
+                    zuse_viewport::zapper_issues::activity_notice(
                         sender,
                         &text,
                         row.timestamp.unwrap_or_default(),
@@ -9309,13 +9586,13 @@ impl Transcript {
                                         .text_color(theme.text)
                                         .when(pending, |el| el.opacity(0.65))
                                         .when_some(sender.as_ref(), |d, sender| {
-                                            d.child(if full_prompt.is_some() {
-                                                zuse_viewport::zot_issues::sender_header_labeled(
+                                            d.child(if zapper {
+                                                zuse_viewport::zapper_issues::sender_header_labeled(
                                                     sender,
                                                     zuse_protocol::slack::MessageSource::ZAPPER_LABEL,
                                                 )
                                             } else {
-                                                zuse_viewport::zot_issues::sender_header(
+                                                zuse_viewport::zapper_issues::sender_header(
                                                     sender,
                                                     row.timestamp.unwrap_or_default(),
                                                 )
@@ -9339,7 +9616,7 @@ impl Transcript {
                         );
                     }
                     if sender.is_some() {
-                        column = column.child(zuse_viewport::zot_issues::sender_footer(
+                        column = column.child(zuse_viewport::zapper_issues::sender_footer(
                             text.to_string(),
                             row.timestamp.unwrap_or_default(),
                         ));
@@ -9968,6 +10245,7 @@ impl Transcript {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let diff_mode = crate::changes::DiffMode::from_split(self.split_diffs);
         let mut fold = self.folds.get(row_id).copied().unwrap_or_default();
         let file_opener = self.tool_file_opener(cx);
         // Agent/spawn chips never fold: they are their own row, always open,
@@ -10199,13 +10477,17 @@ impl Transcript {
                 |(((((detail, invocation), affordance), open), fold), tool)| {
                     let target = if *open {
                         base_row_height
-                            + invocation.as_deref().map_or(0.0, detail_height)
+                            + invocation
+                                .as_deref()
+                                .map_or(0.0, |detail| detail_height(detail, diff_mode))
                             + if chip_has_images(tool) {
                                 TOOL_IMAGE_STRIP_HEIGHT
                             } else {
                                 0.0
                             }
-                            + detail.as_deref().map_or(0.0, detail_height)
+                            + detail
+                                .as_deref()
+                                .map_or(0.0, |detail| detail_height(detail, diff_mode))
                             + if affordance.is_some() {
                                 BLOB_AFFORDANCE_HEIGHT
                             } else {
@@ -10547,7 +10829,13 @@ impl Transcript {
                                         line.bg(crate::theme::hairline(0.06))
                                     }),
                             )
-                            .child(detail_body(invocation, None, &format!("{key}-call"), theme));
+                            .child(detail_body(
+                                invocation,
+                                None,
+                                &format!("{key}-call"),
+                                theme,
+                                diff_mode,
+                            ));
                     }
                     if let Some(images) = chip_images[ix].clone() {
                         panel = panel.child(
@@ -10571,6 +10859,7 @@ impl Transcript {
                                     detail_highlights[ix].clone(),
                                     &format!("{key}-out"),
                                     theme,
+                                    diff_mode,
                                 ));
                     }
                     if let Some(ChipAffordance { blob_ref, label }) = affordance {
@@ -11102,6 +11391,55 @@ struct SentPdfPreview {
     pages: usize,
 }
 
+/// A transcript link that names a file on the chat's machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LinkedFile {
+    /// An image, opened in the viewer from its absolute path on the machine
+    /// of `chat` — the chat whose checkout owns it (`None`: the linking
+    /// chat's own machine).
+    Image { path: String, chat: Option<String> },
+    /// Any other file; the shell's file preview opens it.
+    Other(String),
+}
+
+/// Classify a link click: web links and copy/external actions are `None`,
+/// as is any target the surface's roots cannot resolve to a file. An image
+/// inside a chat's checkout opens in the viewer by its absolute path on the
+/// chat's machine — a relative link joins the root that owns it — so it is
+/// read from there, never from this disk. Images elsewhere (a bare project
+/// root, an outside path) keep the file preview, which reads them read-only.
+fn linked_file(link: &render::LinkUi, activation: &render::LinkActivation) -> Option<LinkedFile> {
+    use crate::workspace_links::FileLinkResolution;
+    if !matches!(
+        activation.action,
+        render::LinkAction::Primary | render::LinkAction::Internal
+    ) || activation.target.navigation.is_ok()
+    {
+        return None;
+    }
+    let roots = link.file_roots.as_deref()?;
+    match crate::workspace_links::first_root_owning(
+        &activation.target.original,
+        roots.iter().map(|root| root.root.as_str()),
+    )? {
+        FileLinkResolution::Owned { root, link } => {
+            let root = &roots[root];
+            let absolute = root.absolute(&link).to_string_lossy().into_owned();
+            Some(
+                if root.chat.is_some() && crate::attachments::is_image_path(&absolute) {
+                    LinkedFile::Image {
+                        path: absolute,
+                        chat: root.chat.clone(),
+                    }
+                } else {
+                    LinkedFile::Other(absolute)
+                },
+            )
+        }
+        FileLinkResolution::Outside(link) => Some(LinkedFile::Other(link.path)),
+    }
+}
+
 /// One image the lightbox can step to: shown from `preview` once known,
 /// otherwise read from `source` (candidate devices, path) on arrival.
 #[derive(Clone)]
@@ -11371,6 +11709,7 @@ fn detail_body(
     diff_highlights: Option<Arc<crate::changes::DiffHighlights>>,
     selection_key: &str,
     theme: &Theme,
+    diff_mode: crate::changes::DiffMode,
 ) -> AnyElement {
     let body = div().w_full().min_w_0().flex().flex_col().overflow_hidden();
     // Every line joins the transcript's selection, so paths, commands and
@@ -11407,6 +11746,7 @@ fn detail_body(
                 file,
                 diff_highlights,
                 theme,
+                diff_mode,
             ))
             .into_any_element(),
         ToolDetail::Stats { stats } => body
@@ -12671,8 +13011,10 @@ impl Render for Transcript {
             }
         }
         let content_width = crate::settings::transcript_width(cx);
-        if self.content_width != content_width {
+        let split_diffs = crate::settings::split_diffs(cx);
+        if self.content_width != content_width || self.split_diffs != split_diffs {
             self.content_width = content_width;
+            self.split_diffs = split_diffs;
             // The outer list viewport may not resize when only max-width
             // changes. Invalidate virtual row heights explicitly, retaining
             // their anchors and all live animation/provenance state.
@@ -12959,10 +13301,10 @@ mod tests {
             "zapper_files",
             "zapper_issue",
             "zapper_acknowledge",
-            "zot_command",
-            "zot_events",
-            "zot_files",
-            "zot_acknowledge",
+            "zapper_command",
+            "zapper_events",
+            "zapper_files",
+            "zapper_acknowledge",
         ] {
             assert_eq!(
                 tool_icon_path(&mcp("zuse", tool)),
@@ -14538,6 +14880,7 @@ mod tests {
                         None,
                         "probe",
                         &theme,
+                        crate::changes::DiffMode::Unified,
                     ))
             }
         }
@@ -14682,6 +15025,440 @@ mod tests {
         cx.simulate_keystrokes("escape");
         transcript.read_with(cx, |this, _| assert!(this.attachment_preview.is_none()));
         cx.update(|window, _| assert!(return_focus.is_focused(window)));
+    }
+
+    #[gpui::test]
+    fn markdown_image_click_opens_host_image_in_lightbox(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.local_device_id = Some("markdown-image-host".into());
+            state
+        });
+        let transcript = cx.new(|cx| Transcript::new(state, cx));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(64, 48)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        crate::attachments::store_loaded_for(
+            &crate::attachments::AttachmentKey::new(
+                "markdown-image-host",
+                "/tmp/update-preview/update-states.png",
+                None,
+            ),
+            "update-states.png".into(),
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                bytes.into_inner(),
+            )),
+        );
+        struct MarkdownImageFixture(Entity<Transcript>);
+        impl Render for MarkdownImageFixture {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                self.0.update(cx, |this, cx| {
+                    let media = this.diagram_media(cx);
+                    (media.image.unwrap())(
+                        &crate::markdown::parser::InlineImage {
+                            source: "/tmp/update-preview/update-states.png".into(),
+                            alt: "Downloading and ready-to-restart preview".into(),
+                            title: String::new(),
+                            link: None,
+                        },
+                        "markdown-image-preview".into(),
+                        Theme::of(cx),
+                    )
+                })
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| MarkdownImageFixture(transcript.clone()));
+        cx.run_until_parked();
+        cx.simulate_click(gpui::point(px(10.0), px(10.0)), gpui::Modifiers::default());
+        transcript.read_with(cx, |this, _| {
+            assert!(this.attachment_preview.is_some());
+            assert_eq!(this.attachment_gallery.len(), 1);
+            assert!(!this.gallery_opening);
+        });
+    }
+
+    fn linked_file_ui(roots: Vec<crate::workspace_links::FileLinkRoot>) -> render::LinkUi {
+        render::LinkUi {
+            source_session: Some("cloud-chat".into()),
+            source_local: false,
+            file_roots: Some(Rc::new(roots)),
+            handler: Rc::new(|_, _, _| render::LinkOutcome::Rejected),
+        }
+    }
+
+    fn link_click(target: &str, action: render::LinkAction) -> render::LinkActivation {
+        render::LinkActivation {
+            target: render::LinkTarget::new("label", target),
+            action,
+            source_session: Some("cloud-chat".into()),
+        }
+    }
+
+    #[test]
+    fn links_to_files_on_the_chats_machine_are_classified_before_web_routing() {
+        use crate::workspace_links::FileLinkRoot;
+        use render::LinkAction::{Copy, External, Internal, Primary};
+        let ui = linked_file_ui(vec![
+            FileLinkRoot {
+                chat: Some("cloud-chat".into()),
+                root: "/home/zuse/workspace".into(),
+                local: false,
+            },
+            FileLinkRoot {
+                chat: None,
+                root: "/projects/app".into(),
+                local: false,
+            },
+        ]);
+        let image = |path: &str| {
+            Some(LinkedFile::Image {
+                path: path.into(),
+                chat: Some("cloud-chat".into()),
+            })
+        };
+        let other = |path: &str| Some(LinkedFile::Other(path.into()));
+        for (target, action, expected) in [
+            // The reported links: an image and pages the agent wrote.
+            (
+                "/home/zuse/workspace/artifacts/web-preview/sign-in.png",
+                Primary,
+                image("/home/zuse/workspace/artifacts/web-preview/sign-in.png"),
+            ),
+            (
+                "/home/zuse/workspace/artifacts/web-preview/onboarding.html",
+                Primary,
+                other("/home/zuse/workspace/artifacts/web-preview/onboarding.html"),
+            ),
+            // A relative link joins the chat's checkout on its machine.
+            (
+                "artifacts/shot.JPG",
+                Internal,
+                image("/home/zuse/workspace/artifacts/shot.JPG"),
+            ),
+            // Images outside a chat checkout keep the read-only file preview.
+            (
+                "/projects/app/logo.png",
+                Primary,
+                other("/projects/app/logo.png"),
+            ),
+            ("/tmp/report.png", Primary, other("/tmp/report.png")),
+            // Web links, copies and unresolvable paths are not files here.
+            ("https://example.com/shot.png", Primary, None),
+            ("/home/zuse/workspace/shot.png", Copy, None),
+            ("/home/zuse/workspace/shot.png", External, None),
+            ("../secret.png", Primary, None),
+        ] {
+            assert_eq!(
+                linked_file(&ui, &link_click(target, action)),
+                expected,
+                "{target} {action:?}"
+            );
+        }
+        // A surface without file roots offers no file links at all.
+        let mut bare = ui.clone();
+        bare.file_roots = None;
+        assert_eq!(
+            linked_file(&bare, &link_click("/home/zuse/workspace/a.png", Primary)),
+            None
+        );
+    }
+
+    struct LinkedImageRpc {
+        calls: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+        bytes: Vec<u8>,
+    }
+
+    #[async_trait::async_trait]
+    impl zuse_rpc::RpcService for LinkedImageRpc {
+        async fn handle(
+            &self,
+            method: &str,
+            params: serde_json::Value,
+        ) -> Result<zuse_rpc::RpcReply, zuse_rpc::RpcError> {
+            use base64::Engine as _;
+            if method != zuse_protocol::methods::READ_ATTACHMENT_CHUNK {
+                return Err(zuse_rpc::RpcError::Failed("unsupported".into()));
+            }
+            self.calls.lock().unwrap().push(params.clone());
+            if params["path"]
+                .as_str()
+                .is_some_and(|path| path.contains("missing"))
+            {
+                return Err(zuse_rpc::RpcError::Failed("No such file".into()));
+            }
+            zuse_rpc::RpcReply::value(&serde_json::json!({
+                "name": "sign-in.png",
+                "mimeType": "image/png",
+                "data": base64::engine::general_purpose::STANDARD.encode(&self.bytes),
+                "nextOffset": self.bytes.len(),
+                "done": true,
+            }))
+        }
+    }
+
+    /// A cloud chat's state as its conversation view builds it: the engine
+    /// runs on the computer and reports the computer's device id.
+    fn cloud_chat_state(cx: &mut gpui::TestAppContext, device: &str) -> Entity<AppState> {
+        let chat: zuse_protocol::Chat = serde_json::from_value(serde_json::json!({
+            "id": "cloud-chat",
+            "deviceId": device,
+            "title": null,
+            "archived": false,
+            "cwd": "/home/zuse/workspace",
+            "branch": null,
+            "checkoutId": null,
+            "config": null,
+            "lastMessagePreview": null,
+            "lastMessageAt": null,
+            "createdAt": "2026-11-23T11:00:00Z",
+        }))
+        .unwrap();
+        let device = device.to_owned();
+        cx.new(|_| {
+            let mut state = AppState::new();
+            state.hosted_on_cloud_computer = true;
+            state.local_device_id = Some(device);
+            state.selected_chat = Some("cloud-chat".into());
+            state.apply_chats(vec![chat]);
+            state
+        })
+    }
+
+    fn recording_link_handler(
+        transcript: &Entity<Transcript>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Rc<RefCell<Vec<String>>> {
+        let forwarded: Rc<RefCell<Vec<String>>> = Rc::default();
+        let recorded = forwarded.clone();
+        transcript.update(cx, |transcript, _| {
+            transcript.set_workspace_link_handler(render::LinkUi {
+                source_session: Some("cloud-chat".into()),
+                source_local: false,
+                file_roots: None,
+                handler: Rc::new(move |activation, _, _| {
+                    recorded
+                        .borrow_mut()
+                        .push(activation.target.original.clone());
+                    render::LinkOutcome::Internal
+                }),
+            })
+        });
+        forwarded
+    }
+
+    fn click_transcript_link(
+        transcript: &Entity<Transcript>,
+        target: &str,
+        cx: &mut gpui::VisualTestContext,
+    ) {
+        // A rendered link's click runs outside the transcript's own update.
+        let ui = transcript
+            .update(cx, |transcript, cx| transcript.link_ui(cx))
+            .expect("the chat has a link handler");
+        cx.update(|window, cx| {
+            render::activate_link(
+                render::LinkTarget::new("label", target),
+                render::LinkAction::Primary,
+                Some(&ui),
+                window,
+                cx,
+            );
+        });
+    }
+
+    fn wait_for(cx: &mut gpui::VisualTestContext, mut done: impl FnMut() -> bool) {
+        for _ in 0..400 {
+            cx.run_until_parked();
+            if done() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out");
+    }
+
+    #[gpui::test]
+    fn a_cloud_chats_image_link_opens_the_viewer_from_the_computer(cx: &mut gpui::TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = runtime.enter();
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(32, 24)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let state = cloud_chat_state(cx, "cloud-computer-viewer");
+        state.update(cx, |state, _| {
+            state.set_test_engine(crate::state::EngineHandle::from_test_client(
+                zuse_rpc::memory_client(Arc::new(LinkedImageRpc {
+                    calls: calls.clone(),
+                    bytes: png.into_inner(),
+                })),
+            ))
+        });
+        let (transcript, cx) = cx.add_window_view(|_, cx| Transcript::new(state.clone(), cx));
+        let forwarded = recording_link_handler(&transcript, cx);
+
+        let image = "/home/zuse/workspace/artifacts/web-preview/sign-in.png";
+        click_transcript_link(&transcript, image, cx);
+        wait_for(cx, || {
+            matches!(
+                crate::attachments::attachment_snapshot("cloud-computer-viewer", image),
+                crate::attachments::AttachmentSnapshot::Loaded(_)
+            )
+        });
+        transcript.update_in(cx, |this, window, cx| this.resolve_gallery(window, cx));
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1, "the image is read once");
+            assert_eq!(calls[0]["path"], image);
+            // The computer's engine serves its own file: no relay target, and
+            // never a read of this desktop's disk.
+            assert!(calls[0].get("targetDeviceId").is_none());
+        }
+        transcript.read_with(cx, |this, _| {
+            assert!(this.attachment_preview.is_some(), "the viewer shows it");
+            assert!(!this.gallery_opening);
+        });
+        assert!(
+            forwarded.borrow().is_empty(),
+            "an image never falls through to the desktop's file routing"
+        );
+
+        // Another file goes on to the file preview, which reads through the
+        // same chat; web links keep their normal handling.
+        let page = "/home/zuse/workspace/artifacts/web-preview/onboarding.html";
+        click_transcript_link(&transcript, page, cx);
+        click_transcript_link(&transcript, "https://example.com/docs", cx);
+        assert_eq!(*forwarded.borrow(), [page, "https://example.com/docs"]);
+
+        // A file that is gone ends in a quiet notice, not a dead click.
+        transcript.update(cx, |this, _| this.attachment_preview = None);
+        let missing = "/home/zuse/workspace/artifacts/missing.png";
+        click_transcript_link(&transcript, missing, cx);
+        wait_for(cx, || {
+            matches!(
+                crate::attachments::attachment_snapshot("cloud-computer-viewer", missing),
+                crate::attachments::AttachmentSnapshot::Error { .. }
+            )
+        });
+        transcript.update_in(cx, |this, window, cx| this.resolve_gallery(window, cx));
+        transcript.read_with(cx, |this, _| {
+            assert!(!this.gallery_opening, "no endless wait");
+            assert!(this.attachment_gallery.is_empty());
+        });
+        cx.update(|_, cx| {
+            let messages = crate::toast::messages(cx);
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.contains("Couldn't open missing.png")),
+                "{messages:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn linked_images_read_only_from_the_owning_chats_machine(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        // A chat hosted on another machine, viewed from this desktop.
+        let state = cloud_chat_state(cx, "linked-far-host");
+        state.update(cx, |state, _| {
+            state.hosted_on_cloud_computer = false;
+            state.local_device_id = Some("linked-desk".into());
+        });
+        let image = "/home/zuse/workspace/same-name.png";
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(8, 8)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        // This desktop happens to hold a different file at the same path.
+        crate::attachments::store_loaded_for(
+            &crate::attachments::AttachmentKey::new("linked-desk", image, None),
+            "same-name.png".into(),
+            Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                png.into_inner(),
+            )),
+        );
+        let (transcript, cx) = cx.add_window_view(|_, cx| Transcript::new(state.clone(), cx));
+        let forwarded = recording_link_handler(&transcript, cx);
+        click_transcript_link(&transcript, image, cx);
+        cx.run_until_parked();
+        transcript.read_with(cx, |this, _| {
+            assert!(
+                this.attachment_preview.is_none(),
+                "the desktop's same-named file never stands in for the chat's"
+            );
+        });
+        assert!(forwarded.borrow().is_empty());
+
+        // A relative inline image joins the chat's checkout like a link.
+        transcript.update(cx, |this, cx| {
+            assert_eq!(
+                this.inline_image_file("artifacts/shot.png", cx),
+                LinkedFile::Image {
+                    path: "/home/zuse/workspace/artifacts/shot.png".into(),
+                    chat: Some("cloud-chat".into()),
+                }
+            );
+            assert_eq!(
+                this.linked_file_device(Some("cloud-chat"), cx).as_deref(),
+                Some("linked-far-host")
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_offline_cloud_chats_file_links_answer_quietly(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(crate::settings::UiSettings::default(), dir.path(), cx);
+        });
+        // History is on screen, but the computer's engine is not connected.
+        let state = cloud_chat_state(cx, "cloud-computer-offline");
+        let (transcript, cx) = cx.add_window_view(|_, cx| Transcript::new(state.clone(), cx));
+        let forwarded = recording_link_handler(&transcript, cx);
+        click_transcript_link(&transcript, "/home/zuse/workspace/sign-in.png", cx);
+        click_transcript_link(&transcript, "/home/zuse/workspace/onboarding.html", cx);
+        click_transcript_link(&transcript, "https://example.com/", cx);
+        assert_eq!(*forwarded.borrow(), ["https://example.com/"]);
+        transcript.read_with(cx, |this, _| {
+            assert!(this.attachment_gallery.is_empty());
+            assert!(!this.gallery_opening);
+        });
+        cx.update(|_, cx| {
+            let messages = crate::toast::messages(cx);
+            for name in ["sign-in.png", "onboarding.html"] {
+                let expected = format!("Couldn't open {name}. Its computer is offline.");
+                assert!(messages.iter().any(|m| *m == expected), "{messages:?}");
+            }
+        });
     }
 
     #[gpui::test]
@@ -16761,6 +17538,36 @@ mod tests {
                     previous = top;
                 }
                 assert!(previous.abs() < px(1.0));
+            });
+        }
+
+        /// A new chat's first message is already at the top in the launch
+        /// view: the conversation holds it there from its first step instead
+        /// of gliding up from the bottom-aligned position.
+        #[test]
+        fn first_send_holds_the_prompt_at_the_top_without_a_glide() {
+            with_window(|transcript, window, cx| {
+                transcript.update(cx, |this, cx| {
+                    this.rows = vec![viewport_row("prompt", "prompt")];
+                    this.list.reset(1);
+                    this.rail_enabled = false;
+                    cx.notify();
+                });
+                draw(window, cx);
+                transcript.update(cx, |this, cx| {
+                    this.on_own_first_send("chat".into(), "prompt".into(), cx)
+                });
+                draw(window, cx);
+                transcript.update(cx, |this, cx| this.step_own_turn(cx));
+                draw(window, cx);
+                let top = transcript.read(cx).list.bounds_for_item(0).unwrap().top();
+                assert!(top.abs() < px(1.0), "held at the top at once, got {top:?}");
+                for _ in 0..5 {
+                    transcript.update(cx, |this, cx| this.step_own_turn(cx));
+                    draw(window, cx);
+                    let next = transcript.read(cx).list.bounds_for_item(0).unwrap().top();
+                    assert!(next.abs() < px(1.0), "stays put, got {next:?}");
+                }
             });
         }
 
@@ -19758,7 +20565,7 @@ mod slack_tests {
         let entry = zapper_entry(Some(serde_json::json!({
             "_tag": "zapper",
             "text": "2 thread reports · ZAP-7 changed",
-            "sender": {"zotId": "release", "chatId": "coord", "name": "Release", "avatar": null},
+            "sender": {"zapperId": "release", "chatId": "coord", "name": "Release", "avatar": null},
         })));
         let rows = rows_for_entry(&entry, false, false, &mut |_, _| {
             panic!("User messages do not parse assistant markdown")
@@ -19779,6 +20586,53 @@ mod slack_tests {
         assert!(full.contains("You are Release, a Zapper"));
         assert!(!text.contains("You are Release"));
         assert_eq!(zapper_prompt_label(false), "Show full prompt");
+        assert!(matches!(rows[0].kind, RowKind::User { zapper: true, .. }));
+    }
+
+    #[test]
+    fn the_owners_own_coordinator_message_reads_as_a_normal_message() {
+        // ZAP-22: what the owner typed has no "Sent from Zapper" header and
+        // no "Show full prompt", even though the agent got the whole brief.
+        let entry = zapper_entry(Some(serde_json::json!({
+            "_tag": "zapper",
+            "text": "Ship the notes",
+            "sender": {"zapperId": "release", "chatId": "coord", "name": "Release", "avatar": null},
+            "typed": true,
+        })));
+        let rows = rows_for_entry(&entry, false, false, &mut |_, _| {
+            panic!("User messages do not parse assistant markdown")
+        });
+        let RowKind::User {
+            text,
+            sender,
+            full_prompt,
+            zapper,
+            ..
+        } = &rows[0].kind
+        else {
+            panic!("user row missing")
+        };
+        assert_eq!(text.as_ref(), "Ship the notes");
+        assert!(sender.is_none());
+        assert!(full_prompt.is_none());
+        assert!(!zapper);
+    }
+
+    #[test]
+    fn engine_turns_hide_the_disclosure_when_the_prompt_is_the_text() {
+        let source = zuse_protocol::slack::MessageSource::Zapper {
+            text: "Update from Build thread".into(),
+            sender: zuse_protocol::presentation::zapper_message::ZapperSender {
+                zapper_id: "release".into(),
+                chat_id: "coord".into(),
+                name: "Release".into(),
+                avatar: None,
+                activity: false,
+            },
+            typed: false,
+        };
+        assert!(zapper_full_prompt(Some(&source), " Update from Build thread\n").is_none());
+        assert!(zapper_full_prompt(Some(&source), "Brief\n\nUpdate from Build thread").is_some());
     }
 
     #[test]

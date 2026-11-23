@@ -8,6 +8,10 @@ mod runtime_update;
 mod unknown;
 mod waiting;
 mod wake;
+/// Shown when a message is sent before the server has recorded its new
+/// conversation; cleared once it has.
+const STILL_OPENING: &str =
+    "This chat is still opening on its computer. Your draft is preserved; send again in a moment.";
 #[derive(Default)]
 pub(super) struct Launch {
     pub task: Option<Task<()>>,
@@ -48,6 +52,10 @@ pub(super) struct Launch {
     pub(super) failure: Option<SharedString>,
     /// When the new chat's first message was sent.
     started_at: Option<std::time::Instant>,
+    /// A conversation just added beside the computer's others is still being
+    /// recorded by the server (a few tens of milliseconds, no computer work):
+    /// a send waits for it, so it never reaches the server unregistered.
+    registering: bool,
 }
 impl Launch {
     pub(super) fn admitted(&self) -> bool {
@@ -197,6 +205,15 @@ impl Composer {
     pub(crate) fn is_native_cloud(&self) -> bool {
         self.cloud.native.is_some()
     }
+    /// Hold sends while the server records this new conversation.
+    pub(crate) fn set_cloud_registering(&mut self, registering: bool, cx: &mut Context<Self>) {
+        self.cloud.registering = registering;
+        if !registering {
+            // Its notices (held send, retried attempt) are resolved now.
+            self.failure = None;
+        }
+        cx.notify();
+    }
     pub(crate) fn set_cloud_task_sleeping(&mut self, sleeping: bool) {
         if let Some(task) = &mut self.cloud.native {
             task.wake = sleeping;
@@ -227,6 +244,14 @@ impl Composer {
             return false;
         }
         if self.cloud.task.is_some() {
+            return true;
+        }
+        if self.cloud.registering {
+            // A shown reason (a failed attempt being retried) stays visible.
+            if self.failure.is_none() {
+                self.failure = Some(STILL_OPENING.into());
+            }
+            cx.notify();
             return true;
         }
         if self.cloud_unknown_blocks_send(cx) {
@@ -1706,6 +1731,16 @@ impl Composer {
         });
         cx.emit(ComposerEvent::CloudLaunchChanged);
         cx.notify();
+    }
+    /// The server admits this tab's pending creation, as its create response
+    /// does: the production hand-off to the shell.
+    #[cfg(test)]
+    pub(crate) fn admit_pending_cloud_creation_for_test(
+        &mut self,
+        workspace: Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.finish_admitted_launch(workspace, "owner".into(), None, cx);
     }
     /// Run `update` against the launch that `key`'s tab sent. While that tab
     /// is in front this is the composer's own launch; otherwise the parked

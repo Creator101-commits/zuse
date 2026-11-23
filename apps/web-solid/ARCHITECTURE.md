@@ -17,8 +17,8 @@ Area exports, mounted by `src/shell/App.tsx`:
 | Area | Exports | Mounted |
 | --- | --- | --- |
 | `sidebar` | `Sidebar` | Left column |
-| `workspace` | `TopBar`, `RightPanel` | Above the chat; right column when `view.rightPanel` is set. Its `agent` surface (a subagent chip's live transcript, `SubagentTranscript`) opens only through `openSubagent` and is never offered in the `+` menu or restored from session storage. |
-| `transcript` | `Transcript`, `SubagentTranscript` | Chat body (fills, scrolls); `SubagentTranscript` is the agent surface's read-only subagent transcript |
+| `workspace` | `TopBar`, `RightPanel` | Above the chat; right column when `view.rightPanel` is set |
+| `transcript` | `Transcript` | Chat body (fills, scrolls) |
 | `composer` | `Composer` | Below the transcript. Also renders the landing heading when no chat is selected. |
 | `zappers` | `ZapperPage`, `ConfigPage`, `ZapperSidebar` | Dedicated coordinator/worker route, inspector and sidebar group |
 | `projects` | `NewProject`, `ProjectArchive` | Routes `newProject`, `archive` |
@@ -85,10 +85,87 @@ Kobalte is pinned to `2.0.0-alpha.4`, its published Solid 2 line. Its peer range
 
 ## Zappers
 
-`WatchZots` is a standing connection watch. `core/zappers.ts` determines ownership, including previous coordinators and thread descendants. Owned threads are excluded from ordinary sidebar and search results; `openChat` routes them into the Zapper conversation and inspector. The regular list waits for the first ownership snapshot to avoid briefly leaking Zapper threads. Released workers return to their projects; archived workers remain accessible from the archive.
+`WatchZappers` is a standing connection watch. `core/zappers.ts` determines ownership, including previous coordinators and thread descendants. Owned threads are excluded from ordinary sidebar and search results; `openChat` routes them into the Zapper conversation and inspector. The regular list waits for the first ownership snapshot to avoid briefly leaking Zapper threads. Released workers return to their projects; archived workers remain accessible from the archive.
 
-The inspector mirrors desktop Overview, Issues, Threads, Drive and History. Commands carry an expected revision and stable command ID. A lost response preserves the exact command for an explicit idempotent retry. Delegated chat IDs derive from that command ID. Document edits/restores carry an expected file version. Display attribution parses the engine envelope without modifying the stored or submitted prompt. Pixel mascots are generated from the shared Rust presentation definitions using `scripts/gen-zapper-mascots.py`.
+The inspector mirrors desktop Overview, Issues, Threads and Drive, with History and detail surfaces in closable tabs. Commands carry an expected revision and stable command ID. A lost response preserves the exact command for an explicit idempotent retry. Delegated chat IDs derive from that command ID. Document edits/restores carry an expected file version. Display attribution parses the engine envelope without modifying the stored or submitted prompt. Pixel mascots are generated from the shared Rust presentation definitions using `scripts/gen-zapper-mascots.py`.
 
 Run `node e2e/zappers.mjs` for browser checks against a disposable engine and a scripted agent (creation, ownership, adoption, delegation, decisions, issues/comments, document versions/restores, reload and release).
 
 Zapper inspector tabs follow the desktop icon/label strip. Resource reads coalesce bursts of watch updates into one active request and a trailing refresh; late responses from another Zapper are ignored. Reconnect epochs refresh the inspector even when revisions do not change. Server snapshots reconcile into existing rows, and document drafts retain their DOM identity through updates. Composer and Zapper surfaces use spacing and background tones instead of decorative borders; the composer editor overrides the global focus ring while controls retain keyboard focus indicators.
+
+## Hosted browser
+
+`bash scripts/build-web.sh --solid` builds this client with `/app/` asset URLs.
+The existing WASM build remains available without that flag. Deploy the Solid
+output as `ZUSE_CLOUD_BROWSER_ASSETS` on the cloud server built with its
+`hosted-browser` feature. The server's root redirects to `/app/`. Both
+`ZUSE_CLOUD_BROWSER_ORIGIN` and `CLOUD_PUBLIC_API_URL` must name the same exact
+HTTPS origin; a second public hostname must redirect to that canonical origin.
+
+Register `<canonical origin>/app/` as a redirect URI on the configured WorkOS
+client before enabling browser sign-in. Hosted sign-in uses a same-tab AuthKit
+redirect and server-held PKCE verifier, bound to the opaque browser session.
+The authorization code and state are removed from the address before analytics
+starts, then redeemed once over the authenticated controller RPC. The controller
+stores refresh credentials only in memory. Controller restarts/expiry require
+sign-in again.
+
+`controllerReady` from `/api/session/check` enables separate web onboarding:
+welcome, account, plan, GitHub/repository image setup, first cloud chat. Completion
+is keyed by account and organization in browser storage. Local and paired clients
+keep their normal startup. Choosing a workspace opens `#cloud=` public metadata
+in an isolated tab. `CloudTransport` holds a `CloudEnvironment` subscription and
+forwards engine requests through `CloudRpc`; account/cloud settings remain on the
+controller. The normal chat, Zapper, thread, workspace and transcript surfaces
+therefore run against the selected cloud engine. Account changes close access.
+
+Subagent chips open the Agents surface. It tries the frozen transcript blob first,
+then watches the original subagent doc, preserving the source chat's device route
+for copied spawn chips. Closing/hiding the panel cancels its watch; reconnects
+refresh it. Only spawn calls can link to subagent docs.
+
+`bun run e2e:web-parity` runs browser regressions for onboarding isolation, icon
+aliases, live/frozen agent transcripts, reconnect cleanup, cloud RPC forwarding,
+cancellation and account revocation without provisioning paid cloud resources.
+Production OAuth, provider allocation and live domain routing require deployment
+verification separately.
+
+Hosted onboarding follows desktop `Wizard` geometry (520px welcome/account
+column, 56px top inset, 24/30 headings, accent progress rail and footer actions).
+Cloud creation and Settings share `ui/ModelSelect`, a searchable provider-rail
+menu using desktop icons, 28px model rows and keyboard navigation. Permission
+and repository controls use the shared non-modal menus. The conversation
+composer follows the current desktop model_menu/model_detail implementation:
+a 344px list with a full-height provider rail and a separate 240px hover/keyboard
+detail card. The card has a dither header, pill reasoning slider, pixel-icon
+fast/favorite/default toggles, and a catalog-gated 200K/1M context switch.
+
+`node e2e/capture-preview.mjs` captures onboarding, sign-in, the complete
+workspace/Agents pane and the composer picker using fixture data in the actual
+app shell. Set `ZUSE_PREVIEW_OUT` to choose the output directory.
+
+Zapper forms use execution-device model catalogs through `zappers/Controls.tsx`;
+worker/coordinator models are selected from the same provider menu as Cloud.
+Issues open in closable panel pages; editing stays in the page and retains drafts across tab switches.
+`bun run e2e:zapper-polish` checks issue edit/save, completion criteria, Escape
+and close controls, search/reset, switching back from workspace panels, nested
+model-picker focus, and narrow-screen inspector navigation. All use fixture data
+without cloud allocation. Preview captures include issue lists/details and the
+narrow inspector.
+
+`bun run e2e:model-picker` verifies detail-card width, hover-targeted settings,
+absence of unsupported context controls, offered 1M context, reasoning keyboard
+controls, favorites and explicit default selection/clearing. Default model
+selection is shared with Settings and independent of the current chat's model.
+
+The current Zapper inspector mirrors `presentation::ZapperPanelTabs`: Overview,
+Issues, Threads and a conditional Drive section, followed by closable issue,
+document, History, subagent, PR and diff pages. History opens from the overflow
+menu. Each Zapper keeps its own navigation trail; open issue/document pages stay
+mounted across tab switches to retain drafts. Linked PRs reuse the workspace
+review surface with an explicit URL. Queued workers read `queuePosition` before
+session status, and show a placeholder until their conversation exists.
+Issue ownership (you, Zapper or a thread), parent issue, completion criteria,
+scope notes, questions and closing outcomes use the current protocol fields.
+Custom pictures accept PNG/JPEG only, are center-cropped to 128px, and respect
+the protocol's 96KiB data-URL cap, falling back to the saved mascot.

@@ -10,7 +10,8 @@
 //! `FIXTURE_NO_REPOS=1` keeps GitHub connected but adds no repositories.
 //! `FIXTURE_IMAGE` sets the account image (`queued`, `building`, `ready`,
 //! `failed`, or `none` for no machine version yet; default `ready`).
-//! `FIXTURE_LOCAL_SPACE=1` adds a local checkout of a Cloud repository.
+//! `FIXTURE_LOCAL_SPACE=1` adds a local checkout of a Cloud repository
+//! (`2` adds a second checkout of it on this computer).
 //! `FIXTURE_ACCOUNT=signed-out` starts signed out. `FIXTURE_ARCHIVED=1`
 //! archives the first chat. `FIXTURE_CLICKS="x,y;x,y"` clicks those window
 //! points (via XTest, under Xvfb) before the capture, and
@@ -666,7 +667,13 @@ fn main() {
             if std::env::var("FIXTURE_LOCAL_SPACE").is_ok() {
                 s.spaces.push(serde_json::from_value(json!({"id": "space-zuse", "deviceId": "fixture-local",
                     "path": "/Users/you/code/zuse", "name": "zuse", "gitDetected": true,
-                    "remoteRepository": "github.com/opcodehq/zuse", "createdAt": "2026-11-01T12:00:00Z"})).unwrap());
+                    "remoteRepository": "github.com/opcodehq/zuse", "repositoryId": "github.com/opcodehq/zuse", "createdAt": "2026-11-01T12:00:00Z"})).unwrap());
+            }
+            // `FIXTURE_LOCAL_SPACE=2`: a second checkout of it on this computer.
+            if std::env::var("FIXTURE_LOCAL_SPACE").as_deref() == Ok("2") {
+                s.spaces.push(serde_json::from_value(json!({"id": "space-zuse-copy", "deviceId": "fixture-local",
+                    "path": "/Users/you/conductor/zuse", "name": "zuse", "gitDetected": true,
+                    "remoteRepository": "github.com/opcodehq/zuse", "repositoryId": "github.com/opcodehq/zuse", "createdAt": "2026-11-02T12:00:00Z"})).unwrap());
             }
             s
         });
@@ -681,7 +688,6 @@ fn main() {
         state.update(cx, |_, cx| cx.notify());
         cx.activate(true);
         let out = std::env::var("FIXTURE_OUT").ok();
-        let compute = std::env::var("FIXTURE_COMPUTE").is_ok();
         let onboarding = std::env::var("FIXTURE_ONBOARDING").ok();
         cx.spawn(async move |cx| {
             let delay = std::env::var("FIXTURE_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2500);
@@ -693,10 +699,6 @@ fn main() {
                     })
                     .unwrap();
                 cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
-            }
-            if compute {
-                window.update(cx, |shell, _, cx| shell.fixture_usage_compute(cx)).unwrap();
-                cx.background_executor().timer(std::time::Duration::from_millis(2000)).await;
             }
             for point in std::env::var("FIXTURE_CLICKS").unwrap_or_default().split(';').filter(|p| !p.is_empty()) {
                 let status = std::process::Command::new("python3")

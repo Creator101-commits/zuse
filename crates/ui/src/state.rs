@@ -92,7 +92,7 @@ mod cloud_plan;
 mod cloud_sidebar;
 pub use cloud_connection::CloudTarget;
 pub use cloud_plan::CloudAccess;
-pub(crate) use cloud_sidebar::ProjectLabels;
+pub(crate) use cloud_sidebar::{CloudLiveActivity, ProjectLabels};
 mod remote_connection;
 pub use account_connection::{AccountTarget, RemoteTarget};
 
@@ -927,9 +927,6 @@ struct PendingChatArchive {
     accepted: bool,
 }
 
-/// After the server saved a queued message the queue doesn't list yet,
-/// how long this app keeps showing it (it was usually sent at once).
-const OPTIMISTIC_SAVED_GRACE_MS: i64 = 30_000;
 /// How long a row removed here stays hidden from older queue frames.
 const REMOVED_QUEUED_GRACE_MS: i64 = 10_000;
 /// How long an echo a transcript frame confirmed comes back if a newer
@@ -960,13 +957,13 @@ pub(crate) enum OptimisticState {
 /// are plain `&mut self` functions so tests construct the struct directly; gpui
 /// glue ([`Self::bootstrap`], [`Self::select_chat`]) layers subscriptions on top.
 pub struct AppState {
-    pub zots: Vec<zuse_protocol::zots::Zot>,
-    zot_watches: HashMap<String, Task<()>>,
+    pub zappers: Vec<zuse_protocol::zappers::Zapper>,
+    zapper_watches: HashMap<String, Task<()>>,
     /// Devices whose Zapper list has arrived since the runtime started.
-    zots_loaded: HashSet<String>,
+    zappers_loaded: HashSet<String>,
     /// When the Zapper watches started, bounding how long unloaded lists
-    /// may hide `zot-` conversations.
-    zots_watching_since: Option<std::time::Instant>,
+    /// may hide `zapper-` conversations.
+    zappers_watching_since: Option<std::time::Instant>,
     pub connection: ConnectionStatus,
     /// Fixed data boundary of the attached engine. Authentication may change
     /// in place, but changing this scope requires assembling a new runtime.
@@ -1006,6 +1003,10 @@ pub struct AppState {
     /// `pending_side_chat` was started by hand and nothing has minted it:
     /// no registry row, no doc, until its first send.
     unsaved_side_chat: bool,
+    /// A cloud conversation the server registered that the computer has not
+    /// installed yet (it does on its first run): kept in the list until the
+    /// computer's own list has it, so its selection survives attaching.
+    pub(crate) pending_cloud_conversation: Option<Chat>,
     pub sessions: Vec<Session>,
     /// Synced user/org sidebar pin state. Local workspaces deliberately ignore
     /// this and continue reading their device-local settings entry.
@@ -1029,6 +1030,10 @@ pub struct AppState {
     /// canvas always reopens where the user left it.
     pub(crate) canvas_target: Option<CanvasTarget>,
     pub(crate) cloud_project: Option<serde_json::Value>,
+    /// This state renders a cloud computer's chat: its engine runs on that
+    /// computer, so the paths it names are never on this desktop's disk even
+    /// though they match the engine's own device id.
+    pub(crate) hosted_on_cloud_computer: bool,
     initial_cloud_chat: Option<String>,
     pub(crate) pending_cloud_resume: Option<(String, String, bool)>,
     pub selected_chat: Option<String>,
@@ -1055,6 +1060,9 @@ pub struct AppState {
     /// The queue the chat's host last reported; [`Self::queue`] adds the
     /// messages this app sent that it doesn't list yet.
     host_queue: Vec<zuse_doc::QueuedMessage>,
+    /// When the read behind [`Self::host_queue`] was sent (epoch millis),
+    /// for the chat it belongs to; `None` when its read time is unknown.
+    host_queue_at: Option<i64>,
     /// Cloud messages queued from this app, per chat, until the server's
     /// queue lists them (see [`OptimisticQueued`]).
     optimistic_queue: HashMap<String, Vec<OptimisticQueued>>,
@@ -1205,10 +1213,10 @@ impl Default for AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            zots: Vec::new(),
-            zot_watches: HashMap::new(),
-            zots_loaded: HashSet::new(),
-            zots_watching_since: None,
+            zappers: Vec::new(),
+            zapper_watches: HashMap::new(),
+            zappers_loaded: HashSet::new(),
+            zappers_watching_since: None,
             connection: ConnectionStatus::Connecting,
             workspace_scope: None,
             auth: None,
@@ -1229,6 +1237,7 @@ impl AppState {
             chat_configuration: Default::default(),
             pending_side_chat: None,
             unsaved_side_chat: false,
+            pending_cloud_conversation: None,
             sessions: Vec::new(),
             sidebar_preferences: SidebarPreferencesState::default(),
             session_presentation: None,
@@ -1237,6 +1246,7 @@ impl AppState {
             selected_device: None,
             canvas_target: None,
             cloud_project: None,
+            hosted_on_cloud_computer: false,
             initial_cloud_chat: None,
             selected_chat: None,
             pending_cloud_resume: None,
@@ -1245,6 +1255,7 @@ impl AppState {
             cloud_queue_revisions: HashMap::new(),
             cloud_queue_error: None,
             host_queue: Vec::new(),
+            host_queue_at: None,
             optimistic_queue: HashMap::new(),
             removed_queued: HashMap::new(),
             queue_paused: None,
@@ -1650,6 +1661,13 @@ impl AppState {
                 chats.push(pending.clone());
             }
         }
+        if let Some(pending) = &self.pending_cloud_conversation {
+            if chats.iter().any(|chat| chat.id == pending.id) {
+                self.pending_cloud_conversation = None;
+            } else {
+                chats.push(pending.clone());
+            }
+        }
         self.pending_chat_archives.retain(|id, pending| {
             let Some(chat) = chats.iter_mut().find(|chat| &chat.id == id) else {
                 return false;
@@ -1688,6 +1706,8 @@ impl AppState {
             self.transcript_history = NativeHistory::default();
             self.transcript_task = None;
             self.queue.clear();
+            self.host_queue.clear();
+            self.host_queue_at = None;
             self.queue_task = None;
         }
         changed
@@ -1732,11 +1752,11 @@ impl AppState {
         changed || self.selected_space != previous_selection
     }
 
-    /// Whether the selected chat is a Zot's coordinator, current or earlier.
-    /// These run in the Zot's own folder, with no repository or checkout.
-    pub fn selected_chat_is_zot_coordinator(&self) -> bool {
+    /// Whether the selected chat is a Zapper's coordinator, current or earlier.
+    /// These run in the Zapper's own folder, with no repository or checkout.
+    pub fn selected_chat_is_zapper_coordinator(&self) -> bool {
         self.selected_chat.as_ref().is_some_and(|chat| {
-            self.zots.iter().any(|z| {
+            self.zappers.iter().any(|z| {
                 &z.coordinator_chat_id == chat || z.previous_coordinator_chats.contains(chat)
             })
         })
@@ -1746,11 +1766,11 @@ impl AppState {
         self.chats.iter().any(|c| c.id == chat_id && c.archived)
     }
 
-    /// Whether the selected chat is a Zot thread still waiting for the
+    /// Whether the selected chat is a Zapper thread still waiting for the
     /// worktree its first run creates. Until then its folder is the main repo.
-    pub fn selected_chat_awaits_zot_worktree(&self) -> bool {
+    pub fn selected_chat_awaits_zapper_worktree(&self) -> bool {
         self.selected_chat.as_ref().is_some_and(|id| {
-            self.zots
+            self.zappers
                 .iter()
                 .any(|z| z.workers.iter().any(|w| &w.chat_id == id))
                 && self
@@ -1766,10 +1786,10 @@ impl AppState {
     /// thread a Zapper started in any state (running, finished, released,
     /// stopped or archived), or a coordinator id the Zapper list hasn't
     /// reported yet (the list still loading after a reconnect).
-    pub fn zot_hides_chat(&self, chat: &Chat) -> bool {
-        use zuse_protocol::presentation::zot_panel::{zapper_chat_id, zapper_keeps_chat};
+    pub fn zapper_hides_chat(&self, chat: &Chat) -> bool {
+        use zuse_protocol::presentation::zapper_panel::{zapper_chat_id, zapper_keeps_chat};
         if zapper_keeps_chat(
-            &self.zots,
+            &self.zappers,
             &chat.id,
             chat.parent_chat_id.as_deref(),
             chat.thread_id.as_deref(),
@@ -1785,31 +1805,31 @@ impl AppState {
         // stop hiding anything after a short grace.
         let fresh = (Utc::now() - chat.created_at).num_minutes() < 5;
         let loading = !self
-            .zot_watches
+            .zapper_watches
             .keys()
-            .all(|device| self.zots_loaded.contains(device))
+            .all(|device| self.zappers_loaded.contains(device))
             && self
-                .zots_watching_since
+                .zappers_watching_since
                 .is_some_and(|since| since.elapsed() < std::time::Duration::from_secs(30));
         fresh || loading
     }
 
-    pub fn apply_zots(&mut self, zots: Vec<zuse_protocol::zots::Zot>) -> bool {
-        if self.zots == zots {
+    pub fn apply_zappers(&mut self, zappers: Vec<zuse_protocol::zappers::Zapper>) -> bool {
+        if self.zappers == zappers {
             return false;
         }
-        zuse_viewport::zapper_avatar::remember_zots(&zots);
-        self.zots = zots;
+        zuse_viewport::zapper_avatar::remember_zappers(&zappers);
+        self.zappers = zappers;
         true
     }
 
-    fn reconcile_zot_watches(&mut self, cx: &mut Context<Self>) {
+    fn reconcile_zapper_watches(&mut self, cx: &mut Context<Self>) {
         let Some(handle) = self.engine.clone() else {
             return;
         };
         if !handle
             .engine_info()
-            .supports(zuse_protocol::zots::CAPABILITY)
+            .supports(zuse_protocol::zappers::CAPABILITY)
         {
             return;
         }
@@ -1818,9 +1838,9 @@ impl AppState {
         if !devices.contains(&local) {
             devices.push(local);
         }
-        self.zot_watches.retain(|id, _| devices.contains(id));
+        self.zapper_watches.retain(|id, _| devices.contains(id));
         for device in devices {
-            if self.zot_watches.contains_key(&device) {
+            if self.zapper_watches.contains_key(&device) {
                 continue;
             }
             let engine = handle.clone();
@@ -1830,7 +1850,7 @@ impl AppState {
                     let mut stream = match engine
                         .client()
                         .subscribe_scoped(
-                            zuse_protocol::control::WATCH_ZOTS,
+                            zuse_protocol::control::WATCH_ZAPPERS,
                             serde_json::json!({"targetDeviceId":target}),
                         )
                         .await
@@ -1844,17 +1864,19 @@ impl AppState {
                         }
                     };
                     while let Some(value) = stream.recv().await {
-                        let Ok(zots) =
-                            serde_json::from_value::<Vec<zuse_protocol::zots::Zot>>(value)
+                        let Ok(zappers) =
+                            serde_json::from_value::<Vec<zuse_protocol::zappers::Zapper>>(value)
                         else {
                             continue;
                         };
                         if this
                             .update(cx, |state, cx| {
-                                state.zots.retain(|z| z.config.home_device_id != target);
-                                state.zots.extend(zots);
-                                state.zots_loaded.insert(target.clone());
-                                state.zots.sort_by(|a, b| a.config.name.cmp(&b.config.name));
+                                state.zappers.retain(|z| z.config.home_device_id != target);
+                                state.zappers.extend(zappers);
+                                state.zappers_loaded.insert(target.clone());
+                                state
+                                    .zappers
+                                    .sort_by(|a, b| a.config.name.cmp(&b.config.name));
                                 cx.notify();
                             })
                             .is_err()
@@ -1870,9 +1892,9 @@ impl AppState {
                         .await;
                 }
             });
-            self.zots_watching_since
+            self.zappers_watching_since
                 .get_or_insert_with(std::time::Instant::now);
-            self.zot_watches.insert(device, task);
+            self.zapper_watches.insert(device, task);
         }
     }
 
@@ -1915,11 +1937,13 @@ impl AppState {
         use crate::workspace_links::FileLinkRoot;
         // An unprobed device id means the chats on screen are the local
         // engine's — everything shown counts as local until sync says else.
-        let on_this_device = |device: &str| {
+        // A cloud computer's engine owns its own device id, never this disk.
+        let same_device = |device: &str| {
             self.local_device_id
                 .as_deref()
                 .is_none_or(|local| device == local)
         };
+        let on_this_device = |device: &str| !self.hosted_on_cloud_computer && same_device(device);
         let mut roots: Vec<FileLinkRoot> = Vec::new();
         let mut push = |chat: Option<&Chat>, device: &str, root: Option<&str>| {
             let Some(root) = root.filter(|root| !root.is_empty()) else {
@@ -1937,10 +1961,10 @@ impl AppState {
         let chat_row = |id: &str| self.chats.iter().find(|chat| chat.id == id);
         let linking = chat_row(chat_id);
         // Roots on the linking chat's device; an unknown chat row falls back
-        // to this device's.
+        // to the engine's own device (a cloud computer's, for its chats).
         let on_link_device = |device: &str| match linking {
             Some(chat) => chat.device_id == device,
-            None => on_this_device(device),
+            None => same_device(device),
         };
         if let Some(chat) = linking {
             push(Some(chat), &chat.device_id, chat.cwd.as_deref());
@@ -1967,6 +1991,9 @@ impl AppState {
     /// unprobed device id (or an unknown chat row) counts as local, matching
     /// `file_link_roots`.
     pub(crate) fn chat_is_local(&self, chat_id: &str) -> bool {
+        if self.hosted_on_cloud_computer {
+            return false;
+        }
         self.chats
             .iter()
             .find(|chat| chat.id == chat_id)
@@ -2636,6 +2663,14 @@ impl AppState {
     /// A send the host held for the next turn shows as its queue row, not
     /// as an echo: drop echoes (and the pending-send overlay) for queued ids.
     pub fn apply_queue(&mut self, items: Vec<zuse_doc::QueuedMessage>) {
+        self.apply_queue_read(items, None);
+    }
+
+    /// [`Self::apply_queue`] for a read sent at `read_at` (epoch millis). A
+    /// message saved here leaves the queue by omission only when a read sent
+    /// after its save no longer lists it; an older read, or one whose time is
+    /// unknown, never drops it.
+    pub fn apply_queue_read(&mut self, items: Vec<zuse_doc::QueuedMessage>, read_at: Option<i64>) {
         if let Some(chat_id) = self.selected_chat.as_deref() {
             if let Some(echoes) = self.echoes.get_mut(chat_id) {
                 let before = echoes.len();
@@ -2653,6 +2688,7 @@ impl AppState {
             }
         }
         self.host_queue = items;
+        self.host_queue_at = read_at;
         self.rebuild_queue();
     }
 
@@ -2660,8 +2696,9 @@ impl AppState {
     /// this app's queued cloud messages the host doesn't list yet, in the
     /// order they were sent. A message leaves the optimistic list once the
     /// host lists it, or, after the server saved it, once it reached the
-    /// transcript (it was sent at once) or [`OPTIMISTIC_SAVED_GRACE_MS`]
-    /// passed.
+    /// transcript (it was sent at once) or a queue read sent after the save
+    /// no longer has it (claimed or sent). Without such a read it stays: no
+    /// timer drops a queued message.
     fn rebuild_queue(&mut self) {
         let now = chrono::Utc::now().timestamp_millis();
         self.removed_queued
@@ -2677,6 +2714,7 @@ impl AppState {
             && let Some(rows) = self.optimistic_queue.get_mut(chat)
         {
             let host = &self.host_queue;
+            let host_at = self.host_queue_at;
             let transcript = &self.transcript;
             rows.retain(|row| {
                 if host.iter().any(|item| item.id == row.item.id) {
@@ -2684,7 +2722,7 @@ impl AppState {
                 }
                 match row.state {
                     OptimisticState::Saved(at) => {
-                        now - at < OPTIMISTIC_SAVED_GRACE_MS
+                        host_at.is_none_or(|read| read < at)
                             && !transcript.iter().any(|entry| entry.id == row.message_id)
                     }
                     _ => true,
@@ -2938,7 +2976,7 @@ impl AppState {
         let mut chats: Vec<&Chat> = self
             .visible_chats()
             .filter(|c| c.space_id.as_deref() == Some(space_id))
-            .filter(|c| !self.zot_hides_chat(c))
+            .filter(|c| !self.zapper_hides_chat(c))
             .collect();
         sort_tabs(&mut chats);
         chats
@@ -3032,8 +3070,8 @@ impl AppState {
         }
         rows.into_iter()
             .filter(|(_, chat)| chat.thread_id.is_none() && in_filter(chat))
-            // Zots list their own threads; projects don't repeat them.
-            .filter(|(_, chat)| !self.zot_hides_chat(chat))
+            // Zappers list their own threads; projects don't repeat them.
+            .filter(|(_, chat)| !self.zapper_hides_chat(chat))
             .map(|(status, chat)| {
                 (
                     thread_status
@@ -3556,10 +3594,10 @@ impl AppState {
     /// stopped. The next bootstrap must never render rows from the previous
     /// account while the local profile is opening.
     pub fn prepare_runtime_replacement(&mut self, cx: &mut Context<Self>) {
-        self.zots.clear();
-        self.zot_watches.clear();
-        self.zots_loaded.clear();
-        self.zots_watching_since = None;
+        self.zappers.clear();
+        self.zapper_watches.clear();
+        self.zappers_loaded.clear();
+        self.zappers_watching_since = None;
         self.engine = None;
         *self.desktop_epoch.lock().unwrap() = None;
         self.desktop_events = None;
@@ -3944,7 +3982,7 @@ impl AppState {
             ));
         }
         self.watch_tasks = watch_tasks;
-        self.reconcile_zot_watches(cx);
+        self.reconcile_zapper_watches(cx);
         self.reconcile_change_request_watches(cx);
         // EngineInfo is part of the attachment boundary: views must know which
         // data profile they reached before they are allowed to render Ready.
@@ -4221,6 +4259,8 @@ impl AppState {
         }
         self.transcript_task = None;
         self.queue.clear();
+        self.host_queue.clear();
+        self.host_queue_at = None;
         self.queue_task = None;
         if let Some(id) = chat_id.as_deref() {
             // A chat implies its project (or the lack of one); `select_chat(None)`
@@ -4680,7 +4720,7 @@ fn spawn_watch<T: DeserializeOwned + 'static>(
                     let linked = state.apply_pending_deep_link(cx);
                     if changed && matches!(method, methods::WATCH_SPACES | methods::WATCH_DEVICES) {
                         state.reconcile_change_request_watches(cx);
-                        state.reconcile_zot_watches(cx);
+                        state.reconcile_zapper_watches(cx);
                     }
                     if changed || linked {
                         cx.notify();
@@ -4886,6 +4926,9 @@ fn spawn_queue_watch(
         /// Whether Stop holds the queue; absent from older hosts.
         #[serde(default)]
         paused: Option<bool>,
+        /// When a cloud queue's read was sent (epoch millis).
+        #[serde(default, rename = "readAt")]
+        read_at: Option<i64>,
     }
     cx.spawn(async move |this, cx| {
         const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
@@ -4940,7 +4983,7 @@ fn spawn_queue_watch(
                         if let Some(paused) = frame.paused {
                             state.set_queue_paused(&chat_id, paused);
                         }
-                        state.apply_queue(frame.items);
+                        state.apply_queue_read(frame.items, frame.read_at);
                         cx.notify();
                     }
                 });
@@ -6501,6 +6544,47 @@ mod tests {
     }
 
     #[test]
+    fn a_cloud_computers_chat_never_names_files_on_this_disk() {
+        use crate::workspace_links::FileLinkRoot;
+        let mut state = AppState::new();
+        // The cloud computer's engine reports its own device id, which the
+        // chat row shares — yet nothing it names is on this desktop.
+        state.local_device_id = Some("dev".into());
+        state.hosted_on_cloud_computer = true;
+        let mut cloud = chat("cloud", 0, None);
+        cloud.cwd = Some("/home/zuse/workspace".into());
+        state.apply_chats(vec![cloud]);
+        state.apply_spaces(vec![space("repo", "dev", "/home/zuse/workspace/repo", 0)]);
+        assert!(!state.chat_is_local("cloud"));
+        assert!(!state.chat_is_local("unknown"));
+        // A chat row not synced yet still resolves against the computer's
+        // own projects, flagged remote.
+        assert_eq!(
+            state.file_link_roots("unknown"),
+            vec![FileLinkRoot {
+                chat: None,
+                root: "/home/zuse/workspace/repo".into(),
+                local: false,
+            }]
+        );
+        assert_eq!(
+            state.file_link_roots("cloud"),
+            vec![
+                FileLinkRoot {
+                    chat: Some("cloud".into()),
+                    root: "/home/zuse/workspace".into(),
+                    local: false,
+                },
+                FileLinkRoot {
+                    chat: None,
+                    root: "/home/zuse/workspace/repo".into(),
+                    local: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn canvas_terminal_uses_the_selected_project_folder() {
         let mut state = AppState::new();
         state.local_device_id = Some("local".into());
@@ -6707,28 +6791,28 @@ mod tests {
         };
         state.apply_chats(vec![
             in_space("plain", None),
-            in_space("zot-worker-running", None),
+            in_space("zapper-worker-running", None),
             // Released: no longer a worker of any Zapper, long past creation.
-            in_space("zot-worker-delegate-zap11-ci-fix-1", None),
+            in_space("zapper-worker-delegate-zap11-ci-fix-1", None),
             in_space(
                 "side-of-released",
-                Some("zot-worker-delegate-zap11-ci-fix-1"),
+                Some("zapper-worker-delegate-zap11-ci-fix-1"),
             ),
             // An ordinary chat the Zapper adopted and then released.
             in_space("adopted-then-released", None),
         ]);
-        let zot: zuse_protocol::zots::Zot = serde_json::from_value(serde_json::json!({
+        let zapper: zuse_protocol::zappers::Zapper = serde_json::from_value(serde_json::json!({
             "id": "z", "revision": 3,
             "config": {"name": "n", "purpose": "", "homeDeviceId": "dev", "repositories": [],
                 "coordinatorModel": {"harness": "mock", "model": null},
                 "workerDeviceId": "dev", "maxConcurrentWorkers": 1, "maxFollowups": 1},
-            "status": "active", "coordinatorChatId": "zot-z-0", "previousCoordinatorChats": [],
-            "workers": [{"chatId": "zot-worker-running", "deviceId": "dev", "spaceId": "s1",
+            "status": "active", "coordinatorChatId": "zapper-z-0", "previousCoordinatorChats": [],
+            "workers": [{"chatId": "zapper-worker-running", "deviceId": "dev", "spaceId": "s1",
                 "objective": "o", "followups": 0}],
             "decisions": []
         }))
         .unwrap();
-        state.apply_zots(vec![zot]);
+        state.apply_zappers(vec![zapper]);
         let ids: Vec<&str> = state
             .chats_in_space("s1")
             .iter()
@@ -6743,7 +6827,7 @@ mod tests {
         sidebar.sort();
         assert_eq!(sidebar, ["adopted-then-released", "plain"]);
         // Still hidden with no Zapper list at all (e.g. the Zapper deleted).
-        state.apply_zots(vec![]);
+        state.apply_zappers(vec![]);
         let ids: Vec<&str> = state
             .chats_in_space("s1")
             .iter()
@@ -6822,6 +6906,71 @@ mod tests {
         state.selected_chat = Some("b".into());
         state.apply_chats(vec![chat("b", 1, None), chat("c", 2, None)]);
         assert_eq!(state.selected_chat.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn a_registered_cloud_conversation_stays_selected_until_its_computer_lists_it() {
+        let mut state = AppState::new();
+        state.pending_cloud_conversation = Some(chat("added", 2, None));
+        state.selected_chat = Some("added".into());
+        state.apply_chats(vec![chat("first", 0, None)]);
+        assert_eq!(state.selected_chat.as_deref(), Some("added"));
+        assert!(state.chats.iter().any(|chat| chat.id == "added"));
+        // The computer installs it on its first message and lists it.
+        state.apply_chats(vec![chat("first", 0, None), chat("added", 3, None)]);
+        assert!(state.pending_cloud_conversation.is_none());
+        assert_eq!(
+            state.chats.iter().filter(|chat| chat.id == "added").count(),
+            1
+        );
+        assert_eq!(state.selected_chat.as_deref(), Some("added"));
+    }
+
+    /// A local chat's row reads its own session, not the open chat: it
+    /// keeps spinning while another chat is selected and reads done when
+    /// its turn ends out of sight.
+    #[gpui::test]
+    fn a_background_chat_keeps_its_live_status_while_another_is_selected(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::AppContext as _;
+        let status = |state: &AppState, id: &str| {
+            state
+                .sidebar_chats(Utc::now(), None)
+                .into_iter()
+                .find(|(_, chat)| chat.id == id)
+                .map(|(status, _)| status)
+        };
+        let seen = |id: &str| {
+            let mut chat = chat(id, 0, Some(1));
+            chat.last_seen_at = chat.last_message_at;
+            chat
+        };
+        let state = cx.new(|_| {
+            let mut state = AppState::new();
+            state.apply_chats(vec![seen("a"), seen("b")]);
+            state.apply_sessions(vec![session("a", SessionStatus::Working, 0, Utc::now())]);
+            state
+        });
+        state.update(cx, |state, cx| {
+            state.select_chat(Some("a".into()), cx);
+            state.select_chat(Some("b".into()), cx);
+        });
+        state.read_with(cx, |state, _| {
+            assert_eq!(status(state, "a"), Some(ChatIndicator::Working));
+            assert_eq!(status(state, "b"), Some(ChatIndicator::Idle));
+        });
+        // A's turn ends while B is open: its reply is unseen.
+        state.update(cx, |state, _| {
+            let mut a = seen("a");
+            a.last_message_at = Some(Utc::now());
+            state.apply_chats(vec![a, seen("b")]);
+            state.apply_sessions(vec![session("a", SessionStatus::Idle, 0, Utc::now())]);
+        });
+        state.read_with(cx, |state, _| {
+            assert_eq!(status(state, "a"), Some(ChatIndicator::Completed));
+            assert_eq!(status(state, "b"), Some(ChatIndicator::Idle));
+        });
     }
 
     fn clock_epoch() -> DateTime<Utc> {
@@ -7491,13 +7640,21 @@ mod tests {
             duration_ms: None,
         }]);
         assert!(state.queue.is_empty());
-        // A saved row nobody lists stops showing after its grace period.
+        // A saved row stays however long no queue read follows its save
+        // (the owner's report: messages vanished on a timer while the server
+        // still held them)...
         state.push_optimistic_queued("session", optimistic("q2", "late"));
         state.set_optimistic_queued(
             "session",
             "q2",
-            OptimisticState::Saved(Utc::now().timestamp_millis() - OPTIMISTIC_SAVED_GRACE_MS - 1),
+            OptimisticState::Saved(Utc::now().timestamp_millis() - 10 * 60_000),
         );
+        assert_eq!(queue_ids(&state), vec!["q2"]);
+        // A read whose send time is unknown never drops it...
+        state.apply_queue(vec![]);
+        assert_eq!(queue_ids(&state), vec!["q2"]);
+        // ...one sent after the save that no longer lists it does (claimed).
+        state.apply_queue_read(vec![], Some(Utc::now().timestamp_millis()));
         assert!(state.queue.is_empty());
     }
 
@@ -7537,6 +7694,55 @@ mod tests {
         assert_eq!(queue_ids(&state), vec!["b"]);
         state.apply_queue(vec![queued_row("a", "a"), queued_row("b", "b")]);
         assert_eq!(queue_ids(&state), vec!["b"]);
+    }
+
+    /// The owner's report: two messages queued on the server behind a long
+    /// turn, and one just sent from this app. The panel lists all three in
+    /// server order, keeps them past any timer, and when the turn claims the
+    /// first one only that one leaves.
+    #[test]
+    fn the_queue_lists_every_server_row_and_drops_only_claimed_ones() {
+        let mut state = AppState::new();
+        state.selected_chat = Some("session".into());
+        let saved_long_ago = Utc::now().timestamp_millis() - 10 * 60_000;
+        // Queued from this app a while ago; the server listed it since.
+        state.push_optimistic_queued("session", optimistic("first", "first"));
+        state.set_optimistic_queued("session", "first", OptimisticState::Saved(saved_long_ago));
+        assert_eq!(
+            queue_ids(&state),
+            vec!["first"],
+            "no queue read yet: the saved message keeps showing, however old"
+        );
+        state.apply_queue(vec![queued_row("first", "first"), queued_row("yo", "yo")]);
+        assert_eq!(queue_ids(&state), vec!["first", "yo"]);
+        // A third, just sent and not listed yet.
+        state.push_optimistic_queued("session", optimistic("third", "and this"));
+        state.set_optimistic_queued(
+            "session",
+            "third",
+            OptimisticState::Saved(Utc::now().timestamp_millis()),
+        );
+        assert_eq!(queue_ids(&state), vec!["first", "yo", "third"]);
+        // A read sent before the third was saved, arriving after the save,
+        // still keeps it.
+        let saved_at = match state.optimistic_queued("third").map(|row| &row.state) {
+            Some(OptimisticState::Saved(at)) => *at,
+            other => panic!("saved row expected, got {other:?}"),
+        };
+        state.apply_queue_read(
+            vec![queued_row("first", "first"), queued_row("yo", "yo")],
+            Some(saved_at - 1),
+        );
+        assert_eq!(queue_ids(&state), vec!["first", "yo", "third"]);
+        // The running turn claims the first: it leaves, the rest stay in order.
+        state.apply_queue_read(
+            vec![queued_row("yo", "yo"), queued_row("third", "and this")],
+            Some(saved_at + 1),
+        );
+        assert_eq!(queue_ids(&state), vec!["yo", "third"]);
+        // Its message runs and the server lists only the rest.
+        state.apply_queue(vec![queued_row("third", "and this")]);
+        assert_eq!(queue_ids(&state), vec!["third"]);
     }
 
     /// The pause Stop puts on a queue is shown for its own chat only.

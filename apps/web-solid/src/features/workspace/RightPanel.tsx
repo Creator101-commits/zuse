@@ -14,11 +14,13 @@ const Browser = lazy(() => import("./Browser").then((m) => ({ default: m.Browser
 
 const Files = lazy(() => import("./files/Files").then((m) => ({ default: m.Files })));
 const Terminal = lazy(() => import("./Terminal").then((m) => ({ default: m.Terminal })));
-const SubagentTranscript = lazy(() => import("@/features/transcript/Subagent").then((m) => ({ default: m.SubagentTranscript })));
+
+const Agents = lazy(() => import("./Agents").then(m => ({ default: m.Agents })));
 
 type Surface = Exclude<Panel, null>;
 
 const SURFACES: Record<Surface, { label: string; icon: string; git?: boolean }> = {
+  agents: { label: "Agents", icon: "tool-agent" },
   files: { label: "Files", icon: "folder" },
   pullRequest: { label: "PR", icon: "pull-request", git: true },
   changes: { label: "Changes", icon: "git-compare", git: true },
@@ -26,21 +28,14 @@ const SURFACES: Record<Surface, { label: string; icon: string; git?: boolean }> 
   history: { label: "History", icon: "git-branch", git: true },
   terminal: { label: "Terminal", icon: "terminal" },
   browser: { label: "Browser", icon: "globe" },
-  // Opened by a subagent chip, never from the "+" menu; the tab shows the subagent's title.
-  agent: { label: "Agent", icon: "tool-agent" },
 };
 // Desktop order (crates/ui/src/shell/panel_menu.rs), with Git beside Changes and History last.
-const ORDER: Surface[] = ["files", "pullRequest", "changes", "git", "terminal", "browser", "history"];
+const ORDER: Surface[] = ["agents", "files", "pullRequest", "changes", "git", "terminal", "browser", "history"];
 
 export function RightPanel() {
   const target = createMemo(selectedTarget, targetMemoOptions);
   const [expanded, setExpanded] = createSignal<number | null>(null);
-  const available = (surface: Surface) =>
-    surface === "agent"
-      ? !!workspace.agent && workspace.agent.chatId === target()?.chatId
-      : !SURFACES[surface].git || !!target()?.git;
-  const surfaceLabel = (surface: Surface) =>
-    surface === "agent" ? workspace.agent?.title.trim() || "Agent" : SURFACES[surface].label;
+  const available = (surface: Surface) => !SURFACES[surface].git || !!target()?.git;
   const choices = () => ORDER.filter((s) => available(s) && !workspace.tabs.includes(s));
   // While the panel eases closed it keeps showing the surface it had, like desktop's last frame behind the mask.
   const current = () => view.rightPanel ?? workspace.lastPanel;
@@ -75,32 +70,6 @@ export function RightPanel() {
       measure();
     }));
   });
-
-  // The agent tab belongs to the chat that owns the subagent. Switching to
-  // another chat hides it; if it was the active surface, hand the panel to a
-  // neighbour tab (right first, like closePanelTab) or close it. The agent
-  // target itself stays — returning to its chat reshows the tab.
-  createEffect(
-    () =>
-      [
-        view.rightPanel,
-        workspace.agent,
-        target()?.chatId ?? null,
-        target()?.git ?? null,
-        workspace.tabs,
-      ] as const,
-    ([panel, agent, chatId]) => {
-      if (panel !== "agent") return;
-      if (agent && agent.chatId === chatId) return;
-      const tabs = workspace.tabs;
-      const at = tabs.indexOf("agent");
-      const right = at >= 0 ? tabs.slice(at + 1).find(available) : undefined;
-      const left = at > 0 ? tabs.slice(0, at).reverse().find(available) : undefined;
-      const fallback = right ?? left ?? (at < 0 ? tabs.find(available) : undefined);
-      if (fallback) openPanel(fallback);
-      else setView(draft => { draft["rightPanel"] = null; });
-    },
-  );
 
   // Expanding gives the panel all the width the conversation can spare (the shell keeps its minimum); collapsing
   // returns to the width it had.
@@ -137,15 +106,15 @@ export function RightPanel() {
                   id={`ws-tab-${surface}`}
                   aria-selected={(current() === surface) ? "true" : "false"}
                   aria-controls={`ws-surface-${surface}`}
-                  aria-label={surfaceLabel(surface)}
-                  title={surfaceLabel(surface)}
+                  aria-label={SURFACES[surface].label}
+                  title={SURFACES[surface].label}
                   onClick={() => openPanel(surface)}
                   onAuxClick={(e) => e.button === 1 && closePanelTab(surface)}
                 >
                   <Icon name={SURFACES[surface].icon} size={14} class="ws-tab-icon" />
-                  <span>{surfaceLabel(surface)}</span>
+                  <span>{SURFACES[surface].label}</span>
                 </button>
-                <button type="button" class="ws-tab-close" aria-label={`Close ${surfaceLabel(surface)}`} title="Close tab" onClick={() => closePanelTab(surface)}>
+                <button type="button" class="ws-tab-close" aria-label={`Close ${SURFACES[surface].label}`} title="Close tab" onClick={() => closePanelTab(surface)}>
                   <Icon name="close" size={12} />
                 </button>
               </div>
@@ -189,6 +158,7 @@ export function RightPanel() {
                 >
                   <Loading fallback={<div class="ws-empty"><Spinner label="Loading" /></div>}>
                     <Switch>
+                      <Match when={surface === "agents"}><Agents chatId={chatId} active={view.rightPanel === "agents"} /></Match>
                       <Match when={surface === "files"}><Files target={target()!} /></Match>
                       <Match when={surface === "changes"}><Changes target={target()!} /></Match>
                       <Match when={surface === "git"}><GitPanel target={target()!} /></Match>
@@ -196,11 +166,6 @@ export function RightPanel() {
                       <Match when={surface === "pullRequest"}><PullRequest target={target()!} active={view.rightPanel === "pullRequest"} /></Match>
                       <Match when={surface === "terminal"}><Terminal target={target()!} active={view.rightPanel === "terminal"} /></Match>
                       <Match when={surface === "browser"}><Browser target={target()!} /></Match>
-                      <Match when={surface === "agent"}>
-                        <Show when={workspace.agent} keyed>
-                          {(agent) => <SubagentTranscript chatId={agent.chatId} docRef={agent.ref} title={agent.title} />}
-                        </Show>
-                      </Match>
                     </Switch>
                   </Loading>
                 </section>
