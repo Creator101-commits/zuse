@@ -1,5 +1,8 @@
+import { Icon } from "@/ui/Icon";
+import { ZapperSelect } from "./Controls";
 import {
   createMemo,
+  createEffect,
   createSignal,
   For,
   Show,
@@ -30,12 +33,13 @@ const statuses: Record<IssueStatus, string> = {
   canceled: "Canceled",
 };
 const priorities: IssuePriority[] = ["urgent", "high", "normal", "low"];
-export function Issues(props: { zapper: Zapper; compact?: boolean }) {
+export function Issues(props: { zapper: Zapper; compact?: boolean; onOpen?: (id:string)=>void }) {
   const [filter, setFilter] = createSignal("open");
   const [query, setQuery] = createSignal("");
   const [selected, setSelected] = createSignal<string | null>(null);
   const [editing, setEditing] = createSignal(false);
   const [creating, setCreating] = createSignal(false);
+  createEffect(() => props.zapper.id, () => { setSelected(null); setEditing(false); setCreating(false); setQuery(""); });
   const issue = () => props.zapper.issues.find((i) => i.id === selected());
   const filtered = createMemo(() =>
     props.zapper.issues
@@ -65,81 +69,66 @@ export function Issues(props: { zapper: Zapper; compact?: boolean }) {
           </Button>
         </div>
         <div class="zp-filters">
-          <input
+          <label class="zp-search"><Icon name="palette-search" size={14} /><input
             aria-label="Search Zapper issues"
             placeholder="Search issues…"
             value={query()}
             onInput={(e) => setQuery(e.currentTarget.value)}
-          />
-          <select
-            aria-label="Issue status filter"
-            value={filter()}
-            onChange={(e) => setFilter(e.currentTarget.value)}
-          >
-            <option value="open">Open issues</option>
-            <option value="all">All issues</option>
-            <For each={Object.entries(statuses)}>
-              {([value, label]) => <option value={value}>{label}</option>}
-            </For>
-          </select>
+          /></label>
+          <ZapperSelect label="Issue status filter" value={filter()} onChange={setFilter} options={[{value:"open",label:"Open issues"},{value:"all",label:"All issues"},...Object.entries(statuses).map(([value,label]) => ({value,label}))]} />
         </div>
       </Show>
-      <For
-        each={props.compact ? filtered().slice(0, 5) : filtered()}
-        fallback={<p class="zp-muted">No matching issues.</p>}
-      >
-        {(i) => (
-          <button class="zp-issue-row" onClick={() => setSelected(i.id)}>
-            <span class="zp-muted">#{i.number}</span>
-            <div>
-              <strong>{i.details.title}</strong>
-              <small>
-                {statuses[i.details.status]} · {i.details.priority}
-                {i.details.assigned ? " · Assigned" : ""}
-                {i.details.dueDate ? ` · Due ${i.details.dueDate}` : ""}
-              </small>
-              <Show when={i.details.labels.length}>
-                <small>{i.details.labels.join(" · ")}</small>
-              </Show>
-            </div>
-          </button>
-        )}
-      </For>
+      <Show when={!props.compact}><div class="zp-list-summary">{filtered().length} {filtered().length === 1 ? "issue" : "issues"}<Show when={query() || filter() !== "open"}><button type="button" class="zp-link" onClick={() => { setQuery(""); setFilter("open"); }}>Clear filters</button></Show></div></Show>
+      <div class="zp-issue-list"><For each={props.compact ? filtered().slice(0, 5) : filtered()} fallback={<div class="zp-list-empty"><Icon name="list" size={24} /><strong>{props.zapper.issues.length ? "No matching issues" : "A clear place for the next task"}</strong><p>{props.zapper.issues.length ? "Try another search or status." : "Track tasks, decisions, and progress with your Zapper."}</p><Show when={!props.compact && !props.zapper.issues.length}><Button size="sm" onClick={() => setCreating(true)}>Create an issue</Button></Show></div>}>
+        {issue => <button type="button" class="zp-issue-row" onClick={() => { if(props.onOpen) props.onOpen(issue.id); else {setEditing(false);setSelected(issue.id);} }}>
+          <span class="zp-issue-status" data-status={issue.details.status} title={issueStatus(props.zapper,issue)}><Icon name={issue.details.status === "done" ? "check-circle" : issue.details.status === "blocked" ? "danger-triangle" : "clock-circle"} size={14} /></span>
+          <div class="zp-issue-content"><div class="zp-issue-title"><span class="zp-issue-number">ZAP-{issue.number}</span><strong>{issue.details.title}</strong></div><div class="zp-issue-meta"><span>{issueStatus(props.zapper,issue)}</span><span data-priority={issue.details.priority}>{issue.details.priority}</span><Show when={issue.details.owner || issue.details.assigned}><span>{ownerLabel(props.zapper,issue)}</span></Show><Show when={issue.details.dueDate}><span>Due {issue.details.dueDate}</span></Show><For each={issue.details.labels}>{label => <span class="zp-label">{label}</span>}</For></div></div>
+          <Icon name="alt-arrow-right" size={12} class="zp-issue-chevron" />
+        </button>}
+      </For></div>
       <Show when={creating()}>
-        <IssueEditor zapper={props.zapper} close={() => setCreating(false)} />
+        <IssueEditor zapper={props.zapper} close={() => setCreating(false)} onSave={props.onOpen} />
       </Show>
       <Show when={issue()}>
         {(value) => (
           <Dialog
             open
             onOpenChange={(open) => {
-              if (!open) setSelected(null);
+              if (!open) { setSelected(null); setEditing(false); }
             }}
-            title={`#${value().number} ${value().details.title}`}
+            title={editing() ? "Edit issue" : `#${value().number} ${value().details.title}`}
           >
-            <IssueDetail
-              zapper={props.zapper}
-              issue={value()}
-              edit={() => setEditing(true)}
-            />
+            <Show when={editing()} fallback={<IssueDetail zapper={props.zapper} issue={value()} edit={() => setEditing(true)} />}>
+              <IssueEditor zapper={props.zapper} issue={value()} embedded close={() => setEditing(false)} />
+            </Show>
           </Dialog>
         )}
       </Show>
-      <Show when={editing() && issue()}>
-        {(value) => (
-          <IssueEditor
-            zapper={props.zapper}
-            issue={value()}
-            close={() => setEditing(false)}
-          />
-        )}
-      </Show>
+
     </>
   );
+}
+export function IssuePage(props: { zapper: Zapper; id: string; onOpen: (id:string)=>void; onOpenPr?: (url:string,chatId:string)=>void }) {
+  const [editing,setEditing]=createSignal(false);
+  createEffect(()=>props.id,()=>{ setEditing(false); });
+  const issue=()=>props.zapper.issues.find(issue=>issue.id===props.id);
+  return <Show when={issue()} fallback={<p class="zp-muted">This issue is no longer available.</p>}>{issue=><div class="zp-issue-page"><div class="zp-issue-page-title"><span>ZAP-{issue().number}</span><h2>{issue().details.title}</h2></div><Show when={editing()} fallback={<IssueDetail zapper={props.zapper} issue={issue()} edit={()=>setEditing(true)} onOpen={props.onOpen} onOpenPr={props.onOpenPr} />}><IssueEditor zapper={props.zapper} issue={issue()} embedded close={()=>setEditing(false)} /></Show></div>}</Show>;
+}
+function ownerValue(details: IssueDetails) { const owner=details.owner;return owner?.type === "thread" ? `thread:${owner.chatId}` : owner?.type ?? (details.assigned ? "zapper" : "none"); }
+function ownerLabel(zapper: Zapper, issue: ZapperIssue) {
+  const owner=issue.details.owner;
+  return owner?.type === "user" ? "You" : owner?.type === "thread" ? threadTitle(owner.chatId,"Thread") : owner?.type === "zapper" || issue.details.assigned ? zapper.config.name : "Unassigned";
+}
+function issueStatus(zapper: Zapper, issue: ZapperIssue) {
+  const owner=issue.details.owner;
+  const worker=owner?.type === "thread" ? zapper.workers.find(worker=>worker.chatId===owner.chatId) : undefined;
+  return worker?.queuePosition !== undefined ? "Queued" : statuses[issue.details.status];
 }
 function IssueEditor(props: {
   zapper: Zapper;
   issue?: ZapperIssue;
+  onSave?: (id:string)=>void;
+  embedded?: boolean;
   close: () => void;
 }) {
   const id = untrack(() => props.issue?.id) ?? uuid();
@@ -163,14 +152,7 @@ function IssueEditor(props: {
     key: K,
     value: IssueDetails[K],
   ) => setDraft((d) => ({ ...d, [key]: value }));
-  return (
-    <Dialog
-      open
-      onOpenChange={(open) => {
-        if (!open) props.close();
-      }}
-      title={props.issue ? "Edit issue" : "New issue"}
-    >
+  const form = () => (
       <form
         class="zp-form"
         onSubmit={async (e) => {
@@ -182,6 +164,7 @@ function IssueEditor(props: {
               issueId: id,
               details: { ...draft(), title: draft().title.trim() },
             });
+            props.onSave?.(id);
             props.close();
           } catch {
             /* shared alert */
@@ -207,31 +190,11 @@ function IssueEditor(props: {
         <div class="zp-form-grid">
           <label>
             Status
-            <select
-              value={draft().status}
-              onChange={(e) =>
-                change("status", e.currentTarget.value as IssueStatus)
-              }
-            >
-              <For each={Object.entries(statuses)}>
-                {([value, label]) => <option value={value}>{label}</option>}
-              </For>
-            </select>
+            <ZapperSelect label="Issue status" value={draft().status} onChange={value => change("status", value as IssueStatus)} options={Object.entries(statuses).map(([value,label]) => ({value,label}))} />
           </label>
           <label>
             Priority
-            <select
-              value={draft().priority}
-              onChange={(e) =>
-                change("priority", e.currentTarget.value as IssuePriority)
-              }
-            >
-              <For each={priorities}>
-                {(p) => (
-                  <option value={p}>{p[0]!.toUpperCase() + p.slice(1)}</option>
-                )}
-              </For>
-            </select>
+            <ZapperSelect label="Issue priority" value={draft().priority} onChange={value => change("priority", value as IssuePriority)} options={priorities.map(value => ({value,label:value[0]!.toUpperCase()+value.slice(1)}))} />
           </label>
           <label>
             Due date
@@ -258,14 +221,10 @@ function IssueEditor(props: {
             />
           </label>
         </div>
-        <label class="zp-check">
-          <input
-            type="checkbox"
-            checked={draft().assigned}
-            onChange={(e) => { const assigned = e.currentTarget.checked; setDraft(d => ({ ...d, assigned, owner: assigned ? { type: "zapper" } : undefined })); }}
-          />
-          Assign to this Zapper
-        </label>
+        <label>Owner<ZapperSelect label="Issue owner" value={ownerValue(draft())} options={[{value:"none",label:"Unassigned"},{value:"user",label:"You"},{value:"zapper",label:props.zapper.config.name},...props.zapper.workers.map(worker=>({value:`thread:${worker.chatId}`,label:threadTitle(worker.chatId,worker.objective)}))]} onChange={value => setDraft(draft=>({...draft,owner:value === "none" ? undefined : value.startsWith("thread:") ? {type:"thread",chatId:value.slice(7)} : {type:value as "user"|"zapper"},assigned:value === "zapper" || value.startsWith("thread:")}))} /></label>
+        <label>Parent issue<ZapperSelect label="Parent issue" value={draft().parent ?? ""} options={[{value:"",label:"No parent"},...props.zapper.issues.filter(issue=>issue.id!==id).map(issue=>({value:issue.id,label:`ZAP-${issue.number} · ${issue.details.title}`}))]} onChange={value=>change("parent",value || undefined)} /></label>
+        <label>Done when<textarea rows={2} placeholder="What needs to be true to close this issue?" value={draft().doneCriteria ?? ""} onInput={e => change("doneCriteria",e.currentTarget.value)} /></label>
+        <label>Out of scope<textarea rows={2} placeholder="What should this task leave alone?" value={draft().outOfScope ?? ""} onInput={e => change("outOfScope",e.currentTarget.value)} /></label>
         <fieldset>
           <legend>Related issues</legend>
           <For each={props.zapper.issues.filter((i) => i.id !== id)}>
@@ -295,37 +254,46 @@ function IssueEditor(props: {
         </Show>
         <div class="zp-form-actions">
           <Button onClick={props.close}>Cancel</Button>
-          <Button type="submit" variant="primary" disabled={commandState.busy}>
+          <Button type="submit" variant="primary" disabled={commandState.busy || !draft().title.trim()}>
             Save issue
           </Button>
         </div>
       </form>
-    </Dialog>
   );
+  return <Show when={!props.embedded} fallback={form()}><Dialog open onOpenChange={open => { if (!open) props.close(); }} title={props.issue ? "Edit issue" : "New issue"}>{form()}</Dialog></Show>;
 }
+
 function IssueDetail(props: {
   zapper: Zapper;
   issue: ZapperIssue;
   edit: () => void;
+  onOpen?: (id:string)=>void;
+  onOpenPr?: (url:string,chatId:string)=>void;
 }) {
   const [comment, setComment] = createSignal("");
   const [reply, setReply] = createSignal<string | null>(null);
   const [link, setLink] = createSignal("");
   const [url, setUrl] = createSignal("");
   const [delegating, setDelegating] = createSignal(false);
+  const [action,setAction]=createSignal<"ask"|"close"|null>(null);
+  const [note,setNote]=createSignal("");
+  const [recommendation,setRecommendation]=createSignal("");
+  const [outcome,setOutcome]=createSignal<"merged"|"dropped">("merged");
   return (
     <div class="zp-issue-detail">
       <div class="zp-section-heading">
         <span>
-          {statuses[props.issue.details.status]} ·{" "}
+          {issueStatus(props.zapper,props.issue)} ·{" "}
           {props.issue.details.priority}
-          {props.issue.details.assigned ? " · Assigned" : ""}
+          {` · ${ownerLabel(props.zapper,props.issue)}`}
         </span>
         <Button size="sm" onClick={props.edit}>
           Edit issue
         </Button>
       </div>
       <Markdown text={props.issue.details.description} live={false} />
+      <Show when={props.issue.details.doneCriteria}><h3>Done when</h3><Markdown text={props.issue.details.doneCriteria!} live={false} /></Show>
+      <Show when={props.issue.details.outOfScope}><h3>Out of scope</h3><Markdown text={props.issue.details.outOfScope!} live={false} /></Show>
       <Show when={props.issue.details.dueDate}>
         <p>Due {props.issue.details.dueDate}</p>
       </Show>
@@ -334,12 +302,11 @@ function IssueDetail(props: {
       </Show>
       <For each={props.issue.details.relations}>
         {(id) => (
-          <p class="zp-muted">
-            Related:{" "}
-            {props.zapper.issues.find((i) => i.id === id)?.details.title ?? id}
-          </p>
+          <button type="button" class="zp-link" onClick={()=>props.onOpen?.(id)}>Related: {props.zapper.issues.find(issue=>issue.id===id)?.details.title ?? id}</button>
         )}
       </For>
+      <Show when={props.issue.details.parent}><button type="button" class="zp-link" onClick={()=>props.onOpen?.(props.issue.details.parent!)}>Parent: {props.zapper.issues.find(issue=>issue.id===props.issue.details.parent)?.details.title ?? props.issue.details.parent}</button></Show>
+      <Show when={!["done","canceled"].includes(props.issue.details.status)}><div class="zp-issue-actions"><Button size="sm" onClick={()=>{setNote("");setRecommendation("");setAction("ask");}}>Ask you</Button><Button size="sm" onClick={()=>{setNote("");setAction("close");}}>Close issue</Button></div></Show>
       <h3>Threads</h3>
       <For each={props.issue.threads}>
         {(id) => (
@@ -363,24 +330,7 @@ function IssueDetail(props: {
         )}
       </For>
       <div class="zp-filters">
-        <select
-          aria-label="Link issue thread"
-          value={link()}
-          onChange={(e) => setLink(e.currentTarget.value)}
-        >
-          <option value="">Choose a worker thread</option>
-          <For
-            each={props.zapper.workers.filter(
-              (w) => !props.issue.threads.includes(w.chatId),
-            )}
-          >
-            {(w) => (
-              <option value={w.chatId}>
-                {threadTitle(w.chatId, w.objective)}
-              </option>
-            )}
-          </For>
-        </select>
+        <ZapperSelect label="Link issue thread" value={link()} onChange={setLink} options={[{value:"",label:"Choose a worker thread"},...props.zapper.workers.filter(worker => !props.issue.threads.includes(worker.chatId)).map(worker => ({value:worker.chatId,label:threadTitle(worker.chatId,worker.objective),icon:"chat-round-line"}))]} />
         <Button
           disabled={!link() || commandState.busy}
           onClick={() =>
@@ -406,8 +356,9 @@ function IssueDetail(props: {
           <div class="zp-section-heading">
             <a
               href={/^https?:\/\//.test(pr.url) ? pr.url : undefined}
-              target="_blank"
+              target={props.onOpenPr ? undefined : "_blank"}
               rel="noreferrer"
+              onClick={event=>{if(props.onOpenPr && /^https?:\/\//.test(pr.url)){event.preventDefault();props.onOpenPr(pr.url,props.issue.threads[0] ?? props.zapper.coordinatorChatId);}}}
             >
               {pr.title || pr.url}
             </a>
@@ -509,10 +460,18 @@ function IssueDetail(props: {
             {commandState.error}
           </p>
         </Show>
-        <Button type="submit" disabled={commandState.busy}>
+        <Button type="submit" disabled={commandState.busy || !comment().trim()}>
           Post comment
         </Button>
       </form>
+      <Dialog open={!!action()} onOpenChange={open=>{if(!open)setAction(null);}} title={action() === "ask" ? "Ask you" : "Close issue"}>
+        <form class="zp-form" onSubmit={async event=>{event.preventDefault();if(action() === "ask" && !note().trim())return;try {await command(props.zapper.id,action() === "ask" ? {type:"askUser",issueId:props.issue.id,question:note().trim(),recommendation:recommendation().trim() || undefined} : {type:"closeIssue",issueId:props.issue.id,outcome:outcome(),note:note().trim()});setAction(null);}catch{/* shared command alert */}}}>
+          <Show when={action() === "close"}><label>Outcome<ZapperSelect label="Close outcome" value={outcome()} onChange={value=>setOutcome(value as "merged"|"dropped")} options={[{value:"merged",label:"Completed / merged"},{value:"dropped",label:"Dropped"}]} /></label></Show>
+          <label>{action() === "ask" ? "Question" : "Closing note"}<textarea required={action() === "ask"} value={note()} onInput={event=>setNote(event.currentTarget.value)} /></label>
+          <Show when={action() === "ask"}><label>Recommendation<textarea value={recommendation()} onInput={event=>setRecommendation(event.currentTarget.value)} /></label></Show>
+          <div class="zp-form-actions"><Button onClick={()=>setAction(null)}>Cancel</Button><Button type="submit" variant="primary" disabled={commandState.busy || (action() === "ask" && !note().trim())}>{action() === "ask" ? "Send question" : "Close issue"}</Button></div>
+        </form>
+      </Dialog>
       <Show when={delegating()}>
         <WorkerDialog
           zapper={props.zapper}
