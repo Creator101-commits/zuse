@@ -337,14 +337,13 @@ fn panels_share_space_and_keep_rendered_geometry_through_their_lifecycle(cx: &mu
     change(&shell, cx, |s, _, cx| s.toggle_right_pane(cx));
     draw(&shell, cx, 75);
     change(&shell, cx, |s, _, cx| select(s, None, cx));
-    expect(
-        draw(&shell, cx, 0),
-        [300.0, 0.0, 0.0, 1600.0 - 300.0 - GUTTERS],
-    );
-    expect(
-        settled(&shell, cx),
-        [300.0, 0.0, 0.0, 1600.0 - 300.0 - GUTTERS],
-    );
+    expect(draw(&shell, cx, 0), [300.0, 0.0, 0.0, 1600.0 - 300.0]);
+    expect(settled(&shell, cx), [300.0, 0.0, 0.0, 1600.0 - 300.0]);
+    // The start canvas fills the height and has no draft tab strip.
+    let canvas = cx.debug_bounds("conversation-column").unwrap();
+    near(f32::from(canvas.top()), 0.0);
+    near(f32::from(canvas.size.height), 900.0);
+    assert!(cx.debug_bounds("cloud-conversation-tabs").is_none());
     change(&shell, cx, |s, _, cx| select(s, Some("a"), cx));
     expect(
         settled(&shell, cx),
