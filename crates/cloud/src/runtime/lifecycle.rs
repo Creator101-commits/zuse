@@ -185,7 +185,9 @@ impl RetainedProvider for Boxd {
         let layout = super::machine_layout::Layout::Root;
         let command =
             retained_launch_command(layout.run_as_task(), layout.launcher(), d, workspace, api);
-        if self.exec(&d.source_machine_id, &command).await?.exit_code != 0 {
+        let result = self.exec(&d.source_machine_id, &command).await?;
+        super::launch_report::record(&d.source_machine_id, &result);
+        if result.exit_code != 0 {
             return Err(ProviderError::Unavailable);
         }
         Ok(())
@@ -758,6 +760,10 @@ impl RuntimeControl {
     ) -> Result<(), ApiError> {
         let result = self.lifecycle_step(provider, job, now).await;
         if let Err(error) = &result {
+            // Diagnostics only: never let them change the failure handling.
+            if let Err(stored) = super::launch_report::persist(&self.pool, &job.resource_id).await {
+                tracing::debug!(%stored, "launch_report_not_stored");
+            }
             // A computer its provider no longer has will not come back. Count
             // consecutive "missing" answers (claims and other outcomes don't
             // count) and stop after a few, leaving the workspace settled so
@@ -778,7 +784,7 @@ impl RuntimeControl {
                     "Retained computer missing at its provider; lifecycle stopped");
                 return result;
             }
-            if self.settle_failed_resume(job, error.code).await? {
+            if self.settle_failed_resume(provider, job, error.code).await? {
                 return result;
             }
             jobs::retry(&self.pool, &job, clock_ms(), error.code).await?;
@@ -800,7 +806,12 @@ impl RuntimeControl {
     /// through the ordinary retained lifecycle (bounded retries, then the
     /// max-quiet-awake backstop, which watches `pausing`). That pause keeps
     /// the failure code as the status once it completes.
-    async fn settle_failed_resume(&self, job: &jobs::Job, code: &str) -> Result<bool, ApiError> {
+    async fn settle_failed_resume(
+        &self,
+        provider: &dyn RetainedProvider,
+        job: &jobs::Job,
+        code: &str,
+    ) -> Result<bool, ApiError> {
         if !resume_failure_terminal(code) {
             return Ok(false);
         }
@@ -821,15 +832,35 @@ impl RuntimeControl {
             || config["rustLifecycleOperation"]["id"] != operation
             || config["rustLifecycleOperation"]["action"] != "resume"
             || deleted(&row)
-            || (config["rustRecreation"]["operationId"].is_string()
-                && !matches!(
-                    config["rustRecreation"]["phase"].as_str(),
-                    Some("ready" | "cancelled")
-                ))
         {
-            // Not this workspace's plain resume (a recreation wake, say):
-            // leave the ordinary retry and attention handling in charge.
             return Ok(false);
+        }
+        if recreation_owns_wake(config) {
+            // A recreation's wake: the recreation owns the computer and its
+            // attention state. Stop the wake at the same deadline (instead of
+            // about 9.5 hours of retries); the recreation worker then turns
+            // the failed wake into `attention-required`. The machine must
+            // not keep running meanwhile: the wake is reset to its start (so
+            // a recreation Retry wakes it again) and the machine is slept.
+            let failed = sqlx::query("UPDATE zuse_rust_jobs SET state='failed',last_error_code=$3,lease_token=NULL,lease_expires_at=NULL,updated_at=$4 WHERE job_id=$1 AND lease_token=$2 AND state='running'")
+                .bind(&job.id).bind(&job.lease_token).bind(code).bind(now).execute(&mut *tx).await?;
+            if failed.rows_affected() != 1 {
+                return Ok(false);
+            }
+            sqlx::query("UPDATE zuse_rust_lifecycle_operations SET phase='waking',provider_effects=provider_effects-'wake',updated_at=$2 WHERE operation_id=$1")
+                .bind(operation).bind(now).execute(&mut *tx).await?;
+            sqlx::query("UPDATE api_cloud_workspaces SET runtime_state='offline',request_config=jsonb_set(request_config,'{rustLifecycleOperation,phase}','\"waking\"'),revision=revision+1,updated_at=GREATEST(updated_at+1,$2) WHERE workspace_id=$1")
+                .bind(&job.resource_id).bind(now).execute(&mut *tx).await?;
+            tx.commit().await?;
+            let machine = row["provider_sandbox_id"].as_str().unwrap_or("");
+            let slept = machine.is_empty() || sleep_confirmed(provider, machine).await;
+            if !slept {
+                tracing::error!(workspace = %job.resource_id, machine,
+                    "Could not sleep the machine of a failed recreation wake; it needs an operator");
+            }
+            tracing::warn!(workspace = %job.resource_id, operation, code, slept,
+                "Cloud recreation wake could not start the computer; stopped for the recreation to report");
+            return Ok(true);
         }
         // Workspace before job, the order every other lifecycle write uses.
         let failed = sqlx::query("UPDATE zuse_rust_jobs SET state='failed',last_error_code=$3,lease_token=NULL,lease_expires_at=NULL,updated_at=$4 WHERE job_id=$1 AND lease_token=$2 AND state='running'")
@@ -891,6 +922,36 @@ impl RuntimeControl {
         Ok(())
     }
 }
+/// Ask the provider to sleep `machine` and confirm it, a few bounded times.
+async fn sleep_confirmed(provider: &dyn RetainedProvider, machine: &str) -> bool {
+    for attempt in 0..SLEEP_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if let Err(error) = provider.pause_retained(machine).await {
+            tracing::warn!(machine, attempt, ?error, "Machine sleep request failed");
+            continue;
+        }
+        if let Ok(Some(found)) = provider.inspect_retained(machine).await
+            && matches!(
+                found.state,
+                MachineState::Standby | MachineState::Paused | MachineState::Stopped
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+const SLEEP_ATTEMPTS: u32 = 3;
+/// An unfinished recreation owns the current wake.
+fn recreation_owns_wake(config: &Value) -> bool {
+    config["rustRecreation"]["operationId"].is_string()
+        && !matches!(
+            config["rustRecreation"]["phase"].as_str(),
+            Some("ready" | "cancelled")
+        )
+}
 /// The machine and retained disk a settled resume must still put to sleep.
 fn settle_sleep(row: &Value) -> Option<(String, String)> {
     let machine = row["provider_sandbox_id"].as_str()?;
@@ -950,6 +1011,14 @@ mod resume_failure_tests {
             i64::MAX
         ));
         assert!(!resume_overdue("resume", MACHINE_MISSING, 0, i64::MAX));
+        // Recreation wakes are stopped at the same deadline, not settled.
+        assert!(recreation_owns_wake(
+            &json!({"rustRecreation":{"operationId":"r","phase":"waking"}})
+        ));
+        assert!(!recreation_owns_wake(
+            &json!({"rustRecreation":{"operationId":"r","phase":"ready"}})
+        ));
+        assert!(!recreation_owns_wake(&json!({})));
         // A launch the image permanently refuses settles at once.
         assert!(resume_overdue("resume", LAUNCH_INCOMPATIBLE, 1_000, 1_001));
         assert!(!resume_overdue("pause", LAUNCH_INCOMPATIBLE, 1_000, 1_001));
