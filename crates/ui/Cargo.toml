@@ -10,6 +10,7 @@ simulator-fixture = ["gpui_platform/test-support", "gpui/bench"]
 voice-experimental = [] # Compatibility flag; native subscription voice uses Codex's packaged helper.
 project-palette-fixture = []
 compact-picker-fixture = ["gpui_platform/test-support", "gpui/bench"]
+image-links-fixture = ["appshots-fixture", "gpui/bench"]
 
 # Native captures explicitly present the freshly drawn scene, including when
 # a nested Wayland compositor has stopped requesting idle frames.
@@ -116,7 +117,12 @@ required-features = ["project-palette-fixture"]
 name = "compact-picker-fixture"
 required-features = ["compact-picker-fixture"]
 
+[[example]]
+name = "image-links-fixture"
+required-features = ["image-links-fixture"]
+
 [dependencies]
+tempfile.workspace = true
 hayro = "0.9"
 # Pairing codes shown in Remote access, the same encoder `zuse pair` uses.
 qrcode = { version = "0.14", default-features = false }
@@ -209,7 +215,6 @@ x11rb = { version = "0.14.0", features = ["image"] }
 [dev-dependencies]
 zuse-serve.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
-tempfile.workspace = true
 mimalloc.workspace = true
 tracing-subscriber.workspace = true
 

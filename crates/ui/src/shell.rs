@@ -92,6 +92,7 @@ mod panel_layout;
 mod panel_menu;
 mod pr_watch;
 mod project_setup;
+mod remote_workspaces;
 mod ssh_open;
 mod update_notes;
 mod update_restart;
@@ -125,6 +126,9 @@ mod cloud_info;
 mod cloud_sidebar;
 mod cloud_start;
 mod cloud_tabs;
+mod desktop_panel;
+#[cfg(feature = "image-links-fixture")]
+mod image_links_fixture;
 mod tabs;
 mod top_bar;
 mod voice_stage;
@@ -852,6 +856,7 @@ fn right_pane_takeover_width(viewport: f32, sidebar: f32) -> f32 {
 pub enum RightSurface {
     #[default]
     Picker,
+    Desktop,
     File(u64),
     Browser(u64),
     Simulator(u64),
@@ -1353,8 +1358,6 @@ const GITHUB_REPO_URL: &str = "https://github.com/opcodehq/zuse";
 /// hero reaches below the composer, giving its lower mask room to dissolve
 /// gradually into the otherwise empty lower canvas.
 const NEW_THREAD_BACKGROUND_FROSTED_OPACITY: f32 = 0.84;
-const NEW_THREAD_BACKGROUND_VIEWPORT_RATIO: f32 = 0.91;
-const NEW_THREAD_BACKGROUND_MAX_HEIGHT: f32 = 960.0;
 
 /// Drag marker for the sidebar resize handle.
 struct SidebarResize;
@@ -1500,6 +1503,7 @@ struct PinnedSessionDragState {
 type SidebarKeyedRow = (String, f32, AnyElement);
 
 struct SidebarSessionRows {
+    projects: std::collections::HashMap<String, (String, String)>,
     custom_count: usize,
     rows: Vec<SidebarKeyedRow>,
     pinned_count: usize,
@@ -1630,8 +1634,7 @@ pub(crate) fn new_thread_background_opacity(is_frost: bool) -> f32 {
 }
 
 pub(crate) fn new_thread_background_height(viewport_height: f32) -> f32 {
-    (viewport_height.max(0.0) * NEW_THREAD_BACKGROUND_VIEWPORT_RATIO)
-        .min(NEW_THREAD_BACKGROUND_MAX_HEIGHT)
+    viewport_height.max(0.0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2187,12 +2190,22 @@ fn dismiss_update_prompt(cx: &mut App) {
 }
 
 pub struct Shell {
+    computer_registry: remote_workspaces::Registry,
+    computer_navigation: Vec<remote_workspaces::ComputerChat>,
+    computer_jump_slots: Option<std::collections::HashMap<String, usize>>,
+    computer_jump_hints: bool,
+    remote_workspaces: Vec<remote_workspaces::Workspace>,
+    active_remote_workspace: Option<usize>,
+    sidebar_owner: Option<gpui::WeakEntity<Shell>>,
+    sidebar_is_active: bool,
+    local_computer_collapsed: bool,
     update_restart: Option<update_restart::RestartPlan>,
     update_restart_task: Option<Task<()>>,
     zapper_ui: zappers::ZapperUi,
     state: Entity<AppState>,
     cloud_conversation: Option<Entity<cloud_conversation::CloudConversation>>,
     cloud_conversation_events: Option<Subscription>,
+    desktop_panel: desktop_panel::DesktopPanel,
     cloud_tabs: cloud_tabs::CloudTabs,
     /// Live status reports from every open cloud conversation.
     cloud_activity: cloud_activity::CloudActivity,
@@ -2950,6 +2963,7 @@ impl Shell {
             state: state.clone(),
             cloud_conversation: None,
             cloud_conversation_events: None,
+            desktop_panel: Default::default(),
             cloud_tabs: Default::default(),
             cloud_activity: Default::default(),
             desktop_import,
@@ -3145,6 +3159,15 @@ impl Shell {
             runtime_change_error: None,
             import_task: None,
             import_current: None,
+            computer_registry: Default::default(),
+            computer_navigation: Vec::new(),
+            computer_jump_slots: None,
+            computer_jump_hints: false,
+            remote_workspaces: Vec::new(),
+            active_remote_workspace: None,
+            sidebar_owner: None,
+            sidebar_is_active: true,
+            local_computer_collapsed: false,
             boot,
             data_dir,
             settings_base: settings::current(cx),
@@ -4147,6 +4170,7 @@ impl Shell {
                     .files
                     .contains_key(&key)
                     .then(|| (*surface, SharedString::from("Files"), false, None)),
+                RightSurface::Desktop => Some((*surface, "Desktop".into(), false, None)),
                 RightSurface::Picker => None,
             })
             .collect()
@@ -4195,6 +4219,7 @@ impl Shell {
         let path = match surface {
             RightSurface::File(id) => self.file_surface_paths.get(&id)?.clone(),
             RightSurface::Picker
+            | RightSurface::Desktop
             | RightSurface::Files
             | RightSurface::Diff(_)
             | RightSurface::Terminal(_)
@@ -4385,6 +4410,7 @@ impl Shell {
         if self.resolved_right_active(cx) != surface {
             use zuse_analytics::desktop::{Event, Surface};
             let category = match surface {
+                RightSurface::Desktop => Surface::Desktop,
                 RightSurface::Picker => Surface::Picker,
                 RightSurface::File(_) => Surface::File,
                 RightSurface::Browser(_) => Surface::Browser,
@@ -4449,7 +4475,7 @@ impl Shell {
             | RightSurface::Subagent(_)
             | RightSurface::Browser(_)
             | RightSurface::PullRequest(_) => {}
-            RightSurface::Picker => {}
+            RightSurface::Picker | RightSurface::Desktop => {}
         }
         self.sync_explorer_selection(cx);
         cx.notify();
@@ -5527,6 +5553,10 @@ impl Shell {
             tabs.retain(|s| *s != surface);
         }
         match surface {
+            RightSurface::Desktop => {
+                self.desktop_panel.choices.remove(&key);
+                self.disconnect_desktop(cx);
+            }
             RightSurface::File(_) => {}
             RightSurface::Simulator(id) => {
                 if let Some(pane) = self.simulators.remove(&id) {
@@ -5632,7 +5662,25 @@ impl Shell {
     }
 
     pub fn prepare_window_close(&mut self, cx: &mut Context<Self>) -> bool {
-        self.prepare_exit(PendingExit::CloseWindow, cx)
+        for (index, workspace) in self.remote_workspaces.iter().enumerate() {
+            if !workspace
+                .shell
+                .update(cx, |shell, cx| shell.prepare_window_close(cx))
+            {
+                self.active_remote_workspace = Some(index);
+                cx.notify();
+                return false;
+            }
+        }
+        let ready = self.prepare_exit(PendingExit::CloseWindow, cx);
+        if ready && !self.flush_computers(cx) {
+            return false;
+        }
+        if !ready {
+            self.active_remote_workspace = None;
+            cx.notify();
+        }
+        ready
     }
 
     /// The first rung of `⌘W` / Window > Close Window: when the right pane is
@@ -5645,6 +5693,11 @@ impl Shell {
     /// closes — the same cascade browsers use. The native traffic-light close
     /// deliberately skips this rung: it always closes the window.
     pub fn close_active_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if let Some(index) = self.active_remote_workspace {
+            return self.remote_workspaces[index]
+                .shell
+                .update(cx, |shell, cx| shell.close_active_surface(window, cx));
+        }
         // The Pull requests route's pane holds pull request tabs instead.
         if matches!(self.route, Route::PullRequests) {
             return self.close_active_pull_request_tab(cx);
@@ -5683,7 +5736,25 @@ impl Shell {
     }
 
     pub fn prepare_quit(&mut self, cx: &mut Context<Self>) -> bool {
-        self.prepare_exit(PendingExit::Quit, cx)
+        for (index, workspace) in self.remote_workspaces.iter().enumerate() {
+            if !workspace
+                .shell
+                .update(cx, |shell, cx| shell.prepare_quit(cx))
+            {
+                self.active_remote_workspace = Some(index);
+                cx.notify();
+                return false;
+            }
+        }
+        let ready = self.prepare_exit(PendingExit::Quit, cx);
+        if ready && !self.flush_computers(cx) {
+            return false;
+        }
+        if !ready {
+            self.active_remote_workspace = None;
+            cx.notify();
+        }
+        ready
     }
 
     fn prepare_exit(&mut self, action: PendingExit, cx: &mut Context<Self>) -> bool {
@@ -6056,6 +6127,7 @@ impl Shell {
     }
 
     fn set_route(&mut self, route: Route, cx: &mut Context<Self>) {
+        self.activate_sidebar_computer(cx);
         self.record_route(route, cx);
         if matches!(self.route, Route::Settings(SettingsSection::Archived))
             && !matches!(route, Route::Settings(SettingsSection::Archived))
@@ -6386,6 +6458,11 @@ impl Shell {
         // of an unreachable tab.
         let section = section.reopenable(self.state.read(cx).cloud_access());
         self.command_palette = None;
+        if section == SettingsSection::Devices {
+            if let Some(page) = &self.devices_page {
+                page.update(cx, |page, cx| page.refresh_computers(cx));
+            }
+        }
         // Re-probe installed providers on each visit while preserving active sign-ins.
         if section == SettingsSection::Harnesses {
             if let Some(page) = &self.harnesses_page {
@@ -6920,6 +6997,7 @@ impl Shell {
     /// Start editing `chat_id`'s title in place on its row: the sidebar's
     /// session row, or — for a side chat — its conversation tab.
     fn open_rename_chat(&mut self, chat_id: String, cx: &mut Context<Self>) {
+        self.activate_sidebar_computer(cx);
         self.close_chat_menu(cx);
         if self.chat_rename.is_some() {
             self.finish_rename_chat(true, cx);
@@ -7165,11 +7243,21 @@ impl Shell {
 
     fn active_sidebar_pin_profile_key(&self, cx: &App) -> Option<String> {
         let state = self.state.read(cx);
-        sidebar_pin_profile_key(
+        let key = sidebar_pin_profile_key(
             state.workspace_scope,
             state.auth.as_ref(),
             self.boot.org_id.as_deref(),
-        )
+        )?;
+        // Local profiles on different computers can have the same chat ids;
+        // their pins and drag payloads must stay scoped to their computer.
+        if self.sidebar_owner.is_some() && state.workspace_scope == Some(WorkspaceScope::Local) {
+            Some(format!(
+                "{key}:computer:{}",
+                state.local_device_id.as_deref()?
+            ))
+        } else {
+            Some(key)
+        }
     }
 
     fn active_sidebar_pins(&self, cx: &App) -> Vec<String> {
@@ -7403,6 +7491,9 @@ impl Shell {
     /// grouping view options permute the list, and the chip on a row must
     /// name the key that opens it.
     fn jump_to_session(&mut self, slot: usize, cx: &mut Context<Self>) {
+        if self.navigate_computer_chat(true, Some(slot), cx) {
+            return;
+        }
         let Some(chat_id) = self.sidebar_visible_order(cx).into_iter().nth(slot) else {
             return;
         };
@@ -7464,6 +7555,22 @@ impl Shell {
     }
 
     pub(super) fn set_jump_hints(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if let Some(owner) = self.sidebar_owner.clone() {
+            cx.defer(move |cx| {
+                let _ = owner.update(cx, |owner, cx| owner.set_jump_hints(visible, cx));
+            });
+            return;
+        }
+        if !self.remote_workspaces.is_empty() && self.computer_jump_hints != visible {
+            self.computer_jump_hints = visible;
+            for workspace in &self.remote_workspaces {
+                workspace.shell.update(cx, |shell, cx| {
+                    shell.jump_hints = visible;
+                    cx.notify();
+                });
+            }
+            cx.notify();
+        }
         if self.jump_hints != visible {
             self.jump_hints = visible;
             cx.notify();
@@ -9412,6 +9519,7 @@ impl Shell {
     ) -> AnyElement {
         // The Plugins page owns the main area, so no chat reads as current.
         let selected = selected
+            && self.sidebar_is_active
             && !matches!(
                 self.route,
                 Route::Plugins | Route::Archives | Route::Usage | Route::Zapper
@@ -9860,6 +9968,7 @@ impl Shell {
                         if cloud_locked {
                             return;
                         }
+                        this.activate_sidebar_computer(cx);
                         this.chat_menu.open(ChatMenuState {
                             tab: None,
                             chat_id: menu_id.clone(),
@@ -10746,7 +10855,11 @@ impl Shell {
         )
     }
 
-    fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar_session_items(
+        &mut self,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> (AnyElement, Option<AnyElement>) {
         if self.sidebar_session_transfer.as_ref().is_some_and(|drag| {
             !cx.has_active_drag() || !self.sidebar_session_transfer_is_valid(&drag.payload, cx)
         }) {
@@ -10925,9 +11038,6 @@ impl Shell {
             })
             .collect();
 
-        // The space filter lives ABOVE the scroll region (fixed) so its
-        // dropdown can float without being clipped by the list's overflow.
-        let filter_row = self.render_spaces_filter(theme, cx);
         let active_list = if !list_items.is_empty() {
             let mut pinned_items = list_items;
             let mut custom_items = pinned_items.split_off(pinned_count);
@@ -11025,6 +11135,16 @@ impl Shell {
                 .child(SharedString::from("No sessions yet"))
                 .into_any_element()
         };
+
+        (active_list, moving_row)
+    }
+
+    fn render_chat_sidebar(&mut self, theme: &Theme, cx: &mut Context<Self>) -> AnyElement {
+        if !self.remote_workspaces.is_empty() {
+            return self.render_multi_computer_sidebar(theme, cx);
+        }
+        let (active_list, moving_row) = self.render_sidebar_session_items(theme, cx);
+        let filter_row = self.render_spaces_filter(theme, cx);
 
         // The (filtered) Sessions list scrolls inside an EdgeFade scope —
         // a true per-glyph gradient at active overflow edges. Glass-safe
@@ -13231,23 +13351,9 @@ impl Shell {
         transcript_width: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Active cloud tabs share the normal header's tab row. Draft tabs
-        // retain their canvas strip until a conversation is admitted.
-        let strip = self
-            .cloud_conversation
-            .is_none()
-            .then(|| self.render_cloud_tabs(cx))
-            .flatten();
-        let content = self.render_main_content(window, main_content_width, transcript_width, cx);
-        div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .children(strip)
-            .child(content)
-            .into_any_element()
+        // The start canvas fills the column. Conversation tabs belong to the
+        // titlebar once a chat exists, rather than a strip above the artwork.
+        self.render_main_content(window, main_content_width, transcript_width, cx)
     }
 
     fn render_main_content(
@@ -14246,7 +14352,7 @@ impl Shell {
         })
     }
 
-    fn render_right_pane(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_right_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let exiting = self.fit_exit_width(1).is_some();
         let visible = self.horizontal_fit().right || exiting;
         let showing =
@@ -14267,6 +14373,7 @@ impl Shell {
         let theme = Theme::of(cx).clone();
         let content: AnyElement = if showing {
             match self.resolved_right_active(cx) {
+                RightSurface::Desktop => self.render_desktop_panel(window, cx),
                 RightSurface::Files => match self.files.get(&self.panel_key(cx)).cloned() {
                     Some(files) => {
                         if self.right_pane_open(cx) {
@@ -14594,6 +14701,7 @@ impl Shell {
                 RightSurface::Browser(_) => icons::GLOBE,
                 RightSurface::PullRequest(_) => icons::PULL_REQUEST,
                 RightSurface::Files => icons::FOLDER,
+                RightSurface::Desktop => icons::MONITOR,
                 RightSurface::Picker => icons::PLUS,
             };
             // Working chats and subagents swap their harness icon for the
@@ -15593,6 +15701,14 @@ fn header_icon_button_base(
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.pull_settings(cx);
+        self.restore_computers(cx);
+        self.reconcile_computer_identities(cx);
+        self.persist_computers(cx);
+        if let Some(index) = self.active_remote_workspace {
+            let remote = self.remote_workspaces[index].shell.clone();
+            return remote.into_any_element();
+        }
         self.sync_cloud_tab_scope(cx);
         // Every repaint (state frame, input, or the clock firing) reschedules
         // the next clock-driven one; the sidebar and transcript follow this
@@ -15607,6 +15723,7 @@ impl Render for Shell {
                 )
             });
         }
+        self.sync_desktop_panel(simulator_active && selected == RightSurface::Desktop, cx);
         let source_control_active = window.is_window_active();
         let active_review = self.active_main_diff(cx);
         for (id, changes) in &self.diffs {
@@ -16434,6 +16551,13 @@ impl Render for Shell {
                 // beneath the row), and the row overlays that band.
                 let tab_row = (on_chat && self.conversation_tab_row_visible(cx))
                     .then(|| self.render_conversation_tab_row(cx));
+                // Let the start canvas meet the window edges, including the
+                // top, while established chats keep their inset surface.
+                let canvas_gutter = if on_chat && !self.has_conversation(cx) {
+                    0.0
+                } else {
+                    self.workspace_gutter()
+                };
                 let card: AnyElement = div()
                     .id("conversation-column")
                     .debug_selector(|| "conversation-column".into())
@@ -16444,7 +16568,7 @@ impl Render for Shell {
                     .flex_row()
                     .overflow_hidden()
                     .opacity(under_stage)
-                    .when(self.workspace_gutter() > 0., |view| {
+                    .when(canvas_gutter > 0., |view| {
                         view.rounded(px(zuse_viewport::workspace_style::RADIUS))
                             .bg(Theme::of(cx).panel_bg())
                             .border_1()
@@ -16453,7 +16577,7 @@ impl Render for Shell {
                     // Flush, the conversation still reads as its own panel:
                     // the content tone against the translucent sidebar,
                     // parted by one hairline.
-                    .when(self.workspace_gutter() <= 0., |view| {
+                    .when(canvas_gutter <= 0., |view| {
                         view.bg(Theme::of(cx).panel_bg())
                             .when(self.sidebar_content_width() > 0., |view| {
                                 view.border_l_1().border_color(crate::theme::hairline(0.06))
@@ -16483,7 +16607,7 @@ impl Render for Shell {
                 // so the sidebar's right gutter stays exactly as wide as its
                 // left one — a 5px flex child here read as lopsided spacing.
                 let sidebar_seam = div()
-                    .w(px(self.workspace_gutter()))
+                    .w(px(canvas_gutter))
                     .h_full()
                     .flex_none()
                     .relative()
@@ -16538,8 +16662,8 @@ impl Render for Shell {
                                     .h_full()
                                     .flex()
                                     .flex_col()
-                                    .py(px(self.workspace_gutter()))
-                                    .pr(px(self.workspace_gutter()))
+                                    .py(px(canvas_gutter))
+                                    .pr(px(canvas_gutter))
                                     .child(card),
                             )
                             // The right pane is ONE container: the surface
@@ -16686,7 +16810,20 @@ impl Render for Shell {
             // element at the window edges.
             .children(Self::render_linux_resize_borders(window));
         self.render_time = None;
-        root
+        // A connection gate belongs to one computer, while the shared sidebar
+        // must remain usable to reach every other computer.
+        if (self.sidebar_owner.is_some() || !self.remote_workspaces.is_empty())
+            && (!matches!(gate, GatePhase::Ready) || onboarding || restart_required)
+        {
+            div()
+                .size_full()
+                .flex()
+                .child(self.render_sidebar(cx))
+                .child(div().flex_1().min_w_0().h_full().child(root))
+                .into_any_element()
+        } else {
+            root.into_any_element()
+        }
     }
 }
 
@@ -16965,6 +17102,7 @@ mod tests {
             running_subagents: 0,
             awaiting_input: None,
             background_tasks: Vec::new(),
+            notice: None,
         }
     }
 
@@ -21086,6 +21224,7 @@ impl Shell {
                         running_subagents: 1,
                         awaiting_input: None,
                         background_tasks: Vec::new(),
+                        notice: None,
                         chat_id: "browser-fixture".into(),
                         device_id: "local".into(),
                         status: zuse_protocol::SessionStatus::Working,
@@ -21121,6 +21260,7 @@ impl Shell {
                     state.apply_sessions(vec![zuse_protocol::Session {
                         last_completed_turn: None,
                         running_subagents: 0,
+                        notice: None,
                         awaiting_input: None,
                         background_tasks: vec![
                             task(

@@ -273,6 +273,27 @@ mod tests {
 }
 
 pub const RUST_RUNTIME_STORAGE_FORMAT: &str = "zuse-rust-engine-v1";
+/// Storage formats this build can read: the one it writes plus, during a
+/// two-phase migration, the one before it (release N reads the new format,
+/// N+1 writes it). A retained computer's stored format must be *readable*,
+/// not equal to [`RUST_RUNTIME_STORAGE_FORMAT`], so an in-place runtime
+/// update or a rollback by one release never strands its storage.
+pub const READABLE_RUST_RUNTIME_STORAGE_FORMATS: &[&str] = &[RUST_RUNTIME_STORAGE_FORMAT];
+pub fn rust_runtime_storage_readable(format: &str) -> bool {
+    READABLE_RUST_RUNTIME_STORAGE_FORMATS.contains(&format)
+}
+#[cfg(test)]
+mod storage_format_tests {
+    use super::*;
+    #[test]
+    fn the_written_format_is_always_readable_and_unknown_ones_are_not() {
+        assert!(rust_runtime_storage_readable(RUST_RUNTIME_STORAGE_FORMAT));
+        assert!(!rust_runtime_storage_readable(
+            "zuse-rust-engine-v0-unknown"
+        ));
+        assert!(!rust_runtime_storage_readable(""));
+    }
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudRuntimeStorage {
@@ -344,6 +365,10 @@ pub struct CloudWorkspaceCreateRequest {
     pub environment_revision: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<crate::cloud_assets::Asset>,
+    /// First-message files whose bytes are still uploading. The computer
+    /// starts at once; the first turn waits until every one is committed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_attachments: Vec<crate::cloud_assets::PendingAsset>,
     pub project_id: String,
     pub provider_id: String,
     pub base_ref: String,

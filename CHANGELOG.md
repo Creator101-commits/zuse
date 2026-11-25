@@ -19,6 +19,53 @@
 - A steered Devin turn no longer leaves the running command's chip stuck before the steer.
 - Devin retries reopening a conversation another process still holds for about five seconds before starting a fresh session; if it stays locked, the new session starts without the earlier context.
 
+## 0.27.9 - 2026-11-25
+
+### Added
+
+- Watch a cloud computer's desktop live with the new Monitor view.
+
+### Changed
+
+- The start screen fills the main area edge to edge, and tabs only appear inside a chat.
+- Connected computers share one sidebar section.
+- New cloud chats with attachments start their computer right away; files upload alongside with progress, automatic retries, and Retry or Remove if they fail.
+
+### Fixed
+
+- When Codex loses its connection to the model and retries, the chat shows a quiet "Reconnecting to the model… 2/5" status instead of a stack of red errors, and it clears once Codex is streaming again. If the retries run out, the turn ends with one error and a Retry.
+- A Codex turn that goes silent for 15 minutes with no command or question open now ends with "Codex stopped responding" and a Retry instead of showing "working" forever.
+- An open cloud chat whose connection silently dropped (after sleep or a network change) now reconnects and catches up instead of freezing partway.
+- Files on a message waiting for its cloud computer upload correctly even when they are larger than about 0.5 MB, with Retry or Remove if the upload fails.
+
+## 0.27.8 - 2026-11-24
+
+### Fixed
+
+- Each cloud chat keeps its own tab bar: switching chats shows only that chat's conversations, and no stray "New chat" tab follows you around. New thread opens a clean new chat (a new computer) instead of a tab; the tab bar's plus still opens a conversation on the same computer.
+- The cloud tab bar's plus and close icons are visible again.
+- Image links show their photo icon and normal link style again. In a cloud chat whose computer is asleep, clicking an image or file link opens a tab right away, wakes the computer and shows the file, with Retry if it fails.
+- The Diff/Edit switch only appears for changed files git can compare, not for images, untracked files or unchanged files.
+
+## 0.27.7 - 2026-11-23
+
+### Added
+
+- The plus button in a cloud chat opens a new conversation on the same cloud computer, sharing its folder, branch and files. The tab opens instantly; a sleeping computer wakes on the first message. The history button reopens the computer's other conversations.
+- Sign up and start cloud chats entirely in the browser, with the web workspace closer to the desktop app.
+
+### Changed
+
+- Cleaner model picker: a provider rail with search, one-line rows, and a compact card with a rounded reasoning slider, icon toggles for fast mode, favorite and default, and a 200K | 1M switch shown only for models that support it.
+
+### Fixed
+
+- File and image links in cloud chats open from the cloud computer: images in the image viewer, other files in the file preview, with a short notice when the file is missing or the computer is offline.
+- Files opened from a cloud chat appear as a tab beside the chat instead of replacing it.
+- The sidebar keeps showing working and finished status for chats in the background, not just the open one.
+- Missing plugin logos load on demand.
+- Agent update failures explain what happened in one sentence; busy and offline installs retry quietly first.
+
 ## 0.27.6 - 2026-11-22
 
 ### Added

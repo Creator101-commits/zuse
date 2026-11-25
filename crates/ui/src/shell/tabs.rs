@@ -295,6 +295,9 @@ impl Shell {
         if self.overlay_owns_keyboard(cx) {
             return;
         }
+        if self.navigate_computer_chat(forward, None, cx) {
+            return;
+        }
         // The same list `render_active_rows` draws and the jump shortcuts
         // count — one function, so neither can drift from the screen.
         let order = self.sidebar_visible_order(cx);
@@ -444,7 +447,6 @@ impl Shell {
         if !self.cloud_tab_navigation_ready(cx) {
             return;
         }
-        self.cloud_tabs.clear_current();
         self.cloud_conversation = None;
         self.cloud_conversation_events = None;
         self.command_palette = None;
