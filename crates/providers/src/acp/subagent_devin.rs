@@ -369,9 +369,11 @@ impl DevinTracker {
     fn settle_sidekick(&mut self, status: DoneStatus) -> Vec<AgentEvent> {
         let mut events = Vec::new();
         while let Some(chip) = self.deferred_sidekick.pop_front() {
+            self.sidekick_open.retain(|_, owner| owner != &chip);
             events.extend(settle_chip_events(&chip, DoneStatus::Completed));
         }
         if let Some(chip) = self.sidekick_chip.take() {
+            self.sidekick_open.retain(|_, owner| owner != &chip);
             events.extend(settle_chip_events(&chip, status));
         }
         events
@@ -471,6 +473,22 @@ mod tests {
             "_meta": { "cognition.ai/inputTokens": 10552, "cognition.ai/outputTokens": 79,
                 "cognition.ai/subagent_context": { "parentAgentId": "sidekick" } }
         })
+    }
+
+    #[test]
+    fn force_settle_clears_open_tools_but_preserves_late_result_identity() {
+        let mut tracker = DevinTracker::default();
+        tracker.map(&sidekick_tool_call("sk::old"));
+        let chip = tracker.sidekick_chip.clone().unwrap();
+        assert!(!tracker.sidekick_open.is_empty());
+        assert!(!tracker.turn_settled(DoneStatus::Completed).is_empty());
+        assert!(tracker.sidekick_open.is_empty());
+        let late = tracker.map(&sidekick_tool_done("sk::old"));
+        assert!(late.iter().any(|event| matches!(event,
+            AgentEvent::Subagent { parent_tool_use_id, event }
+                if parent_tool_use_id == &chip && matches!(event.as_ref(), AgentEvent::ToolResult { .. }))));
+        assert!(tracker.sidekick_chip.is_none());
+        assert!(tracker.sidekick_open.is_empty());
     }
 
     fn sidekick_tool_call(id: &str) -> serde_json::Value {

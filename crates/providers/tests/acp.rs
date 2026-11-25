@@ -1763,7 +1763,7 @@ for line in sys.stdin:
     );
     let steered = events
         .iter()
-        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .position(|e| matches!(e, AgentEvent::SteerBoundary { .. }))
         .expect("Steered boundary");
     let second = events
         .iter()
@@ -1850,7 +1850,7 @@ for line in sys.stdin:
 
     let steered = events
         .iter()
-        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .position(|e| matches!(e, AgentEvent::SteerBoundary { .. }))
         .expect("Steered boundary");
     let second = events
         .iter()
@@ -1937,7 +1937,7 @@ for line in sys.stdin:
             {
                 tx.send(SteerMessage {
                     prompt: "also do this".into(),
-                    message_id: None,
+                    message_id: Some("tool-steer".into()),
                     attachments: Vec::new(),
                     config: None,
                 })
@@ -1963,9 +1963,14 @@ for line in sys.stdin:
             )
         })
         .expect("lead tool ToolResult");
+    assert!(
+        events.iter().any(|event| matches!(event,
+        AgentEvent::DeliveryAcknowledged { message_id } if message_id == "tool-steer")),
+        "{events:?}"
+    );
     let steered = events
         .iter()
-        .position(|e| matches!(e, AgentEvent::Steered { .. }))
+        .position(|e| matches!(e, AgentEvent::SteerBoundary { .. }))
         .expect("Steered boundary");
     let second = events
         .iter()
@@ -1985,9 +1990,8 @@ for line in sys.stdin:
 /// Devin refuses injected mid-turn prompts: two steers ("s1", "s2") ride
 /// `session/prompt` while the turn lives, the fake rejects the SECOND
 /// injection first, then the FIRST, then settles the primary. Each refusal
-/// keeps its steer unconfirmed — its boundary already went out, so the
-/// redelivery `Steered` naming its message id is a no-op confirmation that
-/// still re-arms the segment — and the refused texts redeliver joined in
+/// keeps its steer unconfirmed after the provisional split. Redelivery
+/// splits again, then confirms the exact identities on success. Texts join in
 /// admission order as the next prompt. One Done per prompt cycle, no
 /// session/cancel.
 #[cfg(unix)]
@@ -2089,22 +2093,24 @@ for line in sys.stdin:
         "s1-text\n\ns2-text",
         "refused steers redeliver joined in admission order"
     );
-    // Every Steered boundary names the steer it delivers; the two
-    // redelivery boundaries after the first Done confirm "s1" then "s2".
-    let steered_ids: Vec<Option<String>> = events
+    let sequence: Vec<_> = events
         .iter()
-        .filter_map(|e| match e {
-            AgentEvent::Steered { message_id, .. } => Some(message_id.clone()),
+        .filter_map(|event| match event {
+            AgentEvent::SteerBoundary { message_id, .. } => {
+                Some(format!("split:{}", message_id.as_deref().unwrap()))
+            }
+            AgentEvent::Steered { message_id, .. } => {
+                Some(format!("delivered:{}", message_id.as_deref().unwrap()))
+            }
+            AgentEvent::DeliveryAcknowledged { message_id } => Some(format!("ack:{message_id}")),
+            AgentEvent::Done { .. } => Some("done".into()),
             _ => None,
         })
         .collect();
     assert_eq!(
-        steered_ids,
-        vec![
-            Some("s1".into()),
-            Some("s2".into()),
-            Some("s1".into()),
-            Some("s2".into())
+        sequence,
+        [
+            "split:s1", "split:s2", "done", "split:s1", "split:s2", "ack:s1", "ack:s2", "done"
         ],
         "{events:?}"
     );
@@ -3307,4 +3313,511 @@ async fn access_mode_rejection_stops_before_sending_the_prompt() {
                     .is_some_and(|error| error.contains("mode change refused"))),
         "{events:?}"
     );
+}
+
+/// Responses beyond the grace window retain every identity and outcome,
+/// independently of which injected prompt resolves last.
+#[tokio::test]
+async fn delayed_injection_outcomes_are_individual_and_order_independent() {
+    for (outcomes, expected_text, acknowledgements) in [
+        ("[(2, False), (1, True)]", "s2-text", vec!["s1", "s2"]),
+        ("[(1, False), (2, True)]", "s1-text", vec!["s2", "s1"]),
+        (
+            "[(2, False), (1, False)]",
+            "s1-text\n\ns2-text",
+            vec!["s1", "s2"],
+        ),
+        ("[(2, True), (1, True)]", "", vec!["s2", "s1"]),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = r#"#!/usr/bin/env python3
+import json, sys, time, pathlib
+root = pathlib.Path(__file__).parent
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+def text(value):
+    emit({'method':'session/update','params':{'sessionId':'s-1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':value}}}})
+prompts = []
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/prompt':
+        prompts.append(req)
+        if len(prompts) == 1:
+            text('ready')
+        elif len(prompts) == 3:
+            emit({'id':prompts[0]['id'],'result':{'stopReason':'end_turn'}})
+            time.sleep(0.8)
+            for index, success in OUTCOMES:
+                if success:
+                    emit({'id':prompts[index]['id'],'result':{'stopReason':'end_turn'}})
+                else:
+                    emit({'id':prompts[index]['id'],'error':{'code':-32000,'message':'refused'}})
+            if all(success for _, success in OUTCOMES):
+                time.sleep(0.2)
+                break
+        elif len(prompts) == 4:
+            value = ''.join(block.get('text', '') for block in req['params']['prompt'])
+            (root / 'retry.txt').write_text(value)
+            text('retry')
+            emit({'id':req['id'],'result':{'stopReason':'end_turn'}})
+            time.sleep(0.2)
+            break
+"#.replace("OUTCOMES", outcomes);
+        let harness = devin_script(&dir, "agent.py", &source);
+        let (controls, tx, _) = controls();
+        let mut req = devin_request("primary");
+        req.cwd = dir.path().display().to_string();
+        let mut stream = harness.run(req, controls).await.unwrap();
+        let mut tx = Some(tx);
+        let mut events = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = stream.next().await {
+                let event = event.unwrap();
+                if matches!(&event, AgentEvent::TextDelta { text } if text == "ready") {
+                    let sender = tx.take().unwrap();
+                    for id in ["s1", "s2"] {
+                        sender
+                            .send(SteerMessage {
+                                prompt: format!("{id}-text"),
+                                message_id: Some(id.into()),
+                                attachments: vec![],
+                                config: None,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                }
+                events.push(event);
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("retry.txt")).unwrap_or_default(),
+            expected_text,
+            "{outcomes}: {events:?}"
+        );
+        let acks: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::DeliveryAcknowledged { message_id } => Some(message_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(acks, acknowledgements, "{outcomes}: {events:?}");
+        assert_eq!(
+            dones(&events),
+            vec![(DoneStatus::Completed, None); if expected_text.is_empty() { 1 } else { 2 }],
+            "{outcomes}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn interrupt_discards_pending_split_before_late_tool_result() {
+    for explicit_stop in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = r#"#!/usr/bin/env python3
+import json, sys, time
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+def update(u):
+    emit({'method':'session/update','params':{'sessionId':'s-1','update':u}})
+primary = None
+injected = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/prompt':
+        if primary is None:
+            primary = req['id']
+            update({'sessionUpdate':'tool_call','toolCallId':'lead','title':'Run tool','kind':'execute','rawInput':{'command':'echo done'},'status':'in_progress'})
+        else:
+            injected = req['id']
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'injection pending'}})
+    elif method == 'session/cancel':
+        update({'sessionUpdate':'tool_call_update','toolCallId':'lead','status':'completed'})
+        emit({'id':injected,'error':{'code':-32000,'message':'refused'}})
+        emit({'id':primary,'result':{'stopReason':'end_turn'}})
+        time.sleep(0.1)
+        break
+"#;
+        let harness = devin_script(&dir, "agent.py", source);
+        let (controls, tx, token) = controls();
+        let turn = controls.turn.clone();
+        let mut req = devin_request("primary");
+        req.cwd = dir.path().display().to_string();
+        let mut stream = harness.run(req, controls).await.unwrap();
+        let mut tx = Some(tx);
+        let mut events = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = stream.next().await {
+                let event = event.unwrap();
+                if matches!(&event, AgentEvent::ToolCall { id, .. } if id == "lead") {
+                    tx.take()
+                        .unwrap()
+                        .send(SteerMessage {
+                            prompt: "pending".into(),
+                            message_id: Some("pending-id".into()),
+                            attachments: vec![],
+                            config: None,
+                        })
+                        .await
+                        .unwrap();
+                }
+                if matches!(&event, AgentEvent::TextDelta { text } if text == "injection pending") {
+                    if explicit_stop {
+                        turn.stop_turn();
+                    } else {
+                        token.cancel();
+                    }
+                }
+                events.push(event);
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AgentEvent::SteerBoundary { .. }
+                    | AgentEvent::Steered { .. }
+                    | AgentEvent::DeliveryAcknowledged { .. }
+            )),
+            "stop={explicit_stop}: {events:?}"
+        );
+        assert_eq!(
+            dones(&events),
+            [(DoneStatus::Interrupted, None)],
+            "stop={explicit_stop}: {events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn delayed_prompt_stop_reasons_and_usage_survive_promotion_and_eof() {
+    for (reason, expected) in [
+        ("error", DoneStatus::Errored),
+        ("cancelled", DoneStatus::Interrupted),
+        ("refusal", DoneStatus::Errored),
+    ] {
+        for reversed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = r#"#!/usr/bin/env python3
+import json, sys, time, os
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+prompts = []
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/prompt':
+        prompts.append(req['id'])
+        if len(prompts) == 1:
+            emit({'method':'session/update','params':{'sessionId':'s-1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ready'}}}})
+        elif len(prompts) == 3:
+            emit({'id':prompts[0],'result':{'stopReason':'end_turn','usage':{'inputTokens':1,'outputTokens':2}}})
+            time.sleep(0.8)
+            for index in ORDER:
+                emit({'id':prompts[index],'result':{'stopReason':REASON if index == 1 else 'end_turn','usage':{'inputTokens':index*2+1,'outputTokens':index*2+2}}})
+            os._exit(0)
+"#.replace("ORDER", if reversed { "[2, 1]" } else { "[1, 2]" }).replace("REASON", &format!("'{reason}'"));
+            let harness = devin_script(&dir, "agent.py", &source);
+            let (controls, tx, _) = controls();
+            let mut req = devin_request("primary");
+            req.cwd = dir.path().display().to_string();
+            let mut stream = harness.run(req, controls).await.unwrap();
+            let mut tx = Some(tx);
+            let mut events = Vec::new();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while let Some(event) = stream.next().await {
+                    let event = event.unwrap();
+                    if matches!(&event, AgentEvent::TextDelta { text } if text == "ready") {
+                        let sender = tx.take().unwrap();
+                        for id in ["s1", "s2"] {
+                            sender
+                                .send(SteerMessage {
+                                    prompt: id.into(),
+                                    message_id: Some(id.into()),
+                                    attachments: vec![],
+                                    config: None,
+                                })
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    events.push(event);
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                dones(&events)
+                    .iter()
+                    .map(|(status, _)| *status)
+                    .collect::<Vec<_>>(),
+                [expected],
+                "{reason}, reversed={reversed}: {events:?}"
+            );
+            let usage: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => Some((*input_tokens, *output_tokens)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(usage, [(9, 12)], "{reason}: {events:?}");
+            for id in ["s1", "s2"] {
+                assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::DeliveryAcknowledged { message_id } if message_id == id)).count(), 1, "{events:?}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn refused_prompt_redelivery_response_followed_by_eof_confirms_exact_receipt() {
+    // Repeat the response/EOF race: both channels become ready together.
+    for cancel_mode in [None; 8].into_iter().chain([Some(false), Some(true)]) {
+        let dir = tempfile::tempdir().unwrap();
+        let source = r#"#!/usr/bin/env python3
+import json, sys, os
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+primary = None
+retry = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/cancel':
+        emit({'id':retry,'result':{'stopReason':'end_turn','usage':{'inputTokens':7,'outputTokens':3}}})
+        os._exit(0)
+    elif method == 'session/prompt':
+        if primary is None:
+            primary = req['id']
+            emit({'method':'session/update','params':{'sessionId':'s-1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ready'}}}})
+        elif primary != 'retried':
+            emit({'id':req['id'],'error':{'code':-32000,'message':'refused'}})
+            emit({'id':primary,'result':{'stopReason':'end_turn'}})
+            primary = 'retried'
+        else:
+            if WAIT_FOR_CANCEL:
+                retry = req['id']
+                emit({'method':'session/update','params':{'sessionId':'s-1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'retry-ready'}}}})
+            else:
+                emit({'id':req['id'],'result':{'stopReason':'end_turn','usage':{'inputTokens':7,'outputTokens':3}}})
+                os._exit(0)
+"#.replace("WAIT_FOR_CANCEL", if cancel_mode.is_some() { "True" } else { "False" });
+        let harness = devin_script(&dir, "agent.py", &source);
+        let (controls, tx, token) = controls();
+        let turn = controls.turn.clone();
+        let mut req = devin_request("primary");
+        req.cwd = dir.path().display().to_string();
+        let mut stream = harness.run(req, controls).await.unwrap();
+        let mut tx = Some(tx);
+        let mut events = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(event) = stream.next().await {
+                let event = event.unwrap();
+                if matches!(&event, AgentEvent::TextDelta { text } if text == "ready") {
+                    tx.take()
+                        .unwrap()
+                        .send(SteerMessage {
+                            prompt: "retry me".into(),
+                            message_id: Some("retry-id".into()),
+                            attachments: vec![],
+                            config: None,
+                        })
+                        .await
+                        .unwrap();
+                }
+                if matches!(&event, AgentEvent::TextDelta { text } if text == "retry-ready") {
+                    if cancel_mode == Some(true) {
+                        turn.stop_turn();
+                    } else {
+                        token.cancel();
+                    }
+                }
+                events.push(event);
+            }
+        })
+        .await
+        .unwrap();
+        let sequence: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::DeliveryAcknowledged { message_id } => {
+                    Some(format!("ack:{message_id}"))
+                }
+                AgentEvent::Done { .. } => Some("done".into()),
+                _ => None,
+            })
+            .collect();
+        let expected_sequence = if cancel_mode.is_some() {
+            vec!["done", "done"]
+        } else {
+            vec!["done", "ack:retry-id", "done"]
+        };
+        assert_eq!(
+            sequence, expected_sequence,
+            "cancel={cancel_mode:?}: {events:?}"
+        );
+        assert_eq!(
+            dones(&events),
+            [
+                (DoneStatus::Completed, None),
+                (
+                    if cancel_mode.is_some() {
+                        DoneStatus::Interrupted
+                    } else {
+                        DoneStatus::Completed
+                    },
+                    None
+                )
+            ],
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&AgentEvent::Usage {
+                input_tokens: 7,
+                output_tokens: 3
+            }),
+            "{events:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn primary_failure_settles_without_waiting_for_unanswered_injection() {
+    for rpc_error in [false, true] {
+        for answer_injection in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = r#"#!/usr/bin/env python3
+import json, sys, time
+def emit(frame):
+    print(json.dumps(dict(jsonrpc='2.0', **frame)), flush=True)
+def update(value):
+    emit({'method':'session/update','params':{'sessionId':'s-1','update':value}})
+primary = None
+for line in sys.stdin:
+    req = json.loads(line)
+    method = req.get('method')
+    if method == 'initialize':
+        emit({'id':req['id'],'result':{'protocolVersion':1,'agentCapabilities':{'_meta':{'cognition.ai/midTurnPrompts':True}}}})
+    elif method == 'session/new':
+        emit({'id':req['id'],'result':{'sessionId':'s-1'}})
+    elif method == 'session/prompt':
+        if primary is None:
+            primary = req['id']
+            update({'sessionUpdate':'tool_call','toolCallId':'sk::pending','kind':'execute','title':'Run tool','rawInput':{'command':'echo pending'},'_meta':{'cognition.ai/sidekick':True,'cognition.ai/inferenceToolName':'exec'}})
+            update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ready'}})
+        else:
+            if RPC_ERROR:
+                emit({'id':primary,'error':{'code':-32000,'message':'primary failed'}})
+            else:
+                emit({'id':primary,'result':{'stopReason':'error','usage':{'inputTokens':1,'outputTokens':2}}})
+            if ANSWER_INJECTION:
+                time.sleep(0.05)
+                emit({'id':req['id'],'result':{'stopReason':'end_turn','usage':{'inputTokens':3,'outputTokens':4}}})
+            # Keep reading with the injection unanswered and the child alive.
+    elif method == 'session/cancel':
+        break
+"#.replace("RPC_ERROR", if rpc_error { "True" } else { "False" })
+  .replace("ANSWER_INJECTION", if answer_injection { "True" } else { "False" });
+            let harness = devin_script(&dir, "agent.py", &source);
+            let (controls, tx, token) = controls();
+            let mut req = devin_request("primary");
+            req.cwd = dir.path().display().to_string();
+            let mut stream = harness.run(req, controls).await.unwrap();
+            let mut events = Vec::new();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while let Some(event) = stream.next().await {
+                    let event = event.unwrap();
+                    let ready = matches!(&event, AgentEvent::TextDelta { text } if text == "ready");
+                    events.push(event);
+                    if ready {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            tx.send(SteerMessage {
+                prompt: "pending injection".into(),
+                message_id: Some("pending-id".into()),
+                attachments: vec![],
+                config: None,
+            })
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(event) = stream.next().await {
+                    let event = event.unwrap();
+                    let done = matches!(&event, AgentEvent::Done { .. });
+                    events.push(event);
+                    if done {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("the resolved primary failure must not wait indefinitely for an injection");
+            let outcomes = dones(&events);
+            assert_eq!(
+                outcomes.len(),
+                1,
+                "rpc_error={rpc_error}, answered={answer_injection}: {events:?}"
+            );
+            assert_eq!(outcomes[0].0, DoneStatus::Errored, "{events:?}");
+            let error = outcomes[0].1.as_deref().unwrap();
+            assert!(
+                error.contains(if rpc_error {
+                    "primary failed"
+                } else {
+                    "failed to complete"
+                }),
+                "{error}"
+            );
+            let subagent_done = events.iter().position(|event| matches!(event,
+                AgentEvent::Subagent { event, .. } if matches!(event.as_ref(), AgentEvent::Done { status: DoneStatus::Errored, .. }))).expect("primary failure must settle its sidekick");
+            let parent_done = events
+                .iter()
+                .position(|event| matches!(event, AgentEvent::Done { .. }))
+                .unwrap();
+            assert!(subagent_done < parent_done, "{events:?}");
+            let receipts = events.iter().filter(|event| matches!(event, AgentEvent::DeliveryAcknowledged { message_id } if message_id == "pending-id")).count();
+            assert_eq!(receipts, usize::from(answer_injection), "{events:?}");
+            assert!(!events.iter().any(|event| matches!(event, AgentEvent::Steered { message_id: Some(id), .. } if id == "pending-id")), "an unanswered delivery must remain recoverable: {events:?}");
+            if !rpc_error || answer_injection {
+                assert!(
+                    events.contains(&AgentEvent::Usage {
+                        input_tokens: u64::from(!rpc_error) + if answer_injection { 3 } else { 0 },
+                        output_tokens: if rpc_error { 0 } else { 2 }
+                            + if answer_injection { 4 } else { 0 },
+                    }),
+                    "{events:?}"
+                );
+            }
+            token.cancel();
+        }
+    }
 }

@@ -401,7 +401,9 @@ impl MessagePart {
 /// - `Error` and `Done{error}` become visible error parts.
 pub fn fold_event_into_parts(out: &mut Vec<MessagePart>, event: &AgentEvent) {
     match event {
-        AgentEvent::SessionStarted { .. } | AgentEvent::Steered { .. } => {
+        AgentEvent::SessionStarted { .. }
+        | AgentEvent::Steered { .. }
+        | AgentEvent::SteerBoundary { .. } => {
             out.clear();
         }
         AgentEvent::TextDelta { text } => {

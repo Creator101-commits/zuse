@@ -3910,6 +3910,9 @@ async fn drive_run(
     // into Streaming. Only a steer (UserMessage) legitimately REOPENS a
     // settled subagent: it announces more work is coming.
     let mut settled_subagents: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut frozen_subagents = HashMap::new();
+    let mut boundary_messages = std::collections::HashSet::new();
+    let mut receipts_before_boundary = HashMap::new();
     // Live subagent sinks, parent tool-use id → transcript doc state.
     let mut subagents: std::collections::HashMap<String, SubagentSink> =
         std::collections::HashMap::new();
@@ -4179,6 +4182,24 @@ async fn drive_run(
             event
         };
 
+        // Normalize boundary-only events for the transcript/UI paths below.
+        // Delivery remains a separate, exact receipt even if the runtime dies.
+        let (event, provisional_boundary) = match event {
+            AgentEvent::SteerBoundary {
+                assistant_message_id,
+                next_assistant_message_id,
+                message_id,
+            } => (
+                AgentEvent::Steered {
+                    assistant_message_id,
+                    next_assistant_message_id,
+                    message_id,
+                },
+                true,
+            ),
+            event => (event, false),
+        };
+
         // Replayed consumption is a receipt, never an assistant boundary.
         if let AgentEvent::DeliveryAcknowledged { message_id } = &event {
             let (confirmed, pending) = lock(&inner.runs)
@@ -4194,6 +4215,9 @@ async fn drive_run(
                 })
                 .unwrap_or((None, false));
             if let Some(confirmed) = confirmed {
+                if !boundary_messages.remove(message_id) {
+                    receipts_before_boundary.insert(message_id.clone(), confirmed.clone());
+                }
                 turn.forget_steer(message_id);
                 if confirmed.fork_history
                     && let Some(session) = lock(&inner.harness_sessions)
@@ -4241,11 +4265,38 @@ async fn drive_run(
             );
             if is_steer {
                 settled_subagents.remove(parent_tool_use_id);
+                frozen_subagents.remove(parent_tool_use_id);
             } else if settled_subagents.contains(parent_tool_use_id)
                 && !subagents.contains_key(parent_tool_use_id)
             {
-                // Straggler after the freeze: chip-only silence (the old
-                // pre-viz behavior), never a reopened doc.
+                // Only a result for an existing tool may amend the frozen
+                // transcript. It never reopens the chip or creates an entry.
+                if let Some(status) = frozen_subagents.get(parent_tool_use_id)
+                    && let Some(host) = inner.doc_host()
+                    && let AgentEvent::ToolResult { id, .. } = sub_event.as_ref()
+                {
+                    let sub_id = subagent_doc_id(&chat_id, parent_tool_use_id);
+                    if let Ok(handle) = host.open(&sub_id) {
+                        let sub_doc = handle.writer();
+                        if let Ok(entries) = sub_doc.read_entries()
+                            && let Some((ix, entry)) = entries.iter().enumerate().rev().find(|(_, entry)|
+                                entry.parts.iter().any(|part| matches!(part, MessagePart::Tool { id: known, .. } if known == id)))
+                        {
+                            let mut parts = entry.parts.clone();
+                            zuse_doc::fold_event_into_parts(&mut parts, sub_event);
+                            persist_tool_result(Some(host.clone()), &chat_id, &entry.id, &mut parts, sub_event);
+                            let writer = SegmentWriter::resume(&sub_doc, ix, render_parts(&entry.parts));
+                            if writer.finish(&render_parts(&parts), *status).is_ok()
+                                && let Ok(entries) = sub_doc.read_entries()
+                                && let Ok(json) = serde_json::to_string(&zuse_doc::join_continuation_entries(entries))
+                            {
+                                host.upload_tool_sidecar(&chat_id, zuse_doc::SidecarPayload {
+                                    part_id: sub_id, output: Some(json), diff: None,
+                                });
+                            }
+                        }
+                    }
+                }
                 continue;
             }
             let sub_id = subagent_doc_id(&chat_id, parent_tool_use_id);
@@ -4260,25 +4311,6 @@ async fn drive_run(
             // on click).
             let done_only = !sink_known && matches!(sub_event.as_ref(), AgentEvent::Done { .. });
             if chip_streaming {
-                if !sink_known && !done_only {
-                    for p in folded.iter_mut() {
-                        if let MessagePart::Tool {
-                            id,
-                            call,
-                            subagent_ref,
-                            ..
-                        } = p
-                            && id == parent_tool_use_id
-                            // Genus gate: a subagent ref may only ever bind
-                            // to a SPAWN call — mis-keyed tagged traffic
-                            // must not turn an ordinary chip into a spawn
-                            // link (empty tab on click).
-                            && call.is_subagent_spawn()
-                        {
-                            *subagent_ref = Some(sub_id.clone());
-                        }
-                    }
-                }
                 zuse_doc::fold_event_into_parts(&mut folded, &event);
                 if !dirty {
                     dirty = true;
@@ -4296,6 +4328,25 @@ async fn drive_run(
                     }
                 });
                 if let Some(sub_doc) = opened {
+                    if chip_streaming {
+                        for p in folded.iter_mut() {
+                            if let MessagePart::Tool {
+                            id,
+                            call,
+                            subagent_ref,
+                            ..
+                        } = p
+                            && id == parent_tool_use_id
+                            // Genus gate: a subagent ref may only ever bind
+                            // to a SPAWN call — mis-keyed tagged traffic
+                            // must not turn an ordinary chip into a spawn
+                            // link (empty tab on click).
+                            && call.is_subagent_spawn()
+                            {
+                                *subagent_ref = Some(sub_id.clone());
+                            }
+                        }
+                    }
                     subagents.insert(
                         parent_tool_use_id.clone(),
                         SubagentSink {
@@ -4381,6 +4432,7 @@ async fn drive_run(
                         } => MessageStatus::Aborted,
                         _ => MessageStatus::Complete,
                     };
+                    frozen_subagents.insert(parent_tool_use_id.clone(), status);
                     let sink = subagents.remove(parent_tool_use_id).expect("checked");
                     inner.set_running_subagents(&chat_id, subagents.len());
                     let doc_id = sink.doc_id.clone();
@@ -4698,22 +4750,36 @@ async fn drive_run(
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
             inner.set_status(&chat_id, SessionStatus::Working, true);
-            // The boundary confirms delivery of the steer it names — or the
-            // oldest accepted steer when the driver does not say — and retires
-            // its at-least-once ledger entry.
+            // Boundary-only events select the owner without consuming its
+            // receipt. Legacy Steered events still confirm the named steer
+            // (or the oldest entry for drivers without identities).
             let confirmed = lock(&inner.runs)
                 .get_mut(&chat_id)
                 .filter(|h| h.run_id == run_id)
                 .and_then(|h| {
-                    let confirmed =
-                        take_confirmed_steer(&mut lock(&h.routed_steers), message_id.as_deref());
+                    let confirmed = if provisional_boundary {
+                        let ledger = lock(&h.routed_steers);
+                        message_id.as_ref().and_then(|id| {
+                            let pending =
+                                ledger.iter().find(|steer| &steer.message_id == id).cloned();
+                            if pending.is_some() {
+                                boundary_messages.insert(id.clone());
+                            }
+                            pending.or_else(|| receipts_before_boundary.remove(id))
+                        })
+                    } else {
+                        take_confirmed_steer(&mut lock(&h.routed_steers), message_id.as_deref())
+                    };
                     if let Some(confirmed) = &confirmed {
                         h.active_message = Some(confirmed.message_id.clone());
                     }
                     confirmed
                 });
             if let Some(confirmed) = confirmed.as_ref() {
-                if let Some(previous) = execution_message.take() {
+                if let Some(previous) = execution_message
+                    .take()
+                    .filter(|previous| previous != &confirmed.message_id)
+                {
                     if !inner.observe_execution(
                         &chat_id,
                         &previous,
@@ -4750,9 +4816,12 @@ async fn drive_run(
             // this runtime's provider session.
             if let Some(steer) = &confirmed {
                 source_message_id = steer.message_id.clone();
-                turn.forget_steer(&steer.message_id);
+                if !provisional_boundary {
+                    turn.forget_steer(&steer.message_id);
+                }
             }
-            if confirmed.is_some_and(|steer| steer.fork_history)
+            if !provisional_boundary
+                && confirmed.is_some_and(|steer| steer.fork_history)
                 && let Some(session) = lock(&inner.harness_sessions)
                     .get(&chat_id)
                     .map(|known| known.session_id.clone())
@@ -4873,9 +4942,18 @@ async fn drive_run(
                 {
                     handle.active_message = None;
                 }
+                let delivery_pending = lock(&inner.runs)
+                    .get(&chat_id)
+                    .filter(|handle| handle.run_id == run_id)
+                    .is_some_and(|handle| {
+                        lock(&handle.routed_steers)
+                            .iter()
+                            .any(|steer| steer.message_id == message)
+                    });
                 let state = match status {
-                    DoneStatus::Completed => crate::execution_progress::State::Completed,
                     DoneStatus::Interrupted => crate::execution_progress::State::Cancelled,
+                    _ if delivery_pending => crate::execution_progress::State::OutcomeUnknown,
+                    DoneStatus::Completed => crate::execution_progress::State::Completed,
                     DoneStatus::Errored => crate::execution_progress::State::Failed,
                 };
                 if !inner.observe_execution(&chat_id, &message, Some(entry_id.clone()), state) {

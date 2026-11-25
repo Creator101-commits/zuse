@@ -6,6 +6,9 @@
 //! window pixels) go through the window's own input dispatch, so hover and
 //! click take the same path as a real pointer; each prints `ok` once drawn.
 //! Close the window to exit.
+#[path = "support/fixture_commands.rs"]
+mod fixture_commands;
+
 use gpui::{AppContext, Bounds, WindowBounds, WindowOptions, px, size};
 use serde_json::json;
 use std::sync::Arc;
@@ -322,12 +325,11 @@ fn main() -> anyhow::Result<()> {
                     }
                     tick += 1;
                     while let Ok(line) = commands.try_recv() {
-                        let words: Vec<&str> = line.split_whitespace().collect();
                         // `capture PATH` renders the window to a PNG — a real
                         // capture of the compiled fixture, no screen-recording
                         // permission needed.
-                        if words.first() == Some(&"capture") && words.len() == 2 {
-                            let path = words[1].to_string();
+                        if let Some(path) = fixture_commands::capture_path(&line) {
+                            let path = path.to_string();
                             let saved = gpui::AnyWindowHandle::from(window).update(
                                 cx,
                                 |_, w, _| -> anyhow::Result<()> {
@@ -340,6 +342,7 @@ fn main() -> anyhow::Result<()> {
                             }
                             continue;
                         }
+                        let words: Vec<&str> = line.split_whitespace().collect();
                         // `scroll X Y DY` dispatches a wheel event so long
                         // pages (settings) can be brought to a row.
                         if words.first() == Some(&"scroll") && words.len() == 4 {

@@ -167,13 +167,17 @@ fn summarize(label: &str, events: &[AgentEvent], check_banana: bool) {
     println!("dones: {dones:?}");
     println!("any Subagent parent was root/sidekick: {bad_parent}");
     if check_banana {
-        // Steered must precede the first text containing BANANA.
+        // A transcript boundary must precede the first text containing BANANA.
         let mut text = String::new();
-        let mut steered_at = None;
+        let mut boundary_at = None;
         let mut banana_at = None;
         for (i, e) in events.iter().enumerate() {
             match e {
-                AgentEvent::Steered { .. } if steered_at.is_none() => steered_at = Some(i),
+                AgentEvent::Steered { .. } | AgentEvent::SteerBoundary { .. }
+                    if boundary_at.is_none() =>
+                {
+                    boundary_at = Some(i)
+                }
                 AgentEvent::TextDelta { text: delta } => {
                     text.push_str(delta);
                     if banana_at.is_none() && text.contains("BANANA") {
@@ -183,12 +187,12 @@ fn summarize(label: &str, events: &[AgentEvent], check_banana: bool) {
                 _ => {}
             }
         }
-        let preceded = match (steered_at, banana_at) {
+        let preceded = match (boundary_at, banana_at) {
             (Some(s), Some(b)) => s < b,
             _ => false,
         };
         println!(
-            "BANANA seen: {}; Steered preceded BANANA: {preceded}",
+            "BANANA seen: {}; boundary preceded BANANA: {preceded}",
             banana_at.is_some()
         );
     }
